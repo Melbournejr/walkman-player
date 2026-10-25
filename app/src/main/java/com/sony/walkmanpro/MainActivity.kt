@@ -3,6 +3,7 @@
 import android.Manifest
 import android.content.ContentUris
 import android.content.Context
+import android.content.pm.PackageManager
 import android.media.MediaPlayer
 import android.media.audiofx.BassBoost
 import android.media.audiofx.Equalizer
@@ -10,6 +11,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -38,7 +40,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 data class AudioTrack(
     val id: Long,
@@ -46,7 +52,7 @@ data class AudioTrack(
     val artist: String,
     val duration: Long,
     val uri: Uri,
-    val path: String
+    val folderInfo: String
 )
 
 enum class WalkmanSkin(val label: String) {
@@ -66,138 +72,177 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 WalkmanProRoot(
-                    onScanStorage = { minSec -> scanMusicFiltered(this, minSec) },
-                    onPlayTrack = { track -> playTrack(this, track) },
-                    onTogglePlay = { togglePlay() },
-                    onSeek = { delta -> seekBy(delta) },
-                    onSetBass = { level -> setMegaBass(level) },
-                    onSetEqBand = { band, gain -> setEqBand(band, gain) },
-                    getIsPlaying = { mediaPlayer?.isPlaying == true },
-                    getPosition = { mediaPlayer?.currentPosition ?: 0 },
-                    getDuration = { mediaPlayer?.duration ?: 1 }
+                    onScanStorage = { minSec -> scanMusicSafe(this@MainActivity, minSec) },
+                    onPlayTrack = { track -> playTrackSafe(this@MainActivity, track) },
+                    onTogglePlay = { togglePlaySafe() },
+                    onSetBass = { level -> setMegaBassSafe(level) },
+                    onSetEqBand = { band, gain -> setEqBandSafe(band, gain) },
+                    getIsPlaying = {
+                        try { mediaPlayer?.isPlaying == true } catch (_: Exception) { false }
+                    },
+                    getPosition = {
+                        try { mediaPlayer?.currentPosition ?: 0 } catch (_: Exception) { 0 }
+                    },
+                    getDuration = {
+                        try { (mediaPlayer?.duration ?: 1).coerceAtLeast(1) } catch (_: Exception) { 1 }
+                    }
                 )
             }
         }
     }
 
-    private fun scanMusicFiltered(context: Context, minDurationSec: Int): Pair<List<AudioTrack>, Int> {
+    // Quét nhạc an toàn tuyệt đối cho Android 8 -> Android 14 (Không dùng cột DATA gây crash)
+    private fun scanMusicSafe(context: Context, minDurationSec: Int): Pair<List<AudioTrack>, Int> {
         val validTracks = mutableListOf<AudioTrack>()
         var skippedCount = 0
 
-        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
-        } else {
-            MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-        }
+        try {
+            val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+            } else {
+                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+            }
 
-        val projection = arrayOf(
-            MediaStore.Audio.Media._ID,
-            MediaStore.Audio.Media.TITLE,
-            MediaStore.Audio.Media.ARTIST,
-            MediaStore.Audio.Media.DURATION,
-            MediaStore.Audio.Media.DATA,
-            MediaStore.Audio.Media.IS_MUSIC,
-            MediaStore.Audio.Media.IS_RINGTONE,
-            MediaStore.Audio.Media.IS_ALARM,
-            MediaStore.Audio.Media.IS_NOTIFICATION
-        )
+            val projection = mutableListOf(
+                MediaStore.Audio.Media._ID,
+                MediaStore.Audio.Media.TITLE,
+                MediaStore.Audio.Media.ARTIST,
+                MediaStore.Audio.Media.DURATION,
+                MediaStore.Audio.Media.DISPLAY_NAME
+            ).apply {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    add(MediaStore.Audio.Media.RELATIVE_PATH)
+                }
+            }.toTypedArray()
 
-        val selection = " != 0 AND " +
-                " == 0 AND " +
-                " == 0 AND " +
-                " == 0"
+            val excludedKeywords = listOf(
+                "record", "call", "voice", "ghi am", "ghi_am", "cuoc goi",
+                "ringtone", "notification", "alarm", "whatsapp", "telegram",
+                "zalo", "sound_recorder", "miui/sound_recorder", "audiorecorder"
+            )
 
-        val excludedKeywords = listOf(
-            "record", "call", "voice", "ghi am", "ghi_am", "cuoc goi",
-            "ringtone", "notification", "alarms", "whatsapp audio", "telegram", "zalo", "sound_recorder"
-        )
+            context.contentResolver.query(
+                collection,
+                projection,
+                null,
+                null,
+                " ASC"
+            )?.use { cursor ->
+                val idCol = cursor.getColumnIndex(MediaStore.Audio.Media._ID)
+                val titleCol = cursor.getColumnIndex(MediaStore.Audio.Media.TITLE)
+                val artistCol = cursor.getColumnIndex(MediaStore.Audio.Media.ARTIST)
+                val durCol = cursor.getColumnIndex(MediaStore.Audio.Media.DURATION)
+                val nameCol = cursor.getColumnIndex(MediaStore.Audio.Media.DISPLAY_NAME)
+                val relPathCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    cursor.getColumnIndex(MediaStore.Audio.Media.RELATIVE_PATH)
+                } else -1
 
-        context.contentResolver.query(collection, projection, selection, null, " ASC")?.use { cursor ->
-            val idCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
-            val titleCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
-            val artistCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
-            val durCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
-            val dataCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATA)
+                while (cursor.moveToNext()) {
+                    if (idCol < 0) continue
+                    val id = cursor.getLong(idCol)
+                    val title = if (titleCol >= 0) cursor.getString(titleCol) ?: "Unknown Track" else "Unknown Track"
+                    val artist = if (artistCol >= 0) cursor.getString(artistCol) ?: "Walkman Audio" else "Walkman Audio"
+                    val duration = if (durCol >= 0) cursor.getLong(durCol) else 0L
+                    val displayName = if (nameCol >= 0) cursor.getString(nameCol) ?: "" else ""
+                    val relPath = if (relPathCol >= 0) cursor.getString(relPathCol) ?: "" else ""
 
-            while (cursor.moveToNext()) {
-                val id = cursor.getLong(idCol)
-                val title = cursor.getString(titleCol) ?: "Unknown"
-                val artist = cursor.getString(artistCol) ?: "Unknown Artist"
-                val duration = cursor.getLong(durCol)
-                val path = (cursor.getString(dataCol) ?: "").lowercase()
+                    val checkText = "  ".lowercase()
 
-                val isRecordingOrSystem = excludedKeywords.any { kw ->
-                    path.contains(kw) || title.lowercase().contains(kw)
-                } || path.endsWith(".amr") || path.endsWith(".3gp")
+                    val isSystemOrRecording = excludedKeywords.any { kw -> checkText.contains(kw) } ||
+                            displayName.lowercase().endsWith(".amr") ||
+                            displayName.lowercase().endsWith(".3gp") ||
+                            displayName.lowercase().endsWith(".ogg")
 
-                val isTooShort = duration < (minDurationSec * 1000L)
+                    val isTooShort = duration < (minDurationSec * 1000L)
 
-                if (isRecordingOrSystem || isTooShort) {
-                    skippedCount++
-                } else {
-                    val uri = ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id)
-                    validTracks.add(AudioTrack(id, title, artist, duration, uri, path))
+                    if (isSystemOrRecording || isTooShort) {
+                        skippedCount++
+                    } else {
+                        val contentUri = ContentUris.withAppendedId(
+                            MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                            id
+                        )
+                        validTracks.add(
+                            AudioTrack(
+                                id = id,
+                                title = title,
+                                artist = if (artist == "<unknown>") "Walkman Artist" else artist,
+                                duration = duration,
+                                uri = contentUri,
+                                folderInfo = relPath.ifEmpty { "Music" }
+                            )
+                        )
+                    }
                 }
             }
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
         return Pair(validTracks, skippedCount)
     }
 
-    private fun playTrack(context: Context, track: AudioTrack) {
-        mediaPlayer?.release()
-        mediaPlayer = MediaPlayer().apply {
-            setDataSource(context, track.uri)
-            prepare()
-            start()
+    private fun playTrackSafe(context: Context, track: AudioTrack) {
+        try {
+            mediaPlayer?.reset()
+            mediaPlayer?.release()
+            mediaPlayer = MediaPlayer().apply {
+                setDataSource(context, track.uri)
+                prepare()
+                start()
+            }
+            setupDspSafe(mediaPlayer!!.audioSessionId)
+        } catch (e: Exception) {
+            Toast.makeText(context, "Không thể phát file này: ", Toast.LENGTH_SHORT).show()
         }
-        setupDsp(mediaPlayer!!.audioSessionId)
     }
 
-    private fun setupDsp(sessionId: Int) {
+    private fun setupDspSafe(sessionId: Int) {
         try {
             bassBoost?.release()
             equalizer?.release()
-            bassBoost = BassBoost(0, sessionId).apply { enabled = true }
-            equalizer = Equalizer(0, sessionId).apply { enabled = true }
+            if (sessionId != 0) {
+                bassBoost = BassBoost(0, sessionId).apply { enabled = true }
+                equalizer = Equalizer(0, sessionId).apply { enabled = true }
+            }
         } catch (_: Exception) {}
     }
 
-    private fun setMegaBass(level: Float) {
+    private fun setMegaBassSafe(level: Float) {
         try {
             bassBoost?.setStrength((level * 1000).toInt().toShort().coerceIn(0, 1000))
         } catch (_: Exception) {}
     }
 
-    private fun setEqBand(bandIndex: Int, gainDb: Float) {
+    private fun setEqBandSafe(bandIndex: Int, gainDb: Float) {
         try {
             equalizer?.let { eq ->
                 if (bandIndex < eq.numberOfBands) {
-                    val mB = (gainDb * 100).toInt().toShort()
-                    eq.setBandLevel(bandIndex.toShort(), mB)
+                    val range = eq.bandLevelRange
+                    val targetMb = (gainDb * 100).toInt().coerceIn(range[0].toInt(), range[1].toInt()).toShort()
+                    eq.setBandLevel(bandIndex.toShort(), targetMb)
                 }
             }
         } catch (_: Exception) {}
     }
 
-    private fun togglePlay(): Boolean {
-        mediaPlayer?.let {
-            if (it.isPlaying) it.pause() else it.start()
-            return it.isPlaying
-        }
-        return false
-    }
-
-    private fun seekBy(deltaMs: Int) {
-        mediaPlayer?.let {
-            it.seekTo((it.currentPosition + deltaMs).coerceIn(0, it.duration))
+    private fun togglePlaySafe(): Boolean {
+        return try {
+            mediaPlayer?.let {
+                if (it.isPlaying) it.pause() else it.start()
+                it.isPlaying
+            } ?: false
+        } catch (_: Exception) {
+            false
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        bassBoost?.release()
-        equalizer?.release()
-        mediaPlayer?.release()
+        try {
+            bassBoost?.release()
+            equalizer?.release()
+            mediaPlayer?.release()
+        } catch (_: Exception) {}
     }
 }
 
@@ -206,38 +251,58 @@ fun WalkmanProRoot(
     onScanStorage: (Int) -> Pair<List<AudioTrack>, Int>,
     onPlayTrack: (AudioTrack) -> Unit,
     onTogglePlay: () -> Boolean,
-    onSeek: (Int) -> Unit,
     onSetBass: (Float) -> Unit,
     onSetEqBand: (Int, Float) -> Unit,
     getIsPlaying: () -> Boolean,
     getPosition: () -> Int,
     getDuration: () -> Int
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
     var activeTab by remember { mutableStateOf(0) }
     var currentSkin by remember { mutableStateOf(WalkmanSkin.W995I) }
     var playlist by remember { mutableStateOf<List<AudioTrack>>(emptyList()) }
     var skippedFilesCount by remember { mutableStateOf(0) }
+    var isScanning by remember { mutableStateOf(false) }
     var currentIndex by remember { mutableStateOf(0) }
     var isPlaying by remember { mutableStateOf(false) }
     var posMs by remember { mutableStateOf(0) }
     var durMs by remember { mutableStateOf(1) }
     var megaBass by remember { mutableStateOf(0.6f) }
 
+    val requiredPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        Manifest.permission.READ_MEDIA_AUDIO
+    } else {
+        Manifest.permission.READ_EXTERNAL_STORAGE
+    }
+
+    fun triggerSafeScan() {
+        if (isScanning) return
+        isScanning = true
+        scope.launch(Dispatchers.IO) {
+            val result = onScanStorage(30)
+            withContext(Dispatchers.Main) {
+                playlist = result.first
+                skippedFilesCount = result.second
+                isScanning = false
+            }
+        }
+    }
+
     val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
-            val res = onScanStorage(30)
-            playlist = res.first
-            skippedFilesCount = res.second
+            triggerSafeScan()
+        } else {
+            Toast.makeText(context, "Cần cấp quyền bộ nhớ để đọc file nhạc!", Toast.LENGTH_SHORT).show()
         }
     }
 
     LaunchedEffect(Unit) {
-        val perm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            Manifest.permission.READ_MEDIA_AUDIO
-        } else {
-            Manifest.permission.READ_EXTERNAL_STORAGE
+        val hasPerm = ContextCompat.checkSelfPermission(context, requiredPermission) == PackageManager.PERMISSION_GRANTED
+        if (hasPerm) {
+            triggerSafeScan()
         }
-        permLauncher.launch(perm)
     }
 
     LaunchedEffect(isPlaying) {
@@ -247,7 +312,7 @@ fun WalkmanProRoot(
                 posMs = getPosition()
                 durMs = getDuration().coerceAtLeast(1)
             }
-            delay(250)
+            delay(300)
         }
     }
 
@@ -256,7 +321,10 @@ fun WalkmanProRoot(
     Scaffold(
         topBar = {
             Row(
-                modifier = Modifier.fillMaxWidth().background(Color(0xFF0A0F1D)).padding(10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF0A0F1D))
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
                 WalkmanSkin.values().forEach { skin ->
@@ -279,13 +347,13 @@ fun WalkmanProRoot(
                     selected = activeTab == 0,
                     onClick = { activeTab = 0 },
                     icon = { Icon(Icons.Default.Album, null) },
-                    label = { Text("Máy phát") }
+                    label = { Text("Walkman") }
                 )
                 NavigationBarItem(
                     selected = activeTab == 1,
                     onClick = { activeTab = 1 },
                     icon = { Icon(Icons.Default.LibraryMusic, null) },
-                    label = { Text("Quét Nhạc ()") }
+                    label = { Text("Nhạc ()") }
                 )
                 NavigationBarItem(
                     selected = activeTab == 2,
@@ -306,12 +374,21 @@ fun WalkmanProRoot(
             when (activeTab) {
                 0 -> CleanWalkmanPlayerView(
                     skin = currentSkin,
-                    trackTitle = currentTrack?.title ?: "CHƯA CHỌN BÀI HÁT",
-                    trackArtist = currentTrack?.artist ?: "Bấm Tab 'Quét Nhạc' để nạp nhạc",
+                    trackTitle = currentTrack?.title ?: "CHƯA CÓ BÀI HÁT",
+                    trackArtist = currentTrack?.artist ?: "Vào tab 'Nhạc' để quét bài hát",
                     isPlaying = isPlaying,
                     posMs = posMs,
                     durMs = durMs,
-                    onPlayPause = { isPlaying = onTogglePlay() },
+                    onPlayPause = {
+                        if (playlist.isEmpty()) {
+                            permLauncher.launch(requiredPermission)
+                        } else if (!isPlaying && posMs == 0 && currentTrack != null) {
+                            onPlayTrack(currentTrack)
+                            isPlaying = true
+                        } else {
+                            isPlaying = onTogglePlay()
+                        }
+                    },
                     onPrev = {
                         if (playlist.isNotEmpty()) {
                             currentIndex = (currentIndex - 1 + playlist.size) % playlist.size
@@ -330,11 +407,11 @@ fun WalkmanProRoot(
                 1 -> SmartScannerLibraryView(
                     tracks = playlist,
                     skippedCount = skippedFilesCount,
+                    isScanning = isScanning,
                     currentIndex = currentIndex,
                     onRescan = {
-                        val res = onScanStorage(30)
-                        playlist = res.first
-                        skippedFilesCount = res.second
+                        val hasPerm = ContextCompat.checkSelfPermission(context, requiredPermission) == PackageManager.PERMISSION_GRANTED
+                        if (hasPerm) triggerSafeScan() else permLauncher.launch(requiredPermission)
                     },
                     onSelectTrack = { idx ->
                         currentIndex = idx
@@ -387,11 +464,11 @@ fun CleanWalkmanPlayerView(
         modifier = Modifier
             .width(330.dp)
             .background(Color(0xFF161922), RoundedCornerShape(28.dp))
-            .border(3.dp, accentColor.copy(alpha = 0.7f), RoundedCornerShape(28.dp))
+            .border(3.dp, accentColor.copy(alpha = 0.75f), RoundedCornerShape(28.dp))
             .padding(18.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text("SONY ERICSSON", fontSize = 10.sp, letterSpacing = 3.sp, color = Color.Gray, fontWeight = FontWeight.Bold)
+        Text("SONY ERICSSON WALKMAN", fontSize = 10.sp, letterSpacing = 2.sp, color = Color.Gray, fontWeight = FontWeight.Bold)
         Spacer(modifier = Modifier.height(8.dp))
 
         Column(
@@ -406,7 +483,7 @@ fun CleanWalkmanPlayerView(
         ) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(skin.label, color = accentColor, fontWeight = FontWeight.Black, fontSize = 12.sp)
-                Text("CLEAR AUDIO", color = Color.LightGray, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                Text("MEGABASS DSP", color = Color.LightGray, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
             }
 
             Canvas(modifier = Modifier.size(110.dp)) {
@@ -419,11 +496,12 @@ fun CleanWalkmanPlayerView(
 
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(trackTitle, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(trackArtist, color = accentColor, fontSize = 11.sp, maxLines = 1)
+                Text(trackArtist, color = accentColor, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
 
+            val progressVal = (posMs.toFloat() / durMs.toFloat()).coerceIn(0f, 1f)
             LinearProgressIndicator(
-                progress = (posMs.toFloat() / durMs.toFloat()).coerceIn(0f, 1f),
+                progress = { progressVal },
                 modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp)),
                 color = accentColor,
                 trackColor = Color.DarkGray
@@ -463,6 +541,7 @@ fun CleanWalkmanPlayerView(
 fun SmartScannerLibraryView(
     tracks: List<AudioTrack>,
     skippedCount: Int,
+    isScanning: Boolean,
     currentIndex: Int,
     onRescan: () -> Unit,
     onSelectTrack: (Int) -> Unit
@@ -474,15 +553,20 @@ fun SmartScannerLibraryView(
         ) {
             Column(modifier = Modifier.padding(14.dp)) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text("QUÉT NHẠC THÔNG MINH", fontWeight = FontWeight.Black, color = Color(0xFFFF6600), fontSize = 14.sp)
-                        Text("Đã tự động bỏ qua  file hệ thống & ghi âm", fontSize = 11.sp, color = Color.LightGray)
+                        Text(
+                            if (isScanning) "Đang quét và lọc file..."
+                            else "Tìm thấy  bài • Đã lọc bỏ  file hệ thống/ghi âm",
+                            fontSize = 11.sp,
+                            color = Color.LightGray
+                        )
                     }
                     Button(
                         onClick = onRescan,
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5500))
                     ) {
-                        Text("QUÉT LẠI", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text("QUÉT NHẠC", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -490,24 +574,35 @@ fun SmartScannerLibraryView(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            itemsIndexed(tracks) { index, track ->
-                val isSelected = index == currentIndex
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(if (isSelected) Color(0xFF291A14) else Color(0xFF111622), RoundedCornerShape(10.dp))
-                        .border(1.dp, if (isSelected) Color(0xFFFF5500) else Color.Transparent, RoundedCornerShape(10.dp))
-                        .clickable { onSelectTrack(index) }
-                        .padding(12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(track.title, fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp, maxLines = 1)
-                        Text(track.artist, color = Color.Gray, fontSize = 11.sp, maxLines = 1)
+        if (tracks.isEmpty() && !isScanning) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("Bấm nút 'QUÉT NHẠC' ở trên để nạp bài hát trong máy", color = Color.Gray, fontSize = 13.sp)
+            }
+        } else {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                itemsIndexed(tracks) { index, track ->
+                    val isSelected = index == currentIndex
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(if (isSelected) Color(0xFF291A14) else Color(0xFF111622), RoundedCornerShape(10.dp))
+                            .border(1.dp, if (isSelected) Color(0xFFFF5500) else Color.Transparent, RoundedCornerShape(10.dp))
+                            .clickable { onSelectTrack(index) }
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(track.title, fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(track.artist, color = Color.Gray, fontSize = 11.sp, maxLines = 1)
+                        }
+                        Text(
+                            ":",
+                            color = Color.LightGray,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
                     }
-                    Text(":", color = Color.LightGray, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                 }
             }
         }

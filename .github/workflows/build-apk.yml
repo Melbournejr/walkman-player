@@ -1,4 +1,4 @@
-﻿name: Build Walkman Pro APK
+name: Build Walkman Pro APK
 
 on:
   push:
@@ -24,7 +24,9 @@ jobs:
           gradle-version: '8.4'
 
       - name: Assemble Debug APK
-        run: gradle assembleDebug
+        env:
+          GRADLE_OPTS: -Dorg.gradle.jvmargs="-Xmx4096m -XX:MaxMetaspaceSize=1024m"
+        run: gradle assembleDebug --no-daemon
 
       - name: Upload Walkman Pro APK
         uses: actions/upload-artifact@v4

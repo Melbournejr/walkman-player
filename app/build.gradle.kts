@@ -11,8 +11,8 @@ android {
         applicationId = "com.sony.walkmanpro"
         minSdk = 26
         targetSdk = 34
-        versionCode = 60
-        versionName = "6.0-WM1ZM2-Signature"
+        versionCode = 70
+        versionName = "7.0-FiioLyricsAndRealDSP"
     }
 
     compileOptions {
@@ -26,6 +26,7 @@ android {
 
 dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
+    implementation("androidx.media:media:1.7.0")
     implementation("androidx.activity:activity-compose:1.8.2")
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("androidx.media3:media3-exoplayer:1.2.1")

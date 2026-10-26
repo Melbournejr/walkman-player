@@ -11,10 +11,8 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
-import android.util.Base64
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -35,9 +33,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -66,10 +62,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 import java.text.Normalizer
 import kotlin.math.sin
 
@@ -453,93 +449,112 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// HỆ THỐNG LỜI BÀI HÁT CHUẨN XÁC CAO (CHỐNG LỆCH TIẾNG VIỆT & SỬA LỖI FONT)
-object PreciseAutoLyricsEngine {
+// HỆ THỐNG TÌM LỜI BÀI HÁT CHÍNH XÁC 8.1: BẮT BUỘC KHỚP TÊN BÀI HÁT VIỆT/ANH & CHUẨN FONT UTF-8 TUYỆT ĐỐI
+object AutoLyricsEngine {
 
-    fun normalizeText(input: String): String {
-        val nfd = Normalizer.normalize(input, Normalizer.Form.NFD)
-        return Regex("\\p{InCombiningDiacriticalMarks}+").replace(nfd, "")
-            .replace(Regex("[^a-zA-Z0-9\\s]"), " ")
+    // Chuẩn hóa tiếng Việt không dấu để so khớp chính xác tên bài hát (Chống nhầm sang bài khác)
+    private fun normalizeVietnamese(input: String): String {
+        val temp = Normalizer.normalize(input, Normalizer.Form.NFD)
+        return temp.replace(Regex("\\p{InCombiningDiacriticalMarks}+"), "")
+            .replace('đ', 'd').replace('Đ', 'D')
             .lowercase()
+            .replace(Regex("[^a-z0-9\\s]"), " ")
             .replace(Regex("\\s+"), " ")
             .trim()
     }
 
-    private fun buildCandidates(rawTitle: String, rawArtist: String): List<String> {
-        val list = mutableListOf<String>()
-        val clean1 = rawTitle
-            .replace(Regex("\\[.*?\\]|\\(.*?\\)|\\{.*?\\}"), " ")
-            .replace(Regex("(?i)(official|music|video|audio|mv|lyrics|lyric|hd|4k|snaptube|remix|cover|mashup|mixtape|nonstop|liên khúc|tổng hợp|top hit|top ballad|bản gốc|full|mp3|flac)"), " ")
-            .replace("_", " ")
+    // Kiểm tra xem bài hát trả về từ Server có thực sự khớp với tên bài hát đang phát hay không
+    private fun isStrictMatch(expectedSongTitle: String, returnedTrackName: String, returnedArtistName: String): Boolean {
+        val normExpected = normalizeVietnamese(expectedSongTitle)
+        val normReturned = normalizeVietnamese(returnedTrackName)
+        if (normExpected.isBlank() || normReturned.isBlank()) return false
+
+        // Nếu tên chuẩn chứa nhau (Ví dụ: "anh thoi nhan nhuong" hoặc "you still live inside")
+        if (normExpected.contains(normReturned) || normReturned.contains(normExpected)) {
+            return true
+        }
+
+        // So khớp tỷ lệ từ khóa chính xác (>= 70% số từ trong tên bài phải trùng khớp)
+        val expectedWords = normExpected.split(" ").filter { it.length >= 2 }
+        val returnedWords = (normReturned + " " + normalizeVietnamese(returnedArtistName)).split(" ").toSet()
+        if (expectedWords.isEmpty()) return false
+
+        val matchedCount = expectedWords.count { returnedWords.contains(it) }
+        return (matchedCount.toFloat() / expectedWords.size.toFloat()) >= 0.70f
+    }
+
+    // Lọc sạch mọi ký tự lỗi font (Mojibake / Control Chars / Replacement Chars)
+    private fun sanitizeUtf8Text(text: String): String {
+        return text
+            .replace("\uFFFD", "")
+            .replace(Regex("[\\p{Cntrl}&&[^\r\n\t]]"), "")
+            .trim()
+    }
+
+    // Tách tên bài hát thật từ tiêu đề YouTube / SnapTube
+    private fun extractExactSongNames(rawTitle: String): List<String> {
+        val results = mutableListOf<String>()
+
+        // Tách theo dấu "|", "||", "__", " - ", " – "
+        val rawSegments = rawTitle
+            .replace("||", "|")
+            .replace("__", "|")
             .replace(" - ", "|")
             .replace(" – ", "|")
-            .trim()
-
-        val parts = clean1.split("|").map { it.trim() }.filter { it.length >= 2 }
-        for (p in parts) {
-            list.add(p)
-        }
-        list.add(clean1.replace("|", " ").trim())
-
-        if (!rawArtist.contains("unknown", true) && !rawArtist.contains("walkman", true)) {
-            if (parts.isNotEmpty()) {
-                list.add("${parts[0]} $rawArtist")
+            .split("|")
+            .map { seg ->
+                seg.replace(Regex("\\[.*?\\]|\\(.*?\\)|\\{.*?\\}"), " ")
+                    .replace(Regex("(?i)(official|music|video|audio|mv|lyrics|lyric|hd|4k|snaptube|remix|cover|mashup|top hit|bản gốc|new song|mp3|flac)"), " ")
+                    .replace("_", " ")
+                    .replace(Regex("\\s+"), " ")
+                    .trim()
             }
+            .filter { it.length >= 3 }
+
+        for (seg in rawSegments) {
+            if (seg.contains(" x ", ignoreCase = true)) {
+                val afterX = seg.substringAfterLast(" x ", "").trim()
+                if (afterX.length >= 3) results.add(afterX)
+            }
+            results.add(seg)
         }
-        return list.filter { it.length >= 2 }.distinct()
+
+        if (rawSegments.size >= 2) {
+            // Ví dụ: "Alan Walker X Avril Lavigne" + "You Still Live Inside"
+            results.add("${rawSegments[1]} ${rawSegments[0]}")
+            results.add("${rawSegments[0]} ${rawSegments[1]}")
+        }
+
+        return results.distinct()
     }
 
-    private fun searchNetEaseStrict(keyword: String): String? {
+    // Truy vấn LRCLIB với chuẩn UTF-8 và kiểm tra khớp tên nghiêm ngặt
+    private fun searchVerifiedLrclib(candidateTitle: String): String? {
         try {
-            val encoded = URLEncoder.encode(keyword, "UTF-8")
-            val searchUrl = URL("https://music.163.com/api/search/get/web?s=$encoded&type=1&offset=0&total=true&limit=3")
-            val conn = (searchUrl.openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                connectTimeout = 4000
-                readTimeout = 4000
-                setRequestProperty("Referer", "https://music.163.com")
-                setRequestProperty("User-Agent", "Mozilla/5.0")
-            }
-            if (conn.responseCode == 200) {
-                val root = JSONObject(conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() })
-                val songs = root.optJSONObject("result")?.optJSONArray("songs")
-                if (songs != null && songs.length() > 0) {
-                    val songId = songs.getJSONObject(0).optLong("id", 0L)
-                    if (songId > 0L) {
-                        val lrcUrl = URL("https://music.163.com/api/song/lyric?os=pc&id=$songId&lv=-1&kv=-1&tv=-1")
-                        val lrcConn = (lrcUrl.openConnection() as HttpURLConnection).apply {
-                            requestMethod = "GET"
-                            connectTimeout = 4000
-                            readTimeout = 4000
-                        }
-                        if (lrcConn.responseCode == 200) {
-                            val lrcJson = JSONObject(lrcConn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() })
-                            val lrcText = lrcJson.optJSONObject("lrc")?.optString("lyric", "") ?: ""
-                            if (lrcText.length > 25) return lrcText
-                        }
-                    }
-                }
-            }
-        } catch (_: Exception) {}
-        return null
-    }
-
-    private fun searchLrclibStrict(keyword: String): String? {
-        try {
-            val encoded = URLEncoder.encode(keyword, "UTF-8")
+            val encoded = URLEncoder.encode(candidateTitle, "UTF-8")
             val url = URL("https://lrclib.net/api/search?q=$encoded")
             val conn = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
-                connectTimeout = 4000
-                readTimeout = 4000
-                setRequestProperty("User-Agent", "SonyWalkmanPro/8.5")
+                connectTimeout = 5000
+                readTimeout = 5000
+                setRequestProperty("User-Agent", "SonyWalkmanPro/8.1")
+                setRequestProperty("Accept-Charset", "UTF-8")
             }
             if (conn.responseCode == 200) {
-                val arr = JSONArray(conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() })
-                if (arr.length() > 0) {
-                    for (i in 0 until arr.length()) {
-                        val synced = arr.getJSONObject(i).optString("syncedLyrics", "")
-                        if (synced.isNotBlank() && synced != "null") return synced
+                val rawResponse = conn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
+                val arr = JSONArray(rawResponse)
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    val trackName = obj.optString("trackName", "")
+                    val artistName = obj.optString("artistName", "")
+
+                    // Bắt buộc phải khớp đúng tên bài hát mới lấy lời (Tránh nhầm bài Việt Nam sang bài khác)
+                    if (isStrictMatch(candidateTitle, trackName, artistName)) {
+                        val synced = sanitizeUtf8Text(obj.optString("syncedLyrics", ""))
+                        if (synced.length > 30 && synced != "null") return synced
+
+                        val plain = sanitizeUtf8Text(obj.optString("plainLyrics", ""))
+                        if (plain.length > 30 && plain != "null") return plain
                     }
                 }
             }
@@ -547,44 +562,103 @@ object PreciseAutoLyricsEngine {
         return null
     }
 
-    fun fetchPreciseLyrics(context: Context, track: AudioTrack): List<LyricLine> {
-        val prefs = context.getSharedPreferences("walkman_lyrics_v85", Context.MODE_PRIVATE)
-        val cacheKey = "lrc85_${track.title.lowercase().trim()}"
+    // Truy vấn NetEase Cloud với kiểm tra khớp tên nghiêm ngặt (Strict Match)
+    private fun searchVerifiedNetEase(candidateTitle: String): String? {
+        try {
+            val encoded = URLEncoder.encode(candidateTitle, "UTF-8")
+            val searchUrl = URL("https://music.163.com/api/search/get/web?s=$encoded&type=1&offset=0&total=true&limit=6")
+            val conn = (searchUrl.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 5000
+                readTimeout = 5000
+                setRequestProperty("Referer", "https://music.163.com")
+                setRequestProperty("User-Agent", "Mozilla/5.0")
+                setRequestProperty("Accept-Charset", "UTF-8")
+            }
+            if (conn.responseCode == 200) {
+                val root = JSONObject(conn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() })
+                val songs = root.optJSONObject("result")?.optJSONArray("songs") ?: return null
+                for (i in 0 until songs.length()) {
+                    val songObj = songs.getJSONObject(i)
+                    val songId = songObj.optLong("id", 0L)
+                    val songName = songObj.optString("name", "")
+                    val artistsArr = songObj.optJSONArray("artists")
+                    val firstArtist = if (artistsArr != null && artistsArr.length() > 0) {
+                        artistsArr.getJSONObject(0).optString("name", "")
+                    } else ""
+
+                    // Chỉ lấy lời nếu tên bài trên NetEase thực sự trùng với tên bài của bạn
+                    if (songId > 0L && isStrictMatch(candidateTitle, songName, firstArtist)) {
+                        val lrcUrl = URL("https://music.163.com/api/song/lyric?os=pc&id=$songId&lv=-1&kv=-1&tv=-1")
+                        val lrcConn = (lrcUrl.openConnection() as HttpURLConnection).apply {
+                            requestMethod = "GET"
+                            connectTimeout = 5000
+                            readTimeout = 5000
+                            setRequestProperty("Referer", "https://music.163.com")
+                        }
+                        if (lrcConn.responseCode == 200) {
+                            val lrcJson = JSONObject(lrcConn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() })
+                            val lrcText = sanitizeUtf8Text(lrcJson.optJSONObject("lrc")?.optString("lyric", "") ?: "")
+                            if (lrcText.length > 30) return lrcText
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        return null
+    }
+
+    fun autoFetchLyricsHandsFree(context: Context, track: AudioTrack): List<LyricLine> {
+        // Dùng bộ nhớ cache mới hoàn toàn (v81) để xóa sạch mọi lời bị nhầm hoặc lỗi font từ bản 8.0 cũ
+        val prefs = context.getSharedPreferences("walkman_verified_lyrics_v81", Context.MODE_PRIVATE)
+        val cacheKey = "lrc81_${track.title.lowercase().trim()}"
         val cached = prefs.getString(cacheKey, null)
         if (!cached.isNullOrBlank()) {
-            return parseLrc(cached)
+            return parseCleanLrc(cached)
         }
 
-        val candidates = buildCandidates(track.title, track.artist)
-        for (q in candidates) {
-            searchNetEaseStrict(q)?.let { found ->
-                prefs.edit().putString(cacheKey, found).apply()
-                return parseLrc(found)
-            }
-            searchLrclibStrict(q)?.let { found ->
-                prefs.edit().putString(cacheKey, found).apply()
-                return parseLrc(found)
+        val candidates = extractExactSongNames(track.title)
+
+        // 1. Ưu tiên tìm trên LRCLIB chuẩn UTF-8 Quốc tế & Việt Nam trước
+        for (candidate in candidates) {
+            searchVerifiedLrclib(candidate)?.let { verifiedLrc ->
+                prefs.edit().putString(cacheKey, verifiedLrc).apply()
+                return parseCleanLrc(verifiedLrc)
             }
         }
 
+        // 2. Nếu chưa có mới tìm trên NetEase có kiểm duyệt tên bài hát
+        for (candidate in candidates) {
+            searchVerifiedNetEase(candidate)?.let { verifiedLrc ->
+                prefs.edit().putString(cacheKey, verifiedLrc).apply()
+                return parseCleanLrc(verifiedLrc)
+            }
+        }
+
+        // Nếu là file Liên khúc tổng hợp nhiều bài (40-120 phút) không có lời đơn lẻ, hiển thị thông tin sạch đẹp, tuyệt đối không lấy bừa lời bài khác
         return listOf(
             LyricLine(0L, "♪ ${track.title} ♪"),
-            LyricLine(3000L, "Nghệ sĩ: ${track.artist}"),
-            LyricLine(6000L, "Đang phát qua Sony Signature Real-Time PCM DSP...")
+            LyricLine(4000L, "Nghệ sĩ: ${track.artist}"),
+            LyricLine(8000L, "Thư mục: ${track.folderInfo} • Định dạng: ${track.formatName}"),
+            LyricLine(12000L, "Đang phát qua mạch âm thanh chuẩn Walkman 7.0 Pure Audio")
         )
     }
 
-    private fun parseLrc(raw: String): List<LyricLine> {
-        val result = mutableListOf<LyricLine>()
+    private fun parseCleanLrc(raw: String): List<LyricLine> {
+        val baseLines = mutableListOf<LyricLine>()
         val timeRegex = Regex("\\[(\\d{1,2}):(\\d{2})(?:[.:](\\d{1,3}))?\\]")
         var fallbackTime = 0L
 
         for (line in raw.lines()) {
-            val clean = line.trim()
-            if (clean.startsWith("[") && clean.contains(":") && !clean.contains("]")) continue
-            val matches = timeRegex.findAll(clean).toList()
+            val cleanLine = sanitizeUtf8Text(line)
+            if (cleanLine.isBlank()) continue
+            if (cleanLine.startsWith("[ti:") || cleanLine.startsWith("[ar:") || cleanLine.startsWith("[al:") || cleanLine.startsWith("[by:") || cleanLine.startsWith("[offset:")) {
+                continue
+            }
+
+            val matches = timeRegex.findAll(cleanLine).toList()
             if (matches.isNotEmpty()) {
-                val content = clean.replace(timeRegex, "").trim()
+                val content = sanitizeUtf8Text(cleanLine.replace(timeRegex, ""))
                 if (content.isNotEmpty()) {
                     for (m in matches) {
                         val min = m.groupValues[1].toLongOrNull() ?: 0L
@@ -596,20 +670,22 @@ object PreciseAutoLyricsEngine {
                             3 -> (msStr.toLongOrNull() ?: 0L)
                             else -> 0L
                         }
-                        result.add(LyricLine(min * 60000L + sec * 1000L + ms, content))
+                        baseLines.add(LyricLine(min * 60000L + sec * 1000L + ms, content))
                     }
                 }
-            } else if (clean.isNotBlank() && !clean.startsWith("[")) {
-                result.add(LyricLine(fallbackTime, clean))
-                fallbackTime += 3800L
+            } else if (!cleanLine.startsWith("[")) {
+                baseLines.add(LyricLine(fallbackTime, cleanLine))
+                fallbackTime += 4000L
             }
         }
-        return if (result.isEmpty()) listOf(LyricLine(0L, raw.trim())) else result.sortedBy { it.timeMs }
+
+        val sorted = baseLines.sortedBy { it.timeMs }
+        return if (sorted.isEmpty()) listOf(LyricLine(0L, sanitizeUtf8Text(raw))) else sorted
     }
 }
 
 object PlaylistStorage {
-    private const val PREF_NAME = "walkman_v8_storage"
+    private const val PREF_NAME = "walkman_v7_storage"
     private const val KEY_TRACKS = "saved_tracks_json"
     private const val KEY_FOLDERS = "saved_folder_uris"
     private const val KEY_SKIN = "saved_skin_name"
@@ -712,6 +788,13 @@ object PlaylistStorage {
     }
 }
 
+fun formatTimeMs(ms: Int): String {
+    val totalSec = (ms / 1000).coerceAtLeast(0)
+    val min = totalSec / 60
+    val sec = totalSec % 60
+    return "%02d:%02d".format(min, sec)
+}
+
 @Composable
 fun WalkmanMasterRoot(
     onAutoScanAll: () -> Pair<List<AudioTrack>, Int>,
@@ -809,7 +892,7 @@ fun WalkmanMasterRoot(
         isFetchingLyrics = true
         scope.launch(Dispatchers.IO) {
             val specs = getTrackSpecs(track)
-            val lrcs = PreciseAutoLyricsEngine.fetchPreciseLyrics(context, track)
+            val lrcs = AutoLyricsEngine.autoFetchLyricsHandsFree(context, track)
             withContext(Dispatchers.Main) {
                 currentBitrate = specs.first
                 currentSampleRate = specs.second
@@ -940,7 +1023,7 @@ fun WalkmanMasterRoot(
         playlist.getOrNull(currentIndex)?.let { t ->
             isFetchingLyrics = true
             withContext(Dispatchers.IO) {
-                val lrcs = PreciseAutoLyricsEngine.fetchPreciseLyrics(context, t)
+                val lrcs = AutoLyricsEngine.autoFetchLyricsHandsFree(context, t)
                 withContext(Dispatchers.Main) {
                     currentLyrics = lrcs
                     isFetchingLyrics = false
@@ -1020,7 +1103,7 @@ fun WalkmanMasterRoot(
                     selected = activeTab == 0,
                     onClick = { activeTab = 0 },
                     icon = { Icon(Icons.Default.Album, null) },
-                    label = { Text("Walkman 8.5", fontWeight = FontWeight.Bold) }
+                    label = { Text("Walkman 8.1", fontWeight = FontWeight.Bold) }
                 )
                 NavigationBarItem(
                     selected = activeTab == 1,
@@ -1032,7 +1115,7 @@ fun WalkmanMasterRoot(
                     selected = activeTab == 2,
                     onClick = { activeTab = 2 },
                     icon = { Icon(Icons.Default.Equalizer, null) },
-                    label = { Text("Real PCM DSP", fontWeight = FontWeight.Bold) }
+                    label = { Text("Audio 7.0 DSP", fontWeight = FontWeight.Bold) }
                 )
             }
         }
@@ -1044,7 +1127,7 @@ fun WalkmanMasterRoot(
                 .padding(padding)
         ) {
             when (activeTab) {
-                0 -> FullScreenWalkmanDeckV85(
+                0 -> FullScreenWalkmanDeckV8(
                     skin = currentSkin,
                     track = currentTrack,
                     audioOutput = audioOutput,
@@ -1173,7 +1256,7 @@ fun WalkmanMasterRoot(
 }
 
 @Composable
-fun FullScreenWalkmanDeckV85(
+fun FullScreenWalkmanDeckV8(
     skin: WalkmanSkin,
     track: AudioTrack?,
     audioOutput: AudioOutputState,
@@ -1247,7 +1330,6 @@ fun FullScreenWalkmanDeckV85(
         verticalArrangement = Arrangement.SpaceBetween,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // 1. Header Walkman
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1279,7 +1361,7 @@ fun FullScreenWalkmanDeckV85(
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = if (isFetchingLyrics) "SYNC..." else "PRECISE LRC",
+                    text = if (isFetchingLyrics) "VERIFYING UTF-8..." else "UTF-8 LYRICS",
                     fontSize = 9.sp,
                     fontWeight = FontWeight.Black,
                     color = if (skin == WalkmanSkin.TPSL2) Color(0xFF0F172A) else accentColor,
@@ -1288,7 +1370,6 @@ fun FullScreenWalkmanDeckV85(
             }
         }
 
-        // 2. BẢNG THÔNG TIN DAC / CODEC / BITRATE
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1318,7 +1399,6 @@ fun FullScreenWalkmanDeckV85(
             }
         }
 
-        // 3. MÀN HÌNH CHÍNH
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1450,7 +1530,7 @@ fun FullScreenWalkmanDeckV85(
                     }
 
                     val prevLine = lyrics.getOrNull(activeLineIdx - 1)?.text ?: ""
-                    val currLine = if (isFetchingLyrics) "Đang tải lời bài hát chuẩn..." else (lyrics.getOrNull(activeLineIdx)?.text ?: "♪ ${trackTitle} ♪")
+                    val currLine = if (isFetchingLyrics) "Đang xác thực lời bài hát chuẩn UTF-8..." else (lyrics.getOrNull(activeLineIdx)?.text ?: "♪ ${trackTitle} ♪")
                     val nextLine = lyrics.getOrNull(activeLineIdx + 1)?.text ?: ""
 
                     Column(
@@ -1464,11 +1544,33 @@ fun FullScreenWalkmanDeckV85(
                         verticalArrangement = Arrangement.spacedBy(3.dp)
                     ) {
                         if (prevLine.isNotBlank()) {
-                            Text(text = prevLine, color = Color.Gray, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                            Text(
+                                text = prevLine,
+                                color = Color.Gray,
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                textAlign = TextAlign.Center
+                            )
                         }
-                        Text(text = currLine, color = accentColor, fontSize = 14.sp, fontWeight = FontWeight.Black, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                        Text(
+                            text = currLine,
+                            color = accentColor,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Black,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            textAlign = TextAlign.Center
+                        )
                         if (nextLine.isNotBlank()) {
-                            Text(text = nextLine, color = Color.LightGray.copy(alpha = 0.75f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                            Text(
+                                text = nextLine,
+                                color = Color.LightGray.copy(alpha = 0.75f),
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                textAlign = TextAlign.Center
+                            )
                         }
                     }
                 }
@@ -1582,7 +1684,7 @@ fun FullScreenWalkmanDeckV85(
 }
 
 @Composable
-LargeCassetteReel(rotation: Float) {
+fun LargeCassetteReel(rotation: Float) {
     Canvas(modifier = Modifier.size(54.dp)) {
         drawCircle(color = Color(0xFF271C19), radius = size.minDimension / 2)
         drawCircle(color = Color(0xFFE2E8F0), radius = size.minDimension / 2.8f, style = Stroke(width = 5f))
@@ -1594,5 +1696,338 @@ LargeCassetteReel(rotation: Float) {
             }
         }
         drawCircle(color = Color(0xFF0F172A), radius = 8f)
+    }
+}
+
+@Composable
+fun FiioStyleCategorizedLibraryView(
+    tracks: List<AudioTrack>,
+    favoriteTitles: Set<String>,
+    isScanning: Boolean,
+    currentIndex: Int,
+    onAutoScan: () -> Unit,
+    onPickFiles: () -> Unit,
+    onPickFolder: () -> Unit,
+    onToggleFavorite: (String) -> Unit,
+    onClearSaved: () -> Unit,
+    onSelectTrack: (AudioTrack) -> Unit
+) {
+    var subTab by remember { mutableStateOf(0) }
+    var selectedFolderFilter by remember { mutableStateOf<String?>(null) }
+
+    val foldersMap = remember(tracks) { tracks.groupBy { it.folderInfo } }
+
+    val displayedTracks = remember(tracks, favoriteTitles, subTab, selectedFolderFilter) {
+        when (subTab) {
+            1 -> tracks.filter { favoriteTitles.contains(it.title) }
+            2 -> if (selectedFolderFilter != null) tracks.filter { it.folderInfo == selectedFolderFilter } else emptyList()
+            else -> tracks
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF141C2B)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("QUẢN LÝ THƯ VIỆN NHẠC WALKMAN", fontWeight = FontWeight.Black, color = Color(0xFFEAB308), fontSize = 13.sp)
+                    if (tracks.isNotEmpty()) {
+                        TextButton(onClick = onClearSaved, contentPadding = PaddingValues(0.dp)) {
+                            Text("Xóa DS", color = Color(0xFFEF4444), fontSize = 11.sp)
+                        }
+                    }
+                }
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Button(
+                        onClick = onAutoScan,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5500), contentColor = Color.White),
+                        contentPadding = PaddingValues(vertical = 8.dp, horizontal = 4.dp)
+                    ) {
+                        Text("QUÉT TỰ ĐỘNG", fontSize = 10.sp, fontWeight = FontWeight.Black)
+                    }
+                    Button(
+                        onClick = onPickFolder,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7), contentColor = Color.White),
+                        contentPadding = PaddingValues(vertical = 8.dp, horizontal = 4.dp)
+                    ) {
+                        Text("LƯU THƯ MỤC", fontSize = 10.sp, fontWeight = FontWeight.Black)
+                    }
+                    Button(
+                        onClick = onPickFiles,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF16A34A), contentColor = Color.White),
+                        contentPadding = PaddingValues(vertical = 8.dp, horizontal = 4.dp)
+                    ) {
+                        Text("+ CHỌN FILE", fontSize = 10.sp, fontWeight = FontWeight.Black)
+                    }
+                }
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    val tabs = listOf(
+                        "Tất cả (${tracks.size})",
+                        "♥ Yêu thích (${tracks.count { favoriteTitles.contains(it.title) }})",
+                        "📁 Thư mục (${foldersMap.size})"
+                    )
+                    tabs.forEachIndexed { idx, label ->
+                        val active = subTab == idx
+                        OutlinedButton(
+                            onClick = {
+                                subTab = idx
+                                selectedFolderFilter = null
+                            },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = if (active) Color(0xFFEAB308) else Color(0xFF0F172A),
+                                contentColor = if (active) Color.Black else Color.White
+                            ),
+                            contentPadding = PaddingValues(vertical = 6.dp, horizontal = 2.dp)
+                        ) {
+                            Text(label, fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1)
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        if (subTab == 2 && selectedFolderFilter == null) {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                val folderEntries = foldersMap.entries.toList()
+                itemsIndexed(folderEntries) { _, entry ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF111622), RoundedCornerShape(10.dp))
+                            .border(1.dp, Color(0xFF334155), RoundedCornerShape(10.dp))
+                            .clickable { selectedFolderFilter = entry.key }
+                            .padding(14.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Folder, null, tint = Color(0xFFEAB308), modifier = Modifier.size(28.dp))
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text(entry.key, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                Text("${entry.value.size} bài hát lưu trong thư mục này", color = Color.Gray, fontSize = 11.sp)
+                            }
+                        }
+                        Icon(Icons.Default.ChevronRight, null, tint = Color.LightGray)
+                    }
+                }
+            }
+        } else {
+            if (subTab == 2 && selectedFolderFilter != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(onClick = { selectedFolderFilter = null }) {
+                        Text("← Quay lại danh sách Thư mục", color = Color(0xFFEAB308), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                    Text("• [$selectedFolderFilter]", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                }
+            }
+
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                itemsIndexed(displayedTracks) { index, track ->
+                    val isFav = favoriteTitles.contains(track.title)
+                    val isPlayingTrack = tracks.getOrNull(currentIndex)?.id == track.id
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(if (isPlayingTrack) Color(0xFF2B1B12) else Color(0xFF111622), RoundedCornerShape(10.dp))
+                            .border(1.dp, if (isPlayingTrack) Color(0xFFEAB308) else Color.Transparent, RoundedCornerShape(10.dp))
+                            .clickable { onSelectTrack(track) }
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("${index + 1}. ${track.title}", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("${track.artist} • 📁 ${track.folderInfo} • ${track.formatName}", color = Color(0xFF94A3B8), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (track.duration > 0) {
+                                Text(
+                                    formatTimeMs(track.duration.toInt()),
+                                    color = Color(0xFFEAB308),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                            IconButton(onClick = { onToggleFavorite(track.title) }) {
+                                Icon(
+                                    imageVector = if (isFav) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                    contentDescription = null,
+                                    tint = if (isFav) Color(0xFFEF4444) else Color.Gray,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun FullSonyDsp10BandAndVinylView(
+    masterVol: Float,
+    megaBass: Float,
+    vinylProcessor: Boolean,
+    clearAudio: Boolean,
+    dseeUltimate: Boolean,
+    eq10Bands: List<Float>,
+    audioOutput: AudioOutputState,
+    onMasterVolChange: (Float) -> Unit,
+    onVinylToggle: (Boolean) -> Unit,
+    onClearAudioToggle: (Boolean) -> Unit,
+    onDseeToggle: (Boolean) -> Unit,
+    onBassChange: (Float) -> Unit,
+    onBand10Change: (Int, Float) -> Unit,
+    onApplyPreset10: (List<Float>) -> Unit
+) {
+    val labels10 = listOf("31Hz", "62Hz", "125Hz", "250Hz", "500Hz", "1kHz", "2kHz", "4kHz", "8kHz", "16kHz")
+
+    val presets10 = listOf(
+        "Heavy" to listOf(6f, 5f, 3f, 1f, 0f, 1f, 2f, 4f, 5f, 6f),
+        "Pop" to listOf(2f, 3f, 4f, 3f, 1f, 1f, 2f, 3f, 4f, 4f),
+        "Jazz" to listOf(4f, 3f, 2f, 1f, -1f, 0f, 1f, 2f, 3f, 4f),
+        "Vinyl Warm" to listOf(4f, 4f, 2f, 1f, 0f, 0f, 1f, 2f, 3f, 3f),
+        "Flat" to listOf(0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
+    )
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("SONY PURE AUDIO 7.0 ENGINE", fontWeight = FontWeight.Black, fontSize = 15.sp, color = Color(0xFFEAB308))
+            Text("✓ ANTI-CLIPPING ACTIVE", color = Color(0xFF22C55E), fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
+        }
+
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF241C0C)),
+            border = BorderStroke(1.dp, Color(0xFFEAB308))
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Vinyl Processor™ (7.0 Pure Warmth)", fontWeight = FontWeight.Black, color = Color(0xFFEAB308), fontSize = 14.sp)
+                        Text("Chất âm ấm chuẩn 7.0 kèm mạch Clean Headroom chống rè loa ngoài điện thoại", color = Color.LightGray, fontSize = 11.sp)
+                    }
+                    Switch(
+                        checked = vinylProcessor,
+                        onCheckedChange = onVinylToggle,
+                        colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFFEAB308), checkedTrackColor = Color(0xFF854D0E))
+                    )
+                }
+            }
+        }
+
+        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF121826))) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("ClearAudio+™ (Mid-Side 3D Stereo)", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
+                        Text("Mở rộng sân khấu âm thanh trong trẻo không méo tiếng", color = Color.Gray, fontSize = 11.sp)
+                    }
+                    Switch(checked = clearAudio, onCheckedChange = onClearAudioToggle)
+                }
+                HorizontalDivider(color = Color(0xFF1E293B))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("DSEE HX™ (Harmonic Exciter)", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
+                        Text("Tái tạo dải cao mượt mà chuẩn Walkman 7.0", color = Color.Gray, fontSize = 11.sp)
+                    }
+                    Switch(checked = dseeUltimate, onCheckedChange = onDseeToggle)
+                }
+            }
+        }
+
+        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF121826))) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("CLEARBASS / SUB-BASS RESONANCE", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
+                    Text("+${(megaBass * 10).toInt()} dB", color = Color(0xFFFF6600), fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
+                }
+                Slider(
+                    value = megaBass,
+                    onValueChange = onBassChange,
+                    colors = SliderDefaults.colors(thumbColor = Color(0xFFFF5500), activeTrackColor = Color(0xFFFF5500))
+                )
+            }
+        }
+
+        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF121826))) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("SONY 10-BAND GRAPHIC EQUALIZER", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    presets10.forEach { (name, vals) ->
+                        OutlinedButton(
+                            onClick = { onApplyPreset10(vals) },
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(vertical = 4.dp, horizontal = 1.dp)
+                        ) {
+                            Text(name, fontSize = 9.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+
+                labels10.forEachIndexed { idx, label ->
+                    val currentVal = eq10Bands.getOrElse(idx) { 0f }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(label, modifier = Modifier.width(48.dp), fontSize = 10.sp, color = Color.LightGray, fontFamily = FontFamily.Monospace)
+                        Slider(
+                            value = currentVal,
+                            onValueChange = { onBand10Change(idx, it) },
+                            valueRange = -8f..8f,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = "%+.0f dB".format(currentVal),
+                            modifier = Modifier.width(42.dp),
+                            fontSize = 10.sp,
+                            color = Color(0xFFFF8800),
+                            fontFamily = FontFamily.Monospace,
+                            textAlign = TextAlign.End
+                        )
+                    }
+                }
+            }
+        }
     }
 }

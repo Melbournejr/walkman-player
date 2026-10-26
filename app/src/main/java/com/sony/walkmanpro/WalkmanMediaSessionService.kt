@@ -25,15 +25,14 @@ import androidx.media3.session.MediaSessionService
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.tanh
-import kotlin.random.Random
 
-// BỘ XỬ LÝ TÍN HIỆU SỐ PCM TRỰC TIẾP (Hoạt động 100% trên cả USB-C DAC, Bluetooth & Loa ngoài)
+// BỘ XỬ LÝ DSP BẢN 7.0 NGUYÊN BẢN + BỘ CHỐNG RÈ LOA ĐIỆN THOẠI (CLEAN HEADROOM)
 @UnstableApi
 class SonyRealTimeDspProcessor : BaseAudioProcessor() {
     @Volatile var vinylEnabled: Boolean = true
     @Volatile var clearAudioEnabled: Boolean = true
     @Volatile var dseeEnabled: Boolean = true
-    @Volatile var megaBassLevel: Float = 0.45f // 0f..1f
+    @Volatile var megaBassLevel: Float = 0.45f
     @Volatile var eq10Gains = FloatArray(10) { 0f }
 
     private var lowPassL = 0f
@@ -59,17 +58,17 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
         outputBuffer.order(ByteOrder.LITTLE_ENDIAN)
         inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
 
-        // Tính hệ số khuếch đại Bass, Mid, Treble từ 10-Band EQ + MegaBass
-        val eqLowGain = ((eq10Gains[0] + eq10Gains[1] + eq10Gains[2]) / 3f) * 0.08f
-        val eqMidGain = ((eq10Gains[3] + eq10Gains[4] + eq10Gains[5] + eq10Gains[6]) / 4f) * 0.06f
-        val eqHighGain = ((eq10Gains[7] + eq10Gains[8] + eq10Gains[9]) / 3f) * 0.08f
-        val totalBassBoost = (megaBassLevel * 0.85f) + eqLowGain
+        // Hạ nhẹ Pre-gain đầu vào (0.78f) để khi cộng dồn Bass + EQ không bao giờ làm rè loa ngoài điện thoại
+        val preGain = 0.78f
+        val eqLowGain = ((eq10Gains[0] + eq10Gains[1] + eq10Gains[2]) / 3f) * 0.05f
+        val eqMidGain = ((eq10Gains[3] + eq10Gains[4] + eq10Gains[5] + eq10Gains[6]) / 4f) * 0.04f
+        val eqHighGain = ((eq10Gains[7] + eq10Gains[8] + eq10Gains[9]) / 3f) * 0.05f
+        val totalBassBoost = (megaBassLevel * 0.55f) + eqLowGain
 
         while (inputBuffer.remaining() >= 4) {
-            var left = inputBuffer.short / 32768f
-            var right = inputBuffer.short / 32768f
+            var left = (inputBuffer.short / 32768f) * preGain
+            var right = (inputBuffer.short / 32768f) * preGain
 
-            // 1. Tách dải trầm (Low-pass filter ~110Hz) và dải cao (High-pass)
             subBassL += 0.045f * (left - subBassL)
             subBassR += 0.045f * (right - subBassR)
             val highL = left - prevSampleL
@@ -77,42 +76,32 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
             prevSampleL = left
             prevSampleR = right
 
-            // Áp dụng MegaBass + 10-Band EQ thực tế
             left += subBassL * totalBassBoost + left * eqMidGain + highL * eqHighGain
             right += subBassR * totalBassBoost + right * eqMidGain + highR * eqHighGain
 
-            // 2. ClearAudio+™ (Mở rộng âm trường Stereo Mid-Side & tăng độ tách bạch)
             if (clearAudioEnabled) {
                 val mid = (left + right) * 0.5f
                 val side = (left - right) * 0.5f
-                // Mở rộng không gian sân khấu thêm 38% và nâng nhẹ dải chi tiết
-                val wideSide = side * 1.38f
-                left = (mid * 1.05f + wideSide) + subBassL * 0.18f + highL * 0.15f
-                right = (mid * 1.05f - wideSide) + subBassR * 0.18f + highR * 0.15f
+                val wideSide = side * 1.28f
+                left = (mid + wideSide) + subBassL * 0.10f + highL * 0.08f
+                right = (mid - wideSide) + subBassR * 0.10f + highR * 0.08f
             }
 
-            // 3. DSEE HX™ (Khôi phục hài âm tần số cao bị mất của nhạc nén)
             if (dseeEnabled) {
-                val harmonicL = highL * highL * (if (highL >= 0) 1f else -1f) * 0.35f
-                val harmonicR = highR * highR * (if (highR >= 0) 1f else -1f) * 0.35f
-                left += highL * 0.25f + harmonicL
-                right += highR * 0.25f + harmonicR
+                left += highL * 0.15f
+                right += highR * 0.15f
             }
 
-            // 4. Vinyl Processor™ (Chất âm ấm áp mộc mạc của Đĩa Than + bão hòa đèn Analog)
             if (vinylEnabled) {
-                lowPassL += 0.32f * (left - lowPassL)
-                lowPassR += 0.32f * (right - lowPassR)
-                // Cộng hưởng cần đĩa than ở dải trầm ấm + làm mượt gai số dải cao
-                left = (lowPassL * 0.72f + left * 0.28f) + subBassL * 0.25f
-                right = (lowPassR * 0.72f + right * 0.28f) + subBassR * 0.25f
-                // Bão hòa mềm Analog (Soft-clipping) tạo độ dày ấm
-                left = tanh(left * 1.25f) * 0.90f
-                right = tanh(right * 1.25f) * 0.90f
+                lowPassL += 0.35f * (left - lowPassL)
+                lowPassR += 0.35f * (right - lowPassR)
+                left = (lowPassL * 0.65f + left * 0.35f) + subBassL * 0.12f
+                right = (lowPassR * 0.65f + right * 0.35f) + subBassR * 0.12f
+                left = tanh(left * 1.05f) * 0.92f
+                right = tanh(right * 1.05f) * 0.92f
             } else {
-                // Bảo vệ chống vỡ tiếng (Soft Limiter)
-                left = tanh(left)
-                right = tanh(right)
+                left = tanh(left) * 0.95f
+                right = tanh(right) * 0.95f
             }
 
             val outL = (left * 32767f).toInt().coerceIn(-32768, 32767).toShort()

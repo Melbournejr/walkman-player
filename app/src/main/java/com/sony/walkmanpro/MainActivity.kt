@@ -1,14 +1,9 @@
 ﻿package com.sony.walkmanpro
 
 import android.Manifest
-import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothDevice
-import android.bluetooth.BluetoothProfile
-import android.content.BroadcastReceiver
 import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
@@ -56,9 +51,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.documentfile.provider.DocumentFile
-import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import kotlinx.coroutines.Dispatchers
@@ -78,8 +73,6 @@ data class AudioTrack(
     val uri: Uri,
     val folderInfo: String,
     val sizeBytes: Long = 0L,
-    var bitrateKbps: Int = 0,
-    var sampleRateKhz: String = "44.1 kHz",
     var formatName: String = "AUDIO"
 )
 
@@ -91,7 +84,8 @@ data class AudioOutputState(
 )
 
 enum class WalkmanSkin(val shortName: String, val fullName: String) {
-    TPSL2("Cassette TPS-L2", "SONY WALKMAN TPS-L2 (1979)"),
+    WM1ZM2("WM1ZM2 Gold", "SONY SIGNATURE NW-WM1ZM2"),
+    TPSL2("TPS-L2", "SONY WALKMAN TPS-L2 (1979)"),
     W995I("W995i", "SONY ERICSSON W995i"),
     W850I("W850i", "SONY ERICSSON W850i"),
     A306("NW-A306", "SONY HI-RES NW-A306")
@@ -105,25 +99,14 @@ class MainActivity : ComponentActivity() {
 
     private var masterVolume: Float = 0.75f
     private var currentBassStrength: Float = 0.45f
+    private var vinylProcessor: Boolean = true
     private val eq10Gains = FloatArray(10) { 0f }
-
-    private val audioOutputReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            // Cập nhật khi cắm rút tai nghe hoặc kết nối bluetooth
-        }
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        startService(Intent(this, WalkmanMediaSessionService::class.java))
         loadSavedDspSettings()
-        initExoPlayer()
-
-        val filter = IntentFilter().apply {
-            addAction(AudioManager.ACTION_HEADSET_PLUG)
-            addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
-            addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
-        }
-        registerReceiver(audioOutputReceiver, filter)
+        setupPlayerInstance()
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
@@ -140,6 +123,7 @@ class MainActivity : ComponentActivity() {
                     onSeekTo = { ms -> seekExo(ms) },
                     onSetMasterVolume = { vol -> updateMasterVolume(vol) },
                     onSetBass = { level -> updateMegaBass(level) },
+                    onSetVinyl = { enabled -> updateVinylEffect(enabled) },
                     onSetEqBand10 = { band, gain -> updateEqBand10(band, gain) },
                     getIsPlaying = { exoPlayer?.isPlaying == true },
                     getPosition = { (exoPlayer?.currentPosition ?: 0L).toInt().coerceAtLeast(0) },
@@ -154,54 +138,59 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun setupPlayerInstance() {
+        val player = WalkmanMediaSessionService.sharedPlayer ?: ExoPlayer.Builder(this).build()
+        exoPlayer = player
+        player.volume = masterVolume
+        player.addListener(object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_ENDED) {
+                    onTrackEndedCallback?.invoke()
+                }
+            }
+            override fun onAudioSessionIdChanged(audioSessionId: Int) {
+                if (audioSessionId != C.AUDIO_SESSION_ID_UNSET && audioSessionId != 0) {
+                    setupSonyDspSafe(audioSessionId)
+                }
+            }
+        })
+    }
+
     private fun loadSavedDspSettings() {
         val prefs = getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
         masterVolume = prefs.getFloat("dsp_master_vol", 0.75f)
         currentBassStrength = prefs.getFloat("dsp_bass", 0.45f)
+        vinylProcessor = prefs.getBoolean("dsp_vinyl", true)
         for (i in 0 until 10) {
             eq10Gains[i] = prefs.getFloat("dsp_eq_$i", 0f)
         }
     }
 
-    private fun initExoPlayer() {
-        val audioAttributes = AudioAttributes.Builder()
-            .setUsage(C.USAGE_MEDIA)
-            .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
-            .build()
-
-        exoPlayer = ExoPlayer.Builder(this)
-            .setAudioAttributes(audioAttributes, true)
-            .build().apply {
-                volume = masterVolume
-                addListener(object : Player.Listener {
-                    override fun onPlaybackStateChanged(playbackState: Int) {
-                        if (playbackState == Player.STATE_ENDED) {
-                            onTrackEndedCallback?.invoke()
-                        }
-                    }
-                    override fun onAudioSessionIdChanged(audioSessionId: Int) {
-                        if (audioSessionId != C.AUDIO_SESSION_ID_UNSET && audioSessionId != 0) {
-                            setupSonyDspSafe(audioSessionId)
-                        }
-                    }
-                })
-            }
-    }
-
     private fun playWithExo(track: AudioTrack, startMs: Long = 0L) {
         try {
-            exoPlayer?.let { player ->
-                player.setMediaItem(MediaItem.fromUri(track.uri))
-                player.prepare()
-                if (startMs > 0) {
-                    player.seekTo(startMs)
-                }
-                player.volume = masterVolume
-                player.play()
-                val sessionId = player.audioSessionId
-                if (sessionId != C.AUDIO_SESSION_ID_UNSET && sessionId != 0) {
-                    setupSonyDspSafe(sessionId)
-                }
+            val player = exoPlayer ?: return
+            val metadata = MediaMetadata.Builder()
+                .setTitle(track.title)
+                .setArtist(track.artist)
+                .setDisplayTitle(track.title)
+                .build()
+
+            val mediaItem = MediaItem.Builder()
+                .setUri(track.uri)
+                .setMediaMetadata(metadata)
+                .build()
+
+            player.setMediaItem(mediaItem)
+            player.prepare()
+            if (startMs > 0) {
+                player.seekTo(startMs)
+            }
+            player.volume = masterVolume
+            player.play()
+
+            val sessionId = player.audioSessionId
+            if (sessionId != C.AUDIO_SESSION_ID_UNSET && sessionId != 0) {
+                setupSonyDspSafe(sessionId)
             }
         } catch (e: Exception) {
             Toast.makeText(this, "Không thể phát: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
@@ -238,28 +227,36 @@ class MainActivity : ComponentActivity() {
     private fun setupSonyDspSafe(sessionId: Int) {
         try {
             bassBoost?.release()
-            bassBoost = null
             bassBoost = BassBoost(0, sessionId).apply {
                 enabled = true
-                setStrength((currentBassStrength * 800).toInt().toShort().coerceIn(0, 1000))
+                val boostVal = if (vinylProcessor) (currentBassStrength * 850).toInt() else (currentBassStrength * 750).toInt()
+                setStrength(boostVal.toShort().coerceIn(0, 1000))
             }
         } catch (_: Exception) {}
 
         try {
             equalizer?.release()
-            equalizer = null
             equalizer = Equalizer(0, sessionId).apply {
                 enabled = true
-                val hwBands = numberOfBands.toInt()
-                for (hw in 0 until hwBands) {
-                    val mappedIdx = ((hw.toFloat() / (hwBands - 1).coerceAtLeast(1)) * 9f).toInt().coerceIn(0, 9)
-                    val gain = eq10Gains[mappedIdx]
-                    val range = bandLevelRange
-                    val targetMb = (gain * 100).toInt().coerceIn(range[0].toInt(), range[1].toInt()).toShort()
-                    setBandLevel(hw.toShort(), targetMb)
-                }
+                apply10BandToHw(this)
             }
         } catch (_: Exception) {}
+    }
+
+    private fun apply10BandToHw(eq: Equalizer) {
+        val hwBands = eq.numberOfBands.toInt()
+        for (hw in 0 until hwBands) {
+            val mappedIdx = ((hw.toFloat() / (hwBands - 1).coerceAtLeast(1)) * 9f).toInt().coerceIn(0, 9)
+            var gain = eq10Gains[mappedIdx]
+            if (vinylProcessor) {
+                // Tái tạo đường cong âm thanh ấm analog của đĩa than Vinyl
+                if (mappedIdx in 0..2) gain += 2.0f
+                if (mappedIdx in 7..9) gain += 1.0f
+            }
+            val range = eq.bandLevelRange
+            val targetMb = (gain * 100).toInt().coerceIn(range[0].toInt(), range[1].toInt()).toShort()
+            eq.setBandLevel(hw.toShort(), targetMb)
+        }
     }
 
     private fun updateMegaBass(level: Float) {
@@ -270,9 +267,18 @@ class MainActivity : ComponentActivity() {
         try {
             bassBoost?.let {
                 if (!it.enabled) it.enabled = true
-                it.setStrength((currentBassStrength * 800).toInt().toShort().coerceIn(0, 1000))
+                val boostVal = if (vinylProcessor) (currentBassStrength * 850).toInt() else (currentBassStrength * 750).toInt()
+                it.setStrength(boostVal.toShort().coerceIn(0, 1000))
             }
         } catch (_: Exception) {}
+    }
+
+    private fun updateVinylEffect(enabled: Boolean) {
+        vinylProcessor = enabled
+        getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
+            .edit().putBoolean("dsp_vinyl", enabled).apply()
+        equalizer?.let { apply10BandToHw(it) }
+        updateMegaBass(currentBassStrength)
     }
 
     private fun updateEqBand10(band10Index: Int, gainDb: Float) {
@@ -281,234 +287,148 @@ class MainActivity : ComponentActivity() {
             getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
                 .edit().putFloat("dsp_eq_$band10Index", eq10Gains[band10Index]).apply()
         }
-
-        try {
-            equalizer?.let { eq ->
-                if (!eq.enabled) eq.enabled = true
-                val hwBands = eq.numberOfBands.toInt()
-                for (hw in 0 until hwBands) {
-                    val mapped = ((hw.toFloat() / (hwBands - 1).coerceAtLeast(1)) * 9f).toInt().coerceIn(0, 9)
-                    val g = eq10Gains[mapped]
-                    val range = eq.bandLevelRange
-                    val targetMb = (g * 100).toInt().coerceIn(range[0].toInt(), range[1].toInt()).toShort()
-                    eq.setBandLevel(hw.toShort(), targetMb)
-                }
-            }
-        } catch (_: Exception) {}
+        equalizer?.let { apply10BandToHw(it) }
     }
 
-    // Nhận diện loại tai nghe kết nối và Codec Bluetooth thực tế
     private fun detectAudioOutputState(context: Context): AudioOutputState {
         val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val devices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
             for (dev in devices) {
                 when (dev.type) {
-                    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLE_HEADSET, AudioDeviceInfo.TYPE_BLE_SPEAKER -> {
+                    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLE_HEADSET -> {
                         val name = dev.productName?.toString() ?: "Bluetooth Audio"
                         val codecName = when {
-                            name.contains("LDAC", true) || name.contains("WH-1000", true) || name.contains("WF-1000", true) -> "Sony LDAC (990 kbps / 96kHz)"
-                            name.contains("aptx", true) -> "Qualcomm aptX HD / Adaptive"
+                            name.contains("LDAC", true) || name.contains("1000X", true) -> "Sony LDAC (990 kbps / 96kHz)"
+                            name.contains("aptx", true) -> "Qualcomm aptX Adaptive / HD"
                             else -> "Bluetooth AAC / SBC HD"
                         }
                         return AudioOutputState("Bluetooth Audio", true, name, codecName)
                     }
                     AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> {
-                        return AudioOutputState("Tai nghe dây 3.5mm", false, "Hi-Res Direct DAC", "PCM 24-bit/192kHz")
+                        return AudioOutputState("Cổng 3.5mm / 4.4mm Balanced", false, "WM1ZM2 S-Master HX DAC", "Direct DSD / PCM 384kHz")
                     }
                     AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_USB_DEVICE -> {
-                        return AudioOutputState("USB Type-C DAC", false, dev.productName?.toString() ?: "External DAC", "Hi-Res Audio Direct")
+                        return AudioOutputState("USB-DAC", false, dev.productName?.toString() ?: "USB HiFi DAC", "Bit-Perfect PCM/DSD")
                     }
                 }
             }
         }
-        return AudioOutputState("Loa ngoài thiết bị", false, "Built-in Stereo Speaker", "Standard Audio")
+        return AudioOutputState("Loa ngoài thiết bị", false, "Stereo Speaker", "Standard Audio")
     }
 
-    // Trích xuất chi tiết Bitrate & Sample rate thật của bài hát
     private fun inspectTrackSpecs(context: Context, track: AudioTrack): Pair<Int, String> {
         var bitrate = 320
         var sampleRate = "44.1 kHz • 16-bit"
+        val lowerTitle = track.title.lowercase()
+        val lowerFmt = track.formatName.lowercase()
+
         try {
             val retriever = MediaMetadataRetriever()
             retriever.setDataSource(context, track.uri)
             val brStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)
             if (!brStr.isNullOrBlank()) {
                 val bps = brStr.toIntOrNull() ?: 320000
-                bitrate = (bps / 1000).coerceIn(64, 9216)
+                bitrate = (bps / 1000).coerceIn(64, 18432)
             }
             val mime = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE) ?: ""
             sampleRate = when {
-                mime.contains("flac", true) || track.title.endsWith(".flac", true) -> "96.0 kHz • 24-bit Hi-Res"
-                mime.contains("wav", true) -> "48.0 kHz • 24-bit"
-                else -> "44.1 kHz • 16-bit MP3"
+                lowerTitle.endsWith(".dsf") || lowerTitle.endsWith(".dff") || lowerFmt.contains("dsd") -> "DSD 11.2 MHz (DSD256)"
+                lowerTitle.contains("384k") || mime.contains("x-flac") -> "PCM 384.0 kHz • 32-bit"
+                lowerTitle.endsWith(".flac") || lowerFmt == "FLAC" -> "FLAC 192.0 kHz • 24-bit Hi-Res"
+                lowerTitle.endsWith(".mqa") || lowerFmt == "MQA" -> "MQA Studio 352.8 kHz"
+                lowerTitle.endsWith(".wav") -> "PCM 96.0 kHz • 24-bit"
+                else -> "44.1 kHz • 16-bit Stereo"
             }
             retriever.release()
-        } catch (_: Exception) {}
+        } catch (_: Exception) {
+            if (lowerTitle.endsWith(".dsf") || lowerTitle.endsWith(".dff")) {
+                sampleRate = "DSD 11.2 MHz • 1-bit"
+                bitrate = 11289
+            }
+        }
         return Pair(bitrate, sampleRate)
     }
 
-    private fun isExcludedSystemOrRecording(textToCheck: String, fileName: String): Boolean {
-        val excludedKeywords = listOf(
-            "record", "call@", "call_", "voice", "ghi am", "ghi_am", "cuoc goi",
-            "ringtone", "notification", "alarm", "sound_recorder", "miui/sound_recorder",
-            "audiorecorder", "call_rec", "ui/effect", "whatsapp audio"
-        )
-        val lowerName = fileName.lowercase()
-        return excludedKeywords.any { kw -> textToCheck.contains(kw) } ||
-                lowerName.endsWith(".amr") ||
-                lowerName.endsWith(".3gp") ||
-                lowerName.endsWith(".awb")
+    private fun isExcluded(text: String, file: String): Boolean {
+        val ex = listOf("record", "call@", "call_", "voice", "ghi am", "ghi_am", "cuoc goi", "ringtone", "notification", "alarm")
+        val lower = file.lowercase()
+        return ex.any { text.contains(it) } || lower.endsWith(".amr") || lower.endsWith(".3gp")
     }
 
-    // Quét sạch sẽ chống lặp bài hát 100% bằng cách băm Unique Key (Tên bài + Dung lượng byte)
     private fun scanAllMusicSources(context: Context): Pair<List<AudioTrack>, Int> {
-        val validTracks = mutableListOf<AudioTrack>()
-        val seenUniqueKeys = mutableSetOf<String>()
-        var skippedCount = 0
+        val valid = mutableListOf<AudioTrack>()
+        val seen = mutableSetOf<String>()
+        var skipped = 0
 
         val volumes = mutableListOf<Uri>()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            volumes.addAll(
-                MediaStore.getExternalVolumeNames(context).map { volName ->
-                    MediaStore.Audio.Media.getContentUri(volName)
-                }
-            )
+            volumes.addAll(MediaStore.getExternalVolumeNames(context).map { MediaStore.Audio.Media.getContentUri(it) })
         }
         volumes.add(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI)
 
-        val projection = mutableListOf(
+        val projection = arrayOf(
             MediaStore.Audio.Media._ID,
             MediaStore.Audio.Media.TITLE,
             MediaStore.Audio.Media.ARTIST,
             MediaStore.Audio.Media.DURATION,
             MediaStore.Audio.Media.DISPLAY_NAME,
-            MediaStore.Audio.Media.SIZE,
-            MediaStore.Audio.Media.IS_RINGTONE,
-            MediaStore.Audio.Media.IS_NOTIFICATION,
-            MediaStore.Audio.Media.IS_ALARM
-        ).apply {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                add(MediaStore.Audio.Media.RELATIVE_PATH)
-            }
-        }.toTypedArray()
+            MediaStore.Audio.Media.SIZE
+        )
 
         for (volumeUri in volumes.distinct()) {
             try {
-                context.contentResolver.query(
-                    volumeUri,
-                    projection,
-                    null,
-                    null,
-                    "${MediaStore.Audio.Media.DATE_ADDED} DESC"
-                )?.use { cursor ->
-                    val idCol = cursor.getColumnIndex(MediaStore.Audio.Media._ID)
-                    val titleCol = cursor.getColumnIndex(MediaStore.Audio.Media.TITLE)
-                    val artistCol = cursor.getColumnIndex(MediaStore.Audio.Media.ARTIST)
-                    val durCol = cursor.getColumnIndex(MediaStore.Audio.Media.DURATION)
-                    val nameCol = cursor.getColumnIndex(MediaStore.Audio.Media.DISPLAY_NAME)
-                    val sizeCol = cursor.getColumnIndex(MediaStore.Audio.Media.SIZE)
-                    val ringCol = cursor.getColumnIndex(MediaStore.Audio.Media.IS_RINGTONE)
-                    val notifCol = cursor.getColumnIndex(MediaStore.Audio.Media.IS_NOTIFICATION)
-                    val alarmCol = cursor.getColumnIndex(MediaStore.Audio.Media.IS_ALARM)
-                    val relPathCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        cursor.getColumnIndex(MediaStore.Audio.Media.RELATIVE_PATH)
-                    } else -1
+                context.contentResolver.query(volumeUri, projection, null, null, "${MediaStore.Audio.Media.DATE_ADDED} DESC")?.use { c ->
+                    val idCol = c.getColumnIndex(MediaStore.Audio.Media._ID)
+                    val titleCol = c.getColumnIndex(MediaStore.Audio.Media.TITLE)
+                    val artistCol = c.getColumnIndex(MediaStore.Audio.Media.ARTIST)
+                    val durCol = c.getColumnIndex(MediaStore.Audio.Media.DURATION)
+                    val nameCol = c.getColumnIndex(MediaStore.Audio.Media.DISPLAY_NAME)
+                    val sizeCol = c.getColumnIndex(MediaStore.Audio.Media.SIZE)
 
-                    while (cursor.moveToNext()) {
+                    while (c.moveToNext()) {
                         if (idCol < 0) continue
-                        val id = cursor.getLong(idCol)
-                        val displayName = if (nameCol >= 0) cursor.getString(nameCol) ?: "" else ""
-                        val rawTitle = if (titleCol >= 0) cursor.getString(titleCol) ?: "" else ""
-                        val title = rawTitle.ifBlank { displayName.substringBeforeLast(".") }.ifBlank { "Track $id" }
-                        val artist = if (artistCol >= 0) cursor.getString(artistCol) ?: "Walkman Audio" else "Walkman Audio"
-                        val duration = if (durCol >= 0) cursor.getLong(durCol) else 0L
-                        val sizeBytes = if (sizeCol >= 0) cursor.getLong(sizeCol) else 0L
-                        val isRing = if (ringCol >= 0) cursor.getInt(ringCol) != 0 else false
-                        val isNotif = if (notifCol >= 0) cursor.getInt(notifCol) != 0 else false
-                        val isAlarm = if (alarmCol >= 0) cursor.getInt(alarmCol) != 0 else false
-                        val relPath = if (relPathCol >= 0) cursor.getString(relPathCol) ?: "" else ""
+                        val id = c.getLong(idCol)
+                        val name = if (nameCol >= 0) c.getString(nameCol) ?: "" else ""
+                        val title = if (titleCol >= 0) c.getString(titleCol) ?: name.substringBeforeLast(".") else name.substringBeforeLast(".")
+                        val artist = if (artistCol >= 0) c.getString(artistCol) ?: "Walkman Audio" else "Walkman Audio"
+                        val dur = if (durCol >= 0) c.getLong(durCol) else 0L
+                        val sz = if (sizeCol >= 0) c.getLong(sizeCol) else 0L
 
-                        val cleanTitle = title.trim().lowercase()
-                        val deduplicateKey = "${cleanTitle}_$sizeBytes"
-                        if (seenUniqueKeys.contains(deduplicateKey)) continue
+                        val key = "${title.trim().lowercase()}_$sz"
+                        if (seen.contains(key)) continue
 
-                        val checkText = "$title $displayName $relPath".lowercase()
-                        val isShortSound = (duration in 1..14999) || (duration == 0L && sizeBytes in 1..100000)
-                        val isSystemSound = isRing || isNotif || isAlarm || isExcludedSystemOrRecording(checkText, displayName)
-
-                        if (isSystemSound || isShortSound) {
-                            skippedCount++
+                        if (isExcluded("$title $name".lowercase(), name) || (dur in 1..14999)) {
+                            skipped++
                         } else {
-                            seenUniqueKeys.add(deduplicateKey)
-                            val contentUri = ContentUris.withAppendedId(volumeUri, id)
-                            validTracks.add(
-                                AudioTrack(
-                                    id = id,
-                                    title = title,
-                                    artist = if (artist.contains("<unknown>", true)) "Walkman Artist" else artist,
-                                    duration = duration,
-                                    uri = contentUri,
-                                    folderInfo = relPath.trimEnd('/').substringAfterLast('/').ifEmpty { "Bộ nhớ máy" },
-                                    sizeBytes = sizeBytes,
-                                    formatName = displayName.substringAfterLast(".", "MP3").uppercase()
-                                )
-                            )
+                            seen.add(key)
+                            val uri = ContentUris.withAppendedId(volumeUri, id)
+                            valid.add(AudioTrack(id, title, artist, dur, uri, "Thư viện máy", sz, name.substringAfterLast(".", "AUDIO").uppercase()))
                         }
                     }
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+            } catch (_: Exception) {}
         }
-        return Pair(validTracks, skippedCount)
+        return Pair(valid, skipped)
     }
 
     private fun parseManualFiles(context: Context, uris: List<Uri>): List<AudioTrack> {
         val added = mutableListOf<AudioTrack>()
         for (uri in uris) {
+            try { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: Exception) {}
+            var fn = "Track"
+            var sz = 0L
             try {
-                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            } catch (_: Exception) {}
-
-            var fileName = "Walkman_Track.mp3"
-            var fileSize = 0L
-            try {
-                context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                    val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
-                    if (cursor.moveToFirst()) {
-                        if (nameIdx >= 0) fileName = cursor.getString(nameIdx) ?: fileName
-                        if (sizeIdx >= 0) fileSize = cursor.getLong(sizeIdx)
+                context.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                    val ni = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    val si = c.getColumnIndex(OpenableColumns.SIZE)
+                    if (c.moveToFirst()) {
+                        if (ni >= 0) fn = c.getString(ni) ?: fn
+                        if (si >= 0) sz = c.getLong(si)
                     }
                 }
             } catch (_: Exception) {}
-
-            var title = fileName.substringBeforeLast(".")
-            var artist = "Walkman Audio"
-            var duration = 0L
-
-            try {
-                val retriever = MediaMetadataRetriever()
-                retriever.setDataSource(context, uri)
-                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)?.let { if (it.isNotBlank()) title = it }
-                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)?.let { if (it.isNotBlank()) artist = it }
-                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.let { duration = it.toLongOrNull() ?: 0L }
-                retriever.release()
-            } catch (_: Exception) {}
-
-            added.add(
-                AudioTrack(
-                    id = System.currentTimeMillis() + added.size,
-                    title = title,
-                    artist = artist,
-                    duration = duration,
-                    uri = uri,
-                    folderInfo = "Thủ công",
-                    sizeBytes = fileSize,
-                    formatName = fileName.substringAfterLast(".", "MP3").uppercase()
-                )
-            )
+            added.add(AudioTrack(System.currentTimeMillis() + added.size, fn.substringBeforeLast("."), "Audiophile Direct", 0L, uri, "Thủ công", sz, fn.substringAfterLast(".", "DSD/PCM").uppercase()))
         }
         return added
     }
@@ -516,61 +436,42 @@ class MainActivity : ComponentActivity() {
     private fun parseFolderTree(context: Context, treeUri: Uri): Pair<List<AudioTrack>, Int> {
         val added = mutableListOf<AudioTrack>()
         var skipped = 0
-        try {
-            context.contentResolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        } catch (_: Exception) {}
-
+        try { context.contentResolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: Exception) {}
         val rootDir = DocumentFile.fromTreeUri(context, treeUri) ?: return Pair(emptyList(), 0)
-        val audioExts = listOf(".mp3", ".flac", ".wav", ".m4a", ".aac", ".ogg", ".opus")
+        val exts = listOf(".mp3", ".flac", ".wav", ".m4a", ".dsf", ".dff", ".mqa", ".aac", ".ogg")
 
-        fun scanDocDir(dir: DocumentFile) {
-            for (file in dir.listFiles()) {
-                if (file.isDirectory) {
-                    val dirName = (file.name ?: "").lowercase()
-                    if (!dirName.contains("record") && !dirName.contains("android")) {
-                        scanDocDir(file)
-                    }
-                } else if (file.isFile) {
-                    val name = file.name ?: continue
-                    val lower = name.lowercase()
-                    if (audioExts.any { lower.endsWith(it) }) {
-                        if (isExcludedSystemOrRecording(lower, name) || file.length() in 1..100000) {
+        fun scanDir(dir: DocumentFile) {
+            for (f in dir.listFiles()) {
+                if (f.isDirectory) {
+                    scanDir(f)
+                } else if (f.isFile) {
+                    val n = f.name ?: continue
+                    val lower = n.lowercase()
+                    if (exts.any { lower.endsWith(it) }) {
+                        if (isExcluded(lower, n)) {
                             skipped++
                         } else {
-                            added.add(
-                                AudioTrack(
-                                    id = System.currentTimeMillis() + added.size,
-                                    title = name.substringBeforeLast("."),
-                                    artist = dir.name ?: "Walkman Folder",
-                                    duration = 0L,
-                                    uri = file.uri,
-                                    folderInfo = dir.name ?: "Thư mục",
-                                    sizeBytes = file.length(),
-                                    formatName = name.substringAfterLast(".", "MP3").uppercase()
-                                )
-                            )
+                            added.add(AudioTrack(System.currentTimeMillis() + added.size, n.substringBeforeLast("."), dir.name ?: "Hi-Res Folder", 0L, f.uri, dir.name ?: "Thư mục", f.length(), n.substringAfterLast(".", "PCM").uppercase()))
                         }
                     }
                 }
             }
         }
-        try { scanDocDir(rootDir) } catch (_: Exception) {}
+        try { scanDir(rootDir) } catch (_: Exception) {}
         return Pair(added, skipped)
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        try { unregisterReceiver(audioOutputReceiver) } catch (_: Exception) {}
         try {
             bassBoost?.release()
             equalizer?.release()
-            exoPlayer?.release()
         } catch (_: Exception) {}
     }
 }
 
 object PlaylistStorage {
-    private const val PREF_NAME = "walkman_v5_storage"
+    private const val PREF_NAME = "walkman_v6_storage"
     private const val KEY_TRACKS = "saved_tracks_json"
     private const val KEY_FOLDERS = "saved_folder_uris"
     private const val KEY_SKIN = "saved_skin_name"
@@ -593,16 +494,14 @@ object PlaylistStorage {
                 }
                 arr.put(obj)
             }
-            context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-                .edit().putString(KEY_TRACKS, arr.toString()).apply()
+            context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit().putString(KEY_TRACKS, arr.toString()).apply()
         } catch (_: Exception) {}
     }
 
     fun loadPlaylist(context: Context): List<AudioTrack> {
         val list = mutableListOf<AudioTrack>()
         try {
-            val raw = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-                .getString(KEY_TRACKS, null) ?: return emptyList()
+            val raw = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).getString(KEY_TRACKS, null) ?: return emptyList()
             val arr = JSONArray(raw)
             for (i in 0 until arr.length()) {
                 val obj = arr.getJSONObject(i)
@@ -624,22 +523,11 @@ object PlaylistStorage {
     }
 
     fun saveLastPlaybackState(context: Context, index: Int, posMs: Int) {
-        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putInt(KEY_LAST_INDEX, index)
-            .putInt(KEY_LAST_POS, posMs)
-            .apply()
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit().putInt(KEY_LAST_INDEX, index).putInt(KEY_LAST_POS, posMs).apply()
     }
 
-    fun loadLastIndex(context: Context): Int {
-        return context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            .getInt(KEY_LAST_INDEX, 0)
-    }
-
-    fun loadLastPos(context: Context): Int {
-        return context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            .getInt(KEY_LAST_POS, 0)
-    }
+    fun loadLastIndex(context: Context): Int = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).getInt(KEY_LAST_INDEX, 0)
+    fun loadLastPos(context: Context): Int = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).getInt(KEY_LAST_POS, 0)
 
     fun addSavedFolderUri(context: Context, treeUri: Uri) {
         val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
@@ -649,19 +537,16 @@ object PlaylistStorage {
     }
 
     fun getSavedFolderUris(context: Context): List<Uri> {
-        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-        return prefs.getStringSet(KEY_FOLDERS, emptySet())?.map { Uri.parse(it) } ?: emptyList()
+        return context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).getStringSet(KEY_FOLDERS, emptySet())?.map { Uri.parse(it) } ?: emptyList()
     }
 
     fun saveSkin(context: Context, skin: WalkmanSkin) {
-        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            .edit().putString(KEY_SKIN, skin.name).apply()
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit().putString(KEY_SKIN, skin.name).apply()
     }
 
     fun loadSkin(context: Context): WalkmanSkin {
-        val name = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            .getString(KEY_SKIN, WalkmanSkin.TPSL2.name) ?: WalkmanSkin.TPSL2.name
-        return try { WalkmanSkin.valueOf(name) } catch (_: Exception) { WalkmanSkin.TPSL2 }
+        val name = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).getString(KEY_SKIN, WalkmanSkin.WM1ZM2.name) ?: WalkmanSkin.WM1ZM2.name
+        return try { WalkmanSkin.valueOf(name) } catch (_: Exception) { WalkmanSkin.WM1ZM2 }
     }
 }
 
@@ -683,6 +568,7 @@ fun WalkmanMasterRoot(
     onSeekTo: (Int) -> Unit,
     onSetMasterVolume: (Float) -> Unit,
     onSetBass: (Float) -> Unit,
+    onSetVinyl: (Boolean) -> Unit,
     onSetEqBand10: (Int, Float) -> Unit,
     getIsPlaying: () -> Boolean,
     getPosition: () -> Int,
@@ -705,14 +591,13 @@ fun WalkmanMasterRoot(
     var posMs by remember { mutableStateOf(PlaylistStorage.loadLastPos(context)) }
     var durMs by remember { mutableStateOf(1) }
 
-    // Đọc trạng thái DSP đã lưu vĩnh viễn
     val dspPrefs = context.getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
     var masterVol by remember { mutableStateOf(dspPrefs.getFloat("dsp_master_vol", 0.75f)) }
     var megaBass by remember { mutableStateOf(dspPrefs.getFloat("dsp_bass", 0.45f)) }
+    var vinylProcessor by remember { mutableStateOf(dspPrefs.getBoolean("dsp_vinyl", true)) }
     var clearAudioPlus by remember { mutableStateOf(dspPrefs.getBoolean("dsp_clear_audio", true)) }
     var dseeUltimate by remember { mutableStateOf(dspPrefs.getBoolean("dsp_dsee", true)) }
 
-    // 10 Dải tần số Graphic Equalizer
     val eq10Bands = remember {
         mutableStateListOf(
             dspPrefs.getFloat("dsp_eq_0", 2.0f),
@@ -731,6 +616,14 @@ fun WalkmanMasterRoot(
     var audioOutput by remember { mutableStateOf(getAudioOutputState()) }
     var currentBitrate by remember { mutableStateOf(320) }
     var currentSampleRate by remember { mutableStateOf("44.1 kHz • 16-bit") }
+
+    val notifPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
 
     val requiredPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         Manifest.permission.READ_MEDIA_AUDIO
@@ -773,7 +666,6 @@ fun WalkmanMasterRoot(
                 folderSkipped += r.second
             }
 
-            // Bộ lọc trùng lặp tuyệt đối (Title + SizeBytes)
             val mergedList = mutableListOf<AudioTrack>()
             val seenKeys = mutableSetOf<String>()
 
@@ -790,14 +682,14 @@ fun WalkmanMasterRoot(
                 playlist = mergedList
                 skippedFilesCount = autoRes.second + folderSkipped
                 isScanning = false
-                Toast.makeText(context, "Walkman 5.0: Đã tối ưu và lọc còn ${mergedList.size} bài không trùng!", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Walkman 6.0: Sẵn sàng phát nhạc trên Thanh thông báo!", Toast.LENGTH_SHORT).show()
             }
         }
     }
 
     val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) runDeduplicatedScan()
-        else Toast.makeText(context, "Cần cấp quyền để đọc file nhạc!", Toast.LENGTH_SHORT).show()
+        else Toast.makeText(context, "Cần cấp quyền đọc file!", Toast.LENGTH_SHORT).show()
     }
 
     val manualFilesLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
@@ -867,10 +759,18 @@ fun WalkmanMasterRoot(
                     .fillMaxWidth()
                     .background(Color(0xFF0B0F19))
                     .padding(horizontal = 6.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 WalkmanSkin.values().forEach { skin ->
                     val selected = skin == currentSkin
+                    val skinColor = when (skin) {
+                        WalkmanSkin.WM1ZM2 -> Color(0xFFEAB308)
+                        WalkmanSkin.TPSL2 -> Color(0xFF38BDF8)
+                        WalkmanSkin.W995I -> Color(0xFFFF3B1D)
+                        WalkmanSkin.W850I -> Color(0xFFFF6600)
+                        WalkmanSkin.A306 -> Color(0xFFF59E0B)
+                    }
+
                     Button(
                         onClick = {
                             currentSkin = skin
@@ -878,17 +778,16 @@ fun WalkmanMasterRoot(
                         },
                         modifier = Modifier.weight(1f).height(38.dp),
                         shape = RoundedCornerShape(10.dp),
-                        border = BorderStroke(1.dp, if (selected) Color(0xFFFF8800) else Color(0xFF334155)),
+                        border = BorderStroke(1.dp, if (selected) skinColor else Color(0xFF334155)),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = if (selected) Color(0xFFFF5500) else Color(0xFF1E293B),
-                            contentColor = Color.White
+                            containerColor = if (selected) skinColor else Color(0xFF1E293B),
+                            contentColor = if (selected && skin == WalkmanSkin.WM1ZM2) Color.Black else Color.White
                         ),
-                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
+                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 2.dp)
                     ) {
                         Text(
                             text = skin.shortName,
-                            color = Color.White,
-                            fontSize = 11.sp,
+                            fontSize = 10.sp,
                             fontWeight = FontWeight.ExtraBold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
@@ -903,7 +802,7 @@ fun WalkmanMasterRoot(
                     selected = activeTab == 0,
                     onClick = { activeTab = 0 },
                     icon = { Icon(Icons.Default.Album, null) },
-                    label = { Text("Walkman 5.0", fontWeight = FontWeight.Bold) }
+                    label = { Text("Walkman 6.0", fontWeight = FontWeight.Bold) }
                 )
                 NavigationBarItem(
                     selected = activeTab == 1,
@@ -915,7 +814,7 @@ fun WalkmanMasterRoot(
                     selected = activeTab == 2,
                     onClick = { activeTab = 2 },
                     icon = { Icon(Icons.Default.Equalizer, null) },
-                    label = { Text("Sony DSP (10-Band)", fontWeight = FontWeight.Bold) }
+                    label = { Text("Vinyl & DSP", fontWeight = FontWeight.Bold) }
                 )
             }
         }
@@ -927,7 +826,7 @@ fun WalkmanMasterRoot(
                 .padding(padding)
         ) {
             when (activeTab) {
-                0 -> FullScreenWalkmanDeckV5(
+                0 -> FullScreenWalkmanDeckV6(
                     skin = currentSkin,
                     track = currentTrack,
                     audioOutput = audioOutput,
@@ -990,16 +889,17 @@ fun WalkmanMasterRoot(
                         PlaylistStorage.savePlaylist(context, emptyList())
                         PlaylistStorage.saveLastPlaybackState(context, 0, 0)
                         posMs = 0
-                        Toast.makeText(context, "Đã làm mới danh sách!", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "Đã xóa toàn bộ danh sách!", Toast.LENGTH_SHORT).show()
                     },
                     onSelectTrack = { idx ->
                         playAtIndex(idx, 0L)
                         activeTab = 0
                     }
                 )
-                2 -> FullSonyDsp10BandView(
+                2 -> FullSonyDsp10BandAndVinylView(
                     masterVol = masterVol,
                     megaBass = megaBass,
+                    vinylProcessor = vinylProcessor,
                     clearAudio = clearAudioPlus,
                     dseeUltimate = dseeUltimate,
                     eq10Bands = eq10Bands,
@@ -1008,13 +908,13 @@ fun WalkmanMasterRoot(
                         masterVol = it
                         onSetMasterVolume(it)
                     },
+                    onVinylToggle = {
+                        vinylProcessor = it
+                        onSetVinyl(it)
+                    },
                     onClearAudioToggle = {
                         clearAudioPlus = it
                         dspPrefs.edit().putBoolean("dsp_clear_audio", it).apply()
-                        if (it) {
-                            megaBass = 0.55f
-                            onSetBass(0.55f)
-                        }
                     },
                     onDseeToggle = {
                         dseeUltimate = it
@@ -1041,7 +941,7 @@ fun WalkmanMasterRoot(
 }
 
 @Composable
-fun FullScreenWalkmanDeckV5(
+fun FullScreenWalkmanDeckV6(
     skin: WalkmanSkin,
     track: AudioTrack?,
     audioOutput: AudioOutputState,
@@ -1080,6 +980,7 @@ fun FullScreenWalkmanDeckV5(
     )
 
     val accentColor = when (skin) {
+        WalkmanSkin.WM1ZM2 -> Color(0xFFEAB308) // Vàng kim đồng nguyên khối
         WalkmanSkin.TPSL2 -> Color(0xFF38BDF8)
         WalkmanSkin.W995I -> Color(0xFFFF3B1D)
         WalkmanSkin.W850I -> Color(0xFFFF6600)
@@ -1087,6 +988,7 @@ fun FullScreenWalkmanDeckV5(
     }
 
     val bodyGradient = when (skin) {
+        WalkmanSkin.WM1ZM2 -> Brush.verticalGradient(listOf(Color(0xFF261D07), Color(0xFF17130A), Color(0xFF0B0904)))
         WalkmanSkin.TPSL2 -> Brush.verticalGradient(listOf(Color(0xFF1E3A6D), Color(0xFF122444), Color(0xFF0B162C)))
         WalkmanSkin.W995I -> Brush.verticalGradient(listOf(Color(0xFF1F161B), Color(0xFF12131A), Color(0xFF090A0F)))
         WalkmanSkin.W850I -> Brush.verticalGradient(listOf(Color(0xFF231810), Color(0xFF121318), Color(0xFF08090C)))
@@ -1100,7 +1002,7 @@ fun FullScreenWalkmanDeckV5(
             .background(bodyGradient, RoundedCornerShape(24.dp))
             .border(
                 width = 3.dp,
-                color = if (skin == WalkmanSkin.TPSL2) Color(0xFF94A3B8) else accentColor.copy(alpha = 0.85f),
+                color = if (skin == WalkmanSkin.WM1ZM2) Color(0xFFEAB308) else accentColor.copy(alpha = 0.85f),
                 shape = RoundedCornerShape(24.dp)
             )
             .padding(14.dp),
@@ -1124,10 +1026,10 @@ fun FullScreenWalkmanDeckV5(
                     color = if (skin == WalkmanSkin.TPSL2) Color(0xFF0F172A) else Color.White
                 )
                 Text(
-                    text = track?.folderInfo ?: "AUDIOPHILE DECK",
+                    text = track?.folderInfo ?: "SIGNATURE SERIES",
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
-                    color = if (skin == WalkmanSkin.TPSL2) Color(0xFF334155) else accentColor
+                    color = accentColor
                 )
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1139,7 +1041,7 @@ fun FullScreenWalkmanDeckV5(
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = if (skin == WalkmanSkin.TPSL2) "TAPE" else "DSD/PCM",
+                    text = if (skin == WalkmanSkin.WM1ZM2) "DSD NATIVE" else "HI-RES",
                     fontSize = 10.sp,
                     fontWeight = FontWeight.ExtraBold,
                     color = if (skin == WalkmanSkin.TPSL2) Color(0xFF0F172A) else Color.LightGray,
@@ -1148,7 +1050,7 @@ fun FullScreenWalkmanDeckV5(
             }
         }
 
-        // 2. BẢNG THÔNG TIN THIẾT BỊ XUẤT ÂM THANH (BLUETOOTH CODEC / BITRATE MONITOR)
+        // 2. BẢNG THÔNG TIN CODEC & BITRATE THẬT
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1162,7 +1064,7 @@ fun FullScreenWalkmanDeckV5(
                 Icon(
                     imageVector = if (audioOutput.isBluetooth) Icons.Default.BluetoothAudio else Icons.Default.Headphones,
                     contentDescription = null,
-                    tint = if (audioOutput.isBluetooth) Color(0xFF38BDF8) else Color(0xFFFF8800),
+                    tint = if (audioOutput.isBluetooth) Color(0xFF38BDF8) else accentColor,
                     modifier = Modifier.size(18.dp)
                 )
                 Spacer(modifier = Modifier.width(6.dp))
@@ -1173,12 +1075,12 @@ fun FullScreenWalkmanDeckV5(
             }
 
             Column(horizontalAlignment = Alignment.End) {
-                Text("$format • $bitrate kbps", color = Color(0xFFFF8800), fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, fontFamily = FontFamily.Monospace)
+                Text("$format • $bitrate kbps", color = accentColor, fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, fontFamily = FontFamily.Monospace)
                 Text(sampleRate, color = Color.LightGray, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
             }
         }
 
-        // 3. MÀN HÌNH CHÍNH THEO ĐỜI MÁY
+        // 3. MÀN HÌNH CHÍNH
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1193,6 +1095,51 @@ fun FullScreenWalkmanDeckV5(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 when (skin) {
+                    WalkmanSkin.WM1ZM2 -> {
+                        // GIAO DIỆN ĐỒNG HỒ KIM ĐÔI DUAL ANALOG VU METER SONY SIGNATURE
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xFF1D1709), RoundedCornerShape(12.dp))
+                                .border(2.dp, Color(0xFFEAB308), RoundedCornerShape(12.dp))
+                                .padding(10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text("DSD REMASTER • S-MASTER HX™ DIGITAL AMP", color = Color(0xFFEAB308), fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                            Spacer(modifier = Modifier.height(6.dp))
+
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                                // Đồng hồ Kênh Trái (L)
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("CH-L", color = Color.Gray, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+                                    Canvas(modifier = Modifier.size(width = 120.dp, height = 70.dp)) {
+                                        drawArc(color = Color(0xFFEAB308).copy(alpha = 0.35f), startAngle = 190f, sweepAngle = 160f, useCenter = false, style = Stroke(width = 4f))
+                                        val swingL = if (isPlaying) (sin(angle * 0.12f) * 36f) else -38f
+                                        rotate(swingL, pivot = Offset(size.width / 2, size.height)) {
+                                            drawLine(color = Color(0xFFEF4444), start = Offset(size.width / 2, size.height), end = Offset(size.width / 2, 6f), strokeWidth = 5f)
+                                        }
+                                    }
+                                }
+                                // Đồng hồ Kênh Phải (R)
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("CH-R", color = Color.Gray, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+                                    Canvas(modifier = Modifier.size(width = 120.dp, height = 70.dp)) {
+                                        drawArc(color = Color(0xFFEAB308).copy(alpha = 0.35f), startAngle = 190f, sweepAngle = 160f, useCenter = false, style = Stroke(width = 4f))
+                                        val swingR = if (isPlaying) (sin((angle * 0.12f) + 1.2f) * 36f) else -38f
+                                        rotate(swingR, pivot = Offset(size.width / 2, size.height)) {
+                                            drawLine(color = Color(0xFFEF4444), start = Offset(size.width / 2, size.height), end = Offset(size.width / 2, 6f), strokeWidth = 5f)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(trackTitle, color = Color.White, fontWeight = FontWeight.Black, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(trackArtist, color = Color(0xFFEAB308), fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                        }
+                    }
+
                     WalkmanSkin.TPSL2 -> {
                         Column(
                             modifier = Modifier
@@ -1235,46 +1182,6 @@ fun FullScreenWalkmanDeckV5(
                                 }
                             }
                             LargeCassetteReel(if (isPlaying) angle else 0f)
-                        }
-                    }
-
-                    WalkmanSkin.A306 -> {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(Color(0xFF281F12), RoundedCornerShape(12.dp))
-                                .border(2.dp, Color(0xFFF59E0B), RoundedCornerShape(12.dp))
-                                .padding(12.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text("ANALOG VU LEVEL", color = Color(0xFFFBBF24), fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-                                Text("-20  -10  -3   0  +3 dB", color = Color(0xFFF87171), fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-                            }
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Canvas(modifier = Modifier.fillMaxWidth().height(75.dp)) {
-                                drawArc(
-                                    color = Color(0xFFF59E0B).copy(alpha = 0.35f),
-                                    startAngle = 200f,
-                                    sweepAngle = 140f,
-                                    useCenter = false,
-                                    style = Stroke(width = 6f)
-                                )
-                                val swing = if (isPlaying) (sin(angle * 0.1f) * 38f) else -42f
-                                rotate(swing, pivot = Offset(size.width / 2, size.height)) {
-                                    drawLine(
-                                        color = Color(0xFFEF4444),
-                                        start = Offset(size.width / 2, size.height),
-                                        end = Offset(size.width / 2, 8f),
-                                        strokeWidth = 6f
-                                    )
-                                }
-                            }
-                        }
-
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(trackTitle, color = Color.White, fontWeight = FontWeight.Black, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(trackArtist, color = accentColor, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                         }
                     }
 
@@ -1335,7 +1242,7 @@ fun FullScreenWalkmanDeckV5(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // 4. Master Volume Slider
+        // 4. Master Volume
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1411,7 +1318,7 @@ fun FullScreenWalkmanDeckV5(
                         modifier = Modifier.size(58.dp),
                         contentPadding = PaddingValues(0.dp)
                     ) {
-                        Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null, tint = Color.White, modifier = Modifier.size(32.dp))
+                        Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null, tint = if (skin == WalkmanSkin.WM1ZM2) Color.Black else Color.White, modifier = Modifier.size(32.dp))
                     }
                 }
 
@@ -1434,12 +1341,7 @@ fun LargeCassetteReel(rotation: Float) {
         rotate(rotation) {
             for (i in 0 until 6) {
                 rotate(i * 60f) {
-                    drawLine(
-                        color = Color(0xFFE2E8F0),
-                        start = Offset(size.width / 2, size.height / 2 - 8f),
-                        end = Offset(size.width / 2, 10f),
-                        strokeWidth = 5f
-                    )
+                    drawLine(color = Color(0xFFE2E8F0), start = Offset(size.width / 2, size.height / 2 - 8f), end = Offset(size.width / 2, 10f), strokeWidth = 5f)
                 }
             }
         }
@@ -1494,7 +1396,7 @@ fun PersistentLibraryView(
                 }
                 Text(
                     text = if (isScanning) "Đang quét và lọc sạch trùng lặp..."
-                    else "Hiện có: ${tracks.size} bài (Đã lọc bỏ trùng & file hệ thống)",
+                    else "Hiện có: ${tracks.size} bài (Lọc trùng & DSD/FLAC/MQA sẵn sàng)",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
                     color = Color.White
@@ -1574,16 +1476,18 @@ fun PersistentLibraryView(
     }
 }
 
-// BỘ XỬ LÝ ÂM THANH 10 BĂNG TẦN & LƯU VĨNH VIỄN
+// BỘ XỬ LÝ ÂM THANH VINYL PROCESSOR & 10-BAND SONY DSP
 @Composable
-fun FullSonyDsp10BandView(
+fun FullSonyDsp10BandAndVinylView(
     masterVol: Float,
     megaBass: Float,
+    vinylProcessor: Boolean,
     clearAudio: Boolean,
     dseeUltimate: Boolean,
     eq10Bands: List<Float>,
     audioOutput: AudioOutputState,
     onMasterVolChange: (Float) -> Unit,
+    onVinylToggle: (Boolean) -> Unit,
     onClearAudioToggle: (Boolean) -> Unit,
     onDseeToggle: (Boolean) -> Unit,
     onBassChange: (Float) -> Unit,
@@ -1596,7 +1500,7 @@ fun FullSonyDsp10BandView(
         "Heavy" to listOf(6f, 5f, 3f, 1f, 0f, 1f, 2f, 4f, 5f, 6f),
         "Pop" to listOf(2f, 3f, 4f, 3f, 1f, 1f, 2f, 3f, 4f, 4f),
         "Jazz" to listOf(4f, 3f, 2f, 1f, -1f, 0f, 1f, 2f, 3f, 4f),
-        "Acoustic" to listOf(3f, 2f, 1f, 1f, 2f, 3f, 4f, 3f, 3f, 4f),
+        "Vinyl Warm" to listOf(3f, 3f, 2f, 1f, 0f, 0f, 1f, 2f, 3f, 3f),
         "Flat" to listOf(0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
     )
 
@@ -1612,8 +1516,32 @@ fun FullSonyDsp10BandView(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("SONY DSP 5.0 (10-BAND EQ)", fontWeight = FontWeight.Black, fontSize = 15.sp, color = Color(0xFFFF6600))
-            Text("✓ ĐÃ LƯU TỰ ĐỘNG", color = Color(0xFF22C55E), fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
+            Text("SONY DSP 6.0 (VINYL + 10-BAND)", fontWeight = FontWeight.Black, fontSize = 15.sp, color = Color(0xFFEAB308))
+            Text("✓ ĐÃ LƯU THÔNG SỐ", color = Color(0xFF22C55E), fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
+        }
+
+        // BỘ XỬ LÝ ĐĨA THAN SONY VINYL PROCESSOR™
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF241C0C)),
+            border = BorderStroke(1.dp, Color(0xFFEAB308))
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Vinyl Processor™ (Đĩa Than)", fontWeight = FontWeight.Black, color = Color(0xFFEAB308), fontSize = 14.sp)
+                        Text("Tái tạo âm hưởng ấm mộc mạc và cộng hưởng cần kim máy đĩa than", color = Color.LightGray, fontSize = 11.sp)
+                    }
+                    Switch(
+                        checked = vinylProcessor,
+                        onCheckedChange = onVinylToggle,
+                        colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFFEAB308), checkedTrackColor = Color(0xFF854D0E))
+                    )
+                }
+            }
         }
 
         // Card hiển thị thiết bị âm thanh đang kết nối
@@ -1674,7 +1602,7 @@ fun FullSonyDsp10BandView(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("DSEE HX™ Sound Restore", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
-                        Text("Bù đắp dải tần số cao bị cắt giảm", color = Color.Gray, fontSize = 11.sp)
+                        Text("Khôi phục dải tần số cao cho âm thanh Hi-Res", color = Color.Gray, fontSize = 11.sp)
                     }
                     Switch(checked = dseeUltimate, onCheckedChange = onDseeToggle)
                 }

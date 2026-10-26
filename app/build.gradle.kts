@@ -11,8 +11,8 @@ android {
         applicationId = "com.sony.walkmanpro"
         minSdk = 26
         targetSdk = 34
-        versionCode = 70
-        versionName = "7.0-FiioLyricsAndRealDSP"
+        versionCode = 80
+        versionName = "8.0-AutoLyricsHandsFree"
     }
 
     compileOptions {

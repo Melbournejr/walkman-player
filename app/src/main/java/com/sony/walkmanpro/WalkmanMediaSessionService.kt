@@ -26,7 +26,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.tanh
 
-// BỘ XỬ LÝ DSP BẢN 7.0 NGUYÊN BẢN + BỘ CHỐNG RÈ LOA ĐIỆN THOẠI (CLEAN HEADROOM)
+// BỘ XỬ LÝ DSP BẢN 7.0/8.1 NGUYÊN BẢN + BỔ SUNG L/R CHANNEL BALANCE & PHASE INVERTER
 @UnstableApi
 class SonyRealTimeDspProcessor : BaseAudioProcessor() {
     @Volatile var vinylEnabled: Boolean = true
@@ -34,6 +34,10 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
     @Volatile var dseeEnabled: Boolean = true
     @Volatile var megaBassLevel: Float = 0.45f
     @Volatile var eq10Gains = FloatArray(10) { 0f }
+
+    // Tính năng mới: Cân bằng kênh Trái/Phải (-1.0f = Trái, 0.0f = Giữa, +1.0f = Phải) & Đảo pha 180 độ
+    @Volatile var channelBalance: Float = 0f
+    @Volatile var phaseInvert: Boolean = false
 
     private var lowPassL = 0f
     private var lowPassR = 0f
@@ -58,12 +62,16 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
         outputBuffer.order(ByteOrder.LITTLE_ENDIAN)
         inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
 
-        // Hạ nhẹ Pre-gain đầu vào (0.78f) để khi cộng dồn Bass + EQ không bao giờ làm rè loa ngoài điện thoại
+        // Giữ nguyên mạch Pre-gain 0.78f chuẩn 7.0/8.1 không gây rè loa ngoài
         val preGain = 0.78f
         val eqLowGain = ((eq10Gains[0] + eq10Gains[1] + eq10Gains[2]) / 3f) * 0.05f
         val eqMidGain = ((eq10Gains[3] + eq10Gains[4] + eq10Gains[5] + eq10Gains[6]) / 4f) * 0.04f
         val eqHighGain = ((eq10Gains[7] + eq10Gains[8] + eq10Gains[9]) / 3f) * 0.05f
         val totalBassBoost = (megaBassLevel * 0.55f) + eqLowGain
+
+        val leftPanGain = if (channelBalance > 0f) (1f - channelBalance).coerceIn(0f, 1f) else 1f
+        val rightPanGain = if (channelBalance < 0f) (1f + channelBalance).coerceIn(0f, 1f) else 1f
+        val phaseSign = if (phaseInvert) -1f else 1f
 
         while (inputBuffer.remaining() >= 4) {
             var left = (inputBuffer.short / 32768f) * preGain
@@ -103,6 +111,10 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
                 left = tanh(left) * 0.95f
                 right = tanh(right) * 0.95f
             }
+
+            // Áp dụng cân bằng Trái/Phải (L/R Balance) & Đảo pha (Phase Inverter)
+            left = left * leftPanGain * phaseSign
+            right = right * rightPanGain * phaseSign
 
             val outL = (left * 32767f).toInt().coerceIn(-32768, 32767).toShort()
             val outR = (right * 32767f).toInt().coerceIn(-32768, 32767).toShort()

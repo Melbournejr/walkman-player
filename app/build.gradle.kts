@@ -11,8 +11,8 @@ android {
         applicationId = "com.sony.walkmanpro"
         minSdk = 26
         targetSdk = 34
-        versionCode = 81
-        versionName = "8.1-PureAudio70-ExactUTF8Lyrics"
+        versionCode = 90
+        versionName = "9.0-AudiophileMaster"
     }
 
     compileOptions {

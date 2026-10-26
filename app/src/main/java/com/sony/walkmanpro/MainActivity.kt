@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -22,8 +23,8 @@ import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -33,7 +34,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -50,6 +53,7 @@ import androidx.documentfile.provider.DocumentFile
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultRenderersFactory
@@ -57,16 +61,13 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
-import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
-import java.text.Normalizer
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 data class AudioTrack(
@@ -80,7 +81,7 @@ data class AudioTrack(
     var formatName: String = "AUDIO"
 )
 
-data class LyricLine(val timeMs: Long, val text: String)
+data class CuePoint(val timeMs: Int, val label: String)
 
 enum class PlayMode(val label: String) {
     SEQUENTIAL("Tuần tự"),
@@ -112,7 +113,12 @@ class MainActivity : ComponentActivity() {
     private var exoPlayer: ExoPlayer? = null
     private val sonyPcmProcessor = SonyRealTimeDspProcessor()
     private var onTrackEndedCallback: (() -> Unit)? = null
+
     private var masterVolume: Float = 0.75f
+    private var sleepFadeMultiplier: Float = 1.0f
+    private var crossfadeEnabled: Boolean = true
+    private var tapeSpeed: Float = 1.0f
+    private var fadeJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -133,10 +139,19 @@ class MainActivity : ComponentActivity() {
                     onStopPlayback = { stopExo() },
                     onSeekTo = { ms -> seekExo(ms) },
                     onSetMasterVolume = { vol -> updateMasterVolume(vol) },
+                    onSetSleepMultiplier = { mult ->
+                        sleepFadeMultiplier = mult.coerceIn(0f, 1f)
+                        applyEffectiveVolume()
+                    },
                     onSetBass = { level -> updateMegaBass(level) },
                     onSetVinyl = { enabled -> updateVinylEffect(enabled) },
                     onSetClearAudio = { enabled -> updateClearAudio(enabled) },
                     onSetDsee = { enabled -> updateDsee(enabled) },
+                    onSetChannelBalance = { bal -> updateChannelBalance(bal) },
+                    onSetPhaseInvert = { inv -> updatePhaseInvert(inv) },
+                    onSetCrossfade = { cf -> updateCrossfade(cf) },
+                    onSetTapeSpeed = { spd -> updateTapeSpeed(spd) },
+                    onSetKeepScreenOn = { keepOn -> setDeskScreenKeepOn(keepOn) },
                     onSetEqBand10 = { band, gain -> updateEqBand10(band, gain) },
                     getIsPlaying = { exoPlayer?.isPlaying == true },
                     getPosition = { (exoPlayer?.currentPosition ?: 0L).toInt().coerceAtLeast(0) },
@@ -148,6 +163,14 @@ class MainActivity : ComponentActivity() {
                     getTrackSpecs = { track -> inspectTrackSpecs(this@MainActivity, track) }
                 )
             }
+        }
+    }
+
+    private fun setDeskScreenKeepOn(keepOn: Boolean) {
+        if (keepOn) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
     }
 
@@ -174,6 +197,7 @@ class MainActivity : ComponentActivity() {
             .setHandleAudioBecomingNoisy(true)
             .build().apply {
                 volume = masterVolume
+                playbackParameters = PlaybackParameters(tapeSpeed, tapeSpeed)
                 addListener(object : Player.Listener {
                     override fun onPlaybackStateChanged(playbackState: Int) {
                         if (playbackState == Player.STATE_ENDED) {
@@ -191,9 +215,17 @@ class MainActivity : ComponentActivity() {
         sonyPcmProcessor.vinylEnabled = prefs.getBoolean("dsp_vinyl", true)
         sonyPcmProcessor.clearAudioEnabled = prefs.getBoolean("dsp_clear_audio", true)
         sonyPcmProcessor.dseeEnabled = prefs.getBoolean("dsp_dsee", true)
+        sonyPcmProcessor.channelBalance = prefs.getFloat("dsp_balance", 0f)
+        sonyPcmProcessor.phaseInvert = prefs.getBoolean("dsp_phase_invert", false)
+        crossfadeEnabled = prefs.getBoolean("dsp_crossfade", true)
+        tapeSpeed = prefs.getFloat("dsp_tape_speed", 1.0f)
         for (i in 0 until 10) {
             sonyPcmProcessor.eq10Gains[i] = prefs.getFloat("dsp_eq_$i", 0f)
         }
+    }
+
+    private fun applyEffectiveVolume() {
+        exoPlayer?.volume = (masterVolume * sleepFadeMultiplier).coerceIn(0f, 1f)
     }
 
     private fun playWithExo(track: AudioTrack, startMs: Long = 0L) {
@@ -202,8 +234,26 @@ class MainActivity : ComponentActivity() {
             player.setMediaItem(MediaItem.fromUri(track.uri))
             player.prepare()
             if (startMs > 0) player.seekTo(startMs)
-            player.volume = masterVolume
-            player.play()
+            player.playbackParameters = PlaybackParameters(tapeSpeed, tapeSpeed)
+
+            if (crossfadeEnabled) {
+                // Hiệu ứng Smooth Crossfade Fade-In 1.2 giây khi chuyển sang bài mới
+                player.volume = 0.05f
+                player.play()
+                val targetVol = (masterVolume * sleepFadeMultiplier).coerceIn(0f, 1f)
+                Thread {
+                    for (step in 1..12) {
+                        try {
+                            Thread.sleep(90)
+                            val v = (targetVol * (step / 12f)).coerceIn(0f, 1f)
+                            runOnUiThread { exoPlayer?.volume = v }
+                        } catch (_: Exception) {}
+                    }
+                }.start()
+            } else {
+                applyEffectiveVolume()
+                player.play()
+            }
         } catch (e: Exception) {
             Toast.makeText(this, "Không thể phát: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
         }
@@ -211,7 +261,12 @@ class MainActivity : ComponentActivity() {
 
     private fun togglePlayExo(): Boolean {
         val player = exoPlayer ?: return false
-        if (player.isPlaying) player.pause() else player.play()
+        if (player.isPlaying) {
+            player.pause()
+        } else {
+            applyEffectiveVolume()
+            player.play()
+        }
         return player.isPlaying
     }
 
@@ -231,7 +286,7 @@ class MainActivity : ComponentActivity() {
 
     private fun updateMasterVolume(vol: Float) {
         masterVolume = vol.coerceIn(0f, 1f)
-        exoPlayer?.volume = masterVolume
+        applyEffectiveVolume()
         getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
             .edit().putFloat("dsp_master_vol", masterVolume).apply()
     }
@@ -258,6 +313,31 @@ class MainActivity : ComponentActivity() {
         sonyPcmProcessor.dseeEnabled = enabled
         getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
             .edit().putBoolean("dsp_dsee", enabled).apply()
+    }
+
+    private fun updateChannelBalance(bal: Float) {
+        sonyPcmProcessor.channelBalance = bal.coerceIn(-1f, 1f)
+        getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
+            .edit().putFloat("dsp_balance", sonyPcmProcessor.channelBalance).apply()
+    }
+
+    private fun updatePhaseInvert(inv: Boolean) {
+        sonyPcmProcessor.phaseInvert = inv
+        getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
+            .edit().putBoolean("dsp_phase_invert", inv).apply()
+    }
+
+    private fun updateCrossfade(cf: Boolean) {
+        crossfadeEnabled = cf
+        getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
+            .edit().putBoolean("dsp_crossfade", cf).apply()
+    }
+
+    private fun updateTapeSpeed(spd: Float) {
+        tapeSpeed = spd.coerceIn(0.75f, 1.30f)
+        exoPlayer?.playbackParameters = PlaybackParameters(tapeSpeed, tapeSpeed)
+        getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
+            .edit().putFloat("dsp_tape_speed", tapeSpeed).apply()
     }
 
     private fun updateEqBand10(band10Index: Int, gainDb: Float) {
@@ -449,241 +529,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// HỆ THỐNG TÌM LỜI BÀI HÁT CHÍNH XÁC 8.1: BẮT BUỘC KHỚP TÊN BÀI HÁT VIỆT/ANH & CHUẨN FONT UTF-8 TUYỆT ĐỐI
-object AutoLyricsEngine {
-
-    // Chuẩn hóa tiếng Việt không dấu để so khớp chính xác tên bài hát (Chống nhầm sang bài khác)
-    private fun normalizeVietnamese(input: String): String {
-        val temp = Normalizer.normalize(input, Normalizer.Form.NFD)
-        return temp.replace(Regex("\\p{InCombiningDiacriticalMarks}+"), "")
-            .replace('đ', 'd').replace('Đ', 'D')
-            .lowercase()
-            .replace(Regex("[^a-z0-9\\s]"), " ")
-            .replace(Regex("\\s+"), " ")
-            .trim()
-    }
-
-    // Kiểm tra xem bài hát trả về từ Server có thực sự khớp với tên bài hát đang phát hay không
-    private fun isStrictMatch(expectedSongTitle: String, returnedTrackName: String, returnedArtistName: String): Boolean {
-        val normExpected = normalizeVietnamese(expectedSongTitle)
-        val normReturned = normalizeVietnamese(returnedTrackName)
-        if (normExpected.isBlank() || normReturned.isBlank()) return false
-
-        // Nếu tên chuẩn chứa nhau (Ví dụ: "anh thoi nhan nhuong" hoặc "you still live inside")
-        if (normExpected.contains(normReturned) || normReturned.contains(normExpected)) {
-            return true
-        }
-
-        // So khớp tỷ lệ từ khóa chính xác (>= 70% số từ trong tên bài phải trùng khớp)
-        val expectedWords = normExpected.split(" ").filter { it.length >= 2 }
-        val returnedWords = (normReturned + " " + normalizeVietnamese(returnedArtistName)).split(" ").toSet()
-        if (expectedWords.isEmpty()) return false
-
-        val matchedCount = expectedWords.count { returnedWords.contains(it) }
-        return (matchedCount.toFloat() / expectedWords.size.toFloat()) >= 0.70f
-    }
-
-    // Lọc sạch mọi ký tự lỗi font (Mojibake / Control Chars / Replacement Chars)
-    private fun sanitizeUtf8Text(text: String): String {
-        return text
-            .replace("\uFFFD", "")
-            .replace(Regex("[\\p{Cntrl}&&[^\r\n\t]]"), "")
-            .trim()
-    }
-
-    // Tách tên bài hát thật từ tiêu đề YouTube / SnapTube
-    private fun extractExactSongNames(rawTitle: String): List<String> {
-        val results = mutableListOf<String>()
-
-        // Tách theo dấu "|", "||", "__", " - ", " – "
-        val rawSegments = rawTitle
-            .replace("||", "|")
-            .replace("__", "|")
-            .replace(" - ", "|")
-            .replace(" – ", "|")
-            .split("|")
-            .map { seg ->
-                seg.replace(Regex("\\[.*?\\]|\\(.*?\\)|\\{.*?\\}"), " ")
-                    .replace(Regex("(?i)(official|music|video|audio|mv|lyrics|lyric|hd|4k|snaptube|remix|cover|mashup|top hit|bản gốc|new song|mp3|flac)"), " ")
-                    .replace("_", " ")
-                    .replace(Regex("\\s+"), " ")
-                    .trim()
-            }
-            .filter { it.length >= 3 }
-
-        for (seg in rawSegments) {
-            if (seg.contains(" x ", ignoreCase = true)) {
-                val afterX = seg.substringAfterLast(" x ", "").trim()
-                if (afterX.length >= 3) results.add(afterX)
-            }
-            results.add(seg)
-        }
-
-        if (rawSegments.size >= 2) {
-            // Ví dụ: "Alan Walker X Avril Lavigne" + "You Still Live Inside"
-            results.add("${rawSegments[1]} ${rawSegments[0]}")
-            results.add("${rawSegments[0]} ${rawSegments[1]}")
-        }
-
-        return results.distinct()
-    }
-
-    // Truy vấn LRCLIB với chuẩn UTF-8 và kiểm tra khớp tên nghiêm ngặt
-    private fun searchVerifiedLrclib(candidateTitle: String): String? {
-        try {
-            val encoded = URLEncoder.encode(candidateTitle, "UTF-8")
-            val url = URL("https://lrclib.net/api/search?q=$encoded")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 5000
-                readTimeout = 5000
-                setRequestProperty("User-Agent", "SonyWalkmanPro/8.1")
-                setRequestProperty("Accept-Charset", "UTF-8")
-            }
-            if (conn.responseCode == 200) {
-                val rawResponse = conn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
-                val arr = JSONArray(rawResponse)
-                for (i in 0 until arr.length()) {
-                    val obj = arr.getJSONObject(i)
-                    val trackName = obj.optString("trackName", "")
-                    val artistName = obj.optString("artistName", "")
-
-                    // Bắt buộc phải khớp đúng tên bài hát mới lấy lời (Tránh nhầm bài Việt Nam sang bài khác)
-                    if (isStrictMatch(candidateTitle, trackName, artistName)) {
-                        val synced = sanitizeUtf8Text(obj.optString("syncedLyrics", ""))
-                        if (synced.length > 30 && synced != "null") return synced
-
-                        val plain = sanitizeUtf8Text(obj.optString("plainLyrics", ""))
-                        if (plain.length > 30 && plain != "null") return plain
-                    }
-                }
-            }
-        } catch (_: Exception) {}
-        return null
-    }
-
-    // Truy vấn NetEase Cloud với kiểm tra khớp tên nghiêm ngặt (Strict Match)
-    private fun searchVerifiedNetEase(candidateTitle: String): String? {
-        try {
-            val encoded = URLEncoder.encode(candidateTitle, "UTF-8")
-            val searchUrl = URL("https://music.163.com/api/search/get/web?s=$encoded&type=1&offset=0&total=true&limit=6")
-            val conn = (searchUrl.openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                connectTimeout = 5000
-                readTimeout = 5000
-                setRequestProperty("Referer", "https://music.163.com")
-                setRequestProperty("User-Agent", "Mozilla/5.0")
-                setRequestProperty("Accept-Charset", "UTF-8")
-            }
-            if (conn.responseCode == 200) {
-                val root = JSONObject(conn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() })
-                val songs = root.optJSONObject("result")?.optJSONArray("songs") ?: return null
-                for (i in 0 until songs.length()) {
-                    val songObj = songs.getJSONObject(i)
-                    val songId = songObj.optLong("id", 0L)
-                    val songName = songObj.optString("name", "")
-                    val artistsArr = songObj.optJSONArray("artists")
-                    val firstArtist = if (artistsArr != null && artistsArr.length() > 0) {
-                        artistsArr.getJSONObject(0).optString("name", "")
-                    } else ""
-
-                    // Chỉ lấy lời nếu tên bài trên NetEase thực sự trùng với tên bài của bạn
-                    if (songId > 0L && isStrictMatch(candidateTitle, songName, firstArtist)) {
-                        val lrcUrl = URL("https://music.163.com/api/song/lyric?os=pc&id=$songId&lv=-1&kv=-1&tv=-1")
-                        val lrcConn = (lrcUrl.openConnection() as HttpURLConnection).apply {
-                            requestMethod = "GET"
-                            connectTimeout = 5000
-                            readTimeout = 5000
-                            setRequestProperty("Referer", "https://music.163.com")
-                        }
-                        if (lrcConn.responseCode == 200) {
-                            val lrcJson = JSONObject(lrcConn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() })
-                            val lrcText = sanitizeUtf8Text(lrcJson.optJSONObject("lrc")?.optString("lyric", "") ?: "")
-                            if (lrcText.length > 30) return lrcText
-                        }
-                    }
-                }
-            }
-        } catch (_: Exception) {}
-        return null
-    }
-
-    fun autoFetchLyricsHandsFree(context: Context, track: AudioTrack): List<LyricLine> {
-        // Dùng bộ nhớ cache mới hoàn toàn (v81) để xóa sạch mọi lời bị nhầm hoặc lỗi font từ bản 8.0 cũ
-        val prefs = context.getSharedPreferences("walkman_verified_lyrics_v81", Context.MODE_PRIVATE)
-        val cacheKey = "lrc81_${track.title.lowercase().trim()}"
-        val cached = prefs.getString(cacheKey, null)
-        if (!cached.isNullOrBlank()) {
-            return parseCleanLrc(cached)
-        }
-
-        val candidates = extractExactSongNames(track.title)
-
-        // 1. Ưu tiên tìm trên LRCLIB chuẩn UTF-8 Quốc tế & Việt Nam trước
-        for (candidate in candidates) {
-            searchVerifiedLrclib(candidate)?.let { verifiedLrc ->
-                prefs.edit().putString(cacheKey, verifiedLrc).apply()
-                return parseCleanLrc(verifiedLrc)
-            }
-        }
-
-        // 2. Nếu chưa có mới tìm trên NetEase có kiểm duyệt tên bài hát
-        for (candidate in candidates) {
-            searchVerifiedNetEase(candidate)?.let { verifiedLrc ->
-                prefs.edit().putString(cacheKey, verifiedLrc).apply()
-                return parseCleanLrc(verifiedLrc)
-            }
-        }
-
-        // Nếu là file Liên khúc tổng hợp nhiều bài (40-120 phút) không có lời đơn lẻ, hiển thị thông tin sạch đẹp, tuyệt đối không lấy bừa lời bài khác
-        return listOf(
-            LyricLine(0L, "♪ ${track.title} ♪"),
-            LyricLine(4000L, "Nghệ sĩ: ${track.artist}"),
-            LyricLine(8000L, "Thư mục: ${track.folderInfo} • Định dạng: ${track.formatName}"),
-            LyricLine(12000L, "Đang phát qua mạch âm thanh chuẩn Walkman 7.0 Pure Audio")
-        )
-    }
-
-    private fun parseCleanLrc(raw: String): List<LyricLine> {
-        val baseLines = mutableListOf<LyricLine>()
-        val timeRegex = Regex("\\[(\\d{1,2}):(\\d{2})(?:[.:](\\d{1,3}))?\\]")
-        var fallbackTime = 0L
-
-        for (line in raw.lines()) {
-            val cleanLine = sanitizeUtf8Text(line)
-            if (cleanLine.isBlank()) continue
-            if (cleanLine.startsWith("[ti:") || cleanLine.startsWith("[ar:") || cleanLine.startsWith("[al:") || cleanLine.startsWith("[by:") || cleanLine.startsWith("[offset:")) {
-                continue
-            }
-
-            val matches = timeRegex.findAll(cleanLine).toList()
-            if (matches.isNotEmpty()) {
-                val content = sanitizeUtf8Text(cleanLine.replace(timeRegex, ""))
-                if (content.isNotEmpty()) {
-                    for (m in matches) {
-                        val min = m.groupValues[1].toLongOrNull() ?: 0L
-                        val sec = m.groupValues[2].toLongOrNull() ?: 0L
-                        val msStr = m.groupValues[3]
-                        val ms = when (msStr.length) {
-                            1 -> (msStr.toLongOrNull() ?: 0L) * 100L
-                            2 -> (msStr.toLongOrNull() ?: 0L) * 10L
-                            3 -> (msStr.toLongOrNull() ?: 0L)
-                            else -> 0L
-                        }
-                        baseLines.add(LyricLine(min * 60000L + sec * 1000L + ms, content))
-                    }
-                }
-            } else if (!cleanLine.startsWith("[")) {
-                baseLines.add(LyricLine(fallbackTime, cleanLine))
-                fallbackTime += 4000L
-            }
-        }
-
-        val sorted = baseLines.sortedBy { it.timeMs }
-        return if (sorted.isEmpty()) listOf(LyricLine(0L, sanitizeUtf8Text(raw))) else sorted
-    }
-}
-
 object PlaylistStorage {
     private const val PREF_NAME = "walkman_v7_storage"
     private const val KEY_TRACKS = "saved_tracks_json"
@@ -738,6 +583,59 @@ object PlaylistStorage {
         return list
     }
 
+    // Lưu vị trí đang nghe dở của TỪNG BÀI HÁT RIÊNG BIỆT (Cho các file dài 40-128 phút)
+    fun saveTrackPosition(context: Context, trackTitle: String, posMs: Int, index: Int) {
+        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        prefs.edit()
+            .putInt(KEY_LAST_INDEX, index)
+            .putInt(KEY_LAST_POS, posMs)
+            .putInt("pos_${trackTitle.hashCode()}", posMs)
+            .apply()
+    }
+
+    fun getSavedTrackPosition(context: Context, trackTitle: String): Int {
+        return context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .getInt("pos_${trackTitle.hashCode()}", 0)
+    }
+
+    // Lưu và đọc các điểm đánh dấu đoạn nhạc hay (Cue Points / Audio Bookmarks) cho từng bài
+    fun getCuePoints(context: Context, trackTitle: String): List<CuePoint> {
+        val list = mutableListOf<CuePoint>()
+        try {
+            val raw = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+                .getString("cues_${trackTitle.hashCode()}", null) ?: return emptyList()
+            val arr = JSONArray(raw)
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                list.add(CuePoint(o.getInt("timeMs"), o.getString("label")))
+            }
+        } catch (_: Exception) {}
+        return list.sortedBy { it.timeMs }
+    }
+
+    fun addCuePoint(context: Context, trackTitle: String, timeMs: Int): List<CuePoint> {
+        val current = getCuePoints(context, trackTitle).toMutableList()
+        val cueLabel = "Đoạn ${current.size + 1} (${formatTimeMs(timeMs)})"
+        current.add(CuePoint(timeMs, cueLabel))
+        val sorted = current.distinctBy { it.timeMs / 2000 }.sortedBy { it.timeMs }
+        val arr = JSONArray()
+        sorted.forEach { c ->
+            arr.put(JSONObject().apply {
+                put("timeMs", c.timeMs)
+                put("label", c.label)
+            })
+        }
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .edit().putString("cues_${trackTitle.hashCode()}", arr.toString()).apply()
+        return sorted
+    }
+
+    fun clearCuePoints(context: Context, trackTitle: String): List<CuePoint> {
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .edit().remove("cues_${trackTitle.hashCode()}").apply()
+        return emptyList()
+    }
+
     fun loadFavorites(context: Context): Set<String> {
         return context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
             .getStringSet(KEY_FAVORITES, emptySet()) ?: emptySet()
@@ -758,10 +656,6 @@ object PlaylistStorage {
     fun loadPlayMode(context: Context): PlayMode {
         val name = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).getString(KEY_PLAY_MODE, PlayMode.SEQUENTIAL.name) ?: PlayMode.SEQUENTIAL.name
         return try { PlayMode.valueOf(name) } catch (_: Exception) { PlayMode.SEQUENTIAL }
-    }
-
-    fun saveLastPlaybackState(context: Context, index: Int, posMs: Int) {
-        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit().putInt(KEY_LAST_INDEX, index).putInt(KEY_LAST_POS, posMs).apply()
     }
 
     fun loadLastIndex(context: Context): Int = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).getInt(KEY_LAST_INDEX, 0)
@@ -805,10 +699,16 @@ fun WalkmanMasterRoot(
     onStopPlayback: () -> Unit,
     onSeekTo: (Int) -> Unit,
     onSetMasterVolume: (Float) -> Unit,
+    onSetSleepMultiplier: (Float) -> Unit,
     onSetBass: (Float) -> Unit,
     onSetVinyl: (Boolean) -> Unit,
     onSetClearAudio: (Boolean) -> Unit,
     onSetDsee: (Boolean) -> Unit,
+    onSetChannelBalance: (Float) -> Unit,
+    onSetPhaseInvert: (Boolean) -> Unit,
+    onSetCrossfade: (Boolean) -> Unit,
+    onSetTapeSpeed: (Float) -> Unit,
+    onSetKeepScreenOn: (Boolean) -> Unit,
     onSetEqBand10: (Int, Float) -> Unit,
     getIsPlaying: () -> Boolean,
     getPosition: () -> Int,
@@ -828,12 +728,13 @@ fun WalkmanMasterRoot(
     var isScanning by remember { mutableStateOf(false) }
     var currentIndex by remember { mutableStateOf(PlaylistStorage.loadLastIndex(context)) }
     var isPlaying by remember { mutableStateOf(false) }
-    var expandFullLyrics by remember { mutableStateOf(false) }
-    var currentLyrics by remember { mutableStateOf<List<LyricLine>>(emptyList()) }
-    var isFetchingLyrics by remember { mutableStateOf(false) }
-
     var posMs by remember { mutableStateOf(PlaylistStorage.loadLastPos(context)) }
     var durMs by remember { mutableStateOf(1) }
+
+    // Trạng thái 6 tính năng mới
+    var keepScreenOnDeskMode by remember { mutableStateOf(false) }
+    var sleepTimerRemainingSec by remember { mutableStateOf(0) } // 0 = Tắt
+    var currentCuePoints by remember { mutableStateOf<List<CuePoint>>(emptyList()) }
 
     val dspPrefs = context.getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
     var masterVol by remember { mutableStateOf(dspPrefs.getFloat("dsp_master_vol", 0.75f)) }
@@ -841,6 +742,10 @@ fun WalkmanMasterRoot(
     var vinylProcessor by remember { mutableStateOf(dspPrefs.getBoolean("dsp_vinyl", true)) }
     var clearAudioPlus by remember { mutableStateOf(dspPrefs.getBoolean("dsp_clear_audio", true)) }
     var dseeUltimate by remember { mutableStateOf(dspPrefs.getBoolean("dsp_dsee", true)) }
+    var channelBalance by remember { mutableStateOf(dspPrefs.getFloat("dsp_balance", 0f)) }
+    var phaseInvert by remember { mutableStateOf(dspPrefs.getBoolean("dsp_phase_invert", false)) }
+    var crossfadeEnabled by remember { mutableStateOf(dspPrefs.getBoolean("dsp_crossfade", true)) }
+    var tapeSpeed by remember { mutableStateOf(dspPrefs.getFloat("dsp_tape_speed", 1.0f)) }
 
     val eq10Bands = remember {
         mutableStateListOf(
@@ -883,25 +788,36 @@ fun WalkmanMasterRoot(
         }
     }
 
-    fun playAtIndex(idx: Int, resumePos: Long = 0L) {
+    fun playAtIndex(idx: Int, customResumePos: Long? = null) {
         if (playlist.isEmpty()) return
-        val safeIdx = (idx + playlist.size) % playlist.size
-        currentIndex = safeIdx
-        val track = playlist[safeIdx]
-
-        isFetchingLyrics = true
-        scope.launch(Dispatchers.IO) {
-            val specs = getTrackSpecs(track)
-            val lrcs = AutoLyricsEngine.autoFetchLyricsHandsFree(context, track)
-            withContext(Dispatchers.Main) {
-                currentBitrate = specs.first
-                currentSampleRate = specs.second
-                currentLyrics = lrcs
-                isFetchingLyrics = false
+        // Lưu vị trí của bài cũ trước khi chuyển sang bài mới
+        playlist.getOrNull(currentIndex)?.let { oldTrack ->
+            if (posMs > 5000) {
+                PlaylistStorage.saveTrackPosition(context, oldTrack.title, posMs, currentIndex)
             }
         }
 
-        onPlayTrack(track, resumePos) {
+        val safeIdx = (idx + playlist.size) % playlist.size
+        currentIndex = safeIdx
+        val track = playlist[safeIdx]
+        currentCuePoints = PlaylistStorage.getCuePoints(context, track.title)
+
+        // Tự động khôi phục vị trí nghe dở của riêng bài hát này (Nếu bài dài > 10 phút)
+        val savedPosForThisTrack = PlaylistStorage.getSavedTrackPosition(context, track.title)
+        val startMs = customResumePos ?: if (track.duration > 600000L && savedPosForThisTrack > 10000) {
+            Toast.makeText(context, "Khôi phục vị trí đã nghe: ${formatTimeMs(savedPosForThisTrack)}", Toast.LENGTH_SHORT).show()
+            savedPosForThisTrack.toLong()
+        } else 0L
+
+        scope.launch(Dispatchers.IO) {
+            val specs = getTrackSpecs(track)
+            withContext(Dispatchers.Main) {
+                currentBitrate = specs.first
+                currentSampleRate = specs.second
+            }
+        }
+
+        onPlayTrack(track, startMs) {
             val nextIdx = when (playMode) {
                 PlayMode.REPEAT_ONE -> currentIndex
                 PlayMode.SHUFFLE -> playlist.indices.random()
@@ -911,6 +827,24 @@ fun WalkmanMasterRoot(
         }
         isPlaying = true
         updateSystemMediaNotification(true)
+    }
+
+    // Luồng đếm ngược Hẹn giờ tắt nhạc thông minh (Fade-Out Sleep Timer trong 60 giây cuối)
+    LaunchedEffect(sleepTimerRemainingSec > 0) {
+        while (sleepTimerRemainingSec > 0) {
+            delay(1000)
+            sleepTimerRemainingSec--
+            if (sleepTimerRemainingSec in 1..60) {
+                // Giảm âm lượng từ từ trong 60 giây cuối
+                onSetSleepMultiplier(sleepTimerRemainingSec / 60f)
+            } else if (sleepTimerRemainingSec == 0) {
+                onStopPlayback()
+                isPlaying = false
+                onSetSleepMultiplier(1.0f)
+                updateSystemMediaNotification(false)
+                Toast.makeText(context, "Hẹn giờ ngủ: Đã giảm âm và tắt nhạc!", Toast.LENGTH_LONG).show()
+            }
+        }
     }
 
     DisposableEffect(playlist, currentIndex, playMode, isPlaying) {
@@ -928,16 +862,19 @@ fun WalkmanMasterRoot(
                     cmd == "NEXT" -> {
                         if (playlist.isNotEmpty()) {
                             val next = if (playMode == PlayMode.SHUFFLE) playlist.indices.random() else currentIndex + 1
-                            playAtIndex(next, 0L)
+                            playAtIndex(next, null)
                         }
                     }
                     cmd == "PREV" -> {
-                        if (playlist.isNotEmpty()) playAtIndex(currentIndex - 1, 0L)
+                        if (playlist.isNotEmpty()) playAtIndex(currentIndex - 1, null)
                     }
                     cmd.startsWith("SEEK:") -> {
                         val target = cmd.substringAfter("SEEK:").toIntOrNull() ?: 0
                         posMs = target
                         onSeekTo(target)
+                        playlist.getOrNull(currentIndex)?.let {
+                            PlaylistStorage.saveTrackPosition(context, it.title, posMs, currentIndex)
+                        }
                         updateSystemMediaNotification(isPlaying)
                     }
                 }
@@ -1021,14 +958,7 @@ fun WalkmanMasterRoot(
             runDeduplicatedScan()
         }
         playlist.getOrNull(currentIndex)?.let { t ->
-            isFetchingLyrics = true
-            withContext(Dispatchers.IO) {
-                val lrcs = AutoLyricsEngine.autoFetchLyricsHandsFree(context, t)
-                withContext(Dispatchers.Main) {
-                    currentLyrics = lrcs
-                    isFetchingLyrics = false
-                }
-            }
+            currentCuePoints = PlaylistStorage.getCuePoints(context, t.title)
         }
     }
 
@@ -1041,7 +971,9 @@ fun WalkmanMasterRoot(
                 durMs = getDuration().coerceAtLeast(1)
                 tickCounter++
                 if (tickCounter % 5 == 0) {
-                    PlaylistStorage.saveLastPlaybackState(context, currentIndex, posMs)
+                    playlist.getOrNull(currentIndex)?.let { t ->
+                        PlaylistStorage.saveTrackPosition(context, t.title, posMs, currentIndex)
+                    }
                     audioOutput = getAudioOutputState()
                     updateSystemMediaNotification(true)
                 }
@@ -1103,7 +1035,7 @@ fun WalkmanMasterRoot(
                     selected = activeTab == 0,
                     onClick = { activeTab = 0 },
                     icon = { Icon(Icons.Default.Album, null) },
-                    label = { Text("Walkman 8.1", fontWeight = FontWeight.Bold) }
+                    label = { Text("Walkman 9.0", fontWeight = FontWeight.Bold) }
                 )
                 NavigationBarItem(
                     selected = activeTab == 1,
@@ -1115,7 +1047,7 @@ fun WalkmanMasterRoot(
                     selected = activeTab == 2,
                     onClick = { activeTab = 2 },
                     icon = { Icon(Icons.Default.Equalizer, null) },
-                    label = { Text("Audio 7.0 DSP", fontWeight = FontWeight.Bold) }
+                    label = { Text("Audio 7.0 & Tiện ích", fontWeight = FontWeight.Bold) }
                 )
             }
         }
@@ -1127,7 +1059,7 @@ fun WalkmanMasterRoot(
                 .padding(padding)
         ) {
             when (activeTab) {
-                0 -> FullScreenWalkmanDeckV8(
+                0 -> FullScreenWalkmanDeckV9(
                     skin = currentSkin,
                     track = currentTrack,
                     audioOutput = audioOutput,
@@ -1136,9 +1068,10 @@ fun WalkmanMasterRoot(
                     isPlaying = isPlaying,
                     playMode = playMode,
                     isFavorite = isCurrentFavorite,
-                    expandFullLyrics = expandFullLyrics,
-                    lyrics = currentLyrics,
-                    isFetchingLyrics = isFetchingLyrics,
+                    keepScreenOn = keepScreenOnDeskMode,
+                    sleepTimerRemainingSec = sleepTimerRemainingSec,
+                    tapeSpeed = tapeSpeed,
+                    cuePoints = currentCuePoints,
                     posMs = posMs,
                     durMs = durMs,
                     masterVol = masterVol,
@@ -1149,8 +1082,30 @@ fun WalkmanMasterRoot(
                     onSeek = { target ->
                         posMs = target
                         onSeekTo(target)
-                        PlaylistStorage.saveLastPlaybackState(context, currentIndex, posMs)
+                        currentTrack?.let {
+                            PlaylistStorage.saveTrackPosition(context, it.title, posMs, currentIndex)
+                        }
                         updateSystemMediaNotification(isPlaying)
+                    },
+                    onAddCuePoint = {
+                        currentTrack?.let {
+                            currentCuePoints = PlaylistStorage.addCuePoint(context, it.title, posMs)
+                            Toast.makeText(context, "Đã ghim mốc: ${formatTimeMs(posMs)}", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    onClearCuePoints = {
+                        currentTrack?.let {
+                            currentCuePoints = PlaylistStorage.clearCuePoints(context, it.title)
+                        }
+                    },
+                    onToggleDeskMode = {
+                        keepScreenOnDeskMode = !keepScreenOnDeskMode
+                        onSetKeepScreenOn(keepScreenOnDeskMode)
+                        Toast.makeText(
+                            context,
+                            if (keepScreenOnDeskMode) "Đã bật Giữ sáng màn hình (Desk Mode)" else "Đã tắt Giữ sáng màn hình",
+                            Toast.LENGTH_SHORT
+                        ).show()
                     },
                     onCyclePlayMode = {
                         val modes = PlayMode.values()
@@ -1163,7 +1118,6 @@ fun WalkmanMasterRoot(
                             favoriteTitles = PlaylistStorage.toggleFavorite(context, it.title)
                         }
                     },
-                    onToggleExpandLyrics = { expandFullLyrics = !expandFullLyrics },
                     onPlayPause = {
                         if (playlist.isEmpty()) {
                             activeTab = 1
@@ -1175,16 +1129,17 @@ fun WalkmanMasterRoot(
                         }
                     },
                     onPrev = {
-                        if (playlist.isNotEmpty()) playAtIndex(currentIndex - 1, 0L)
+                        if (playlist.isNotEmpty()) playAtIndex(currentIndex - 1, null)
                     },
                     onNext = {
                         if (playlist.isNotEmpty()) {
                             val next = if (playMode == PlayMode.SHUFFLE) playlist.indices.random() else currentIndex + 1
-                            playAtIndex(next, 0L)
+                            playAtIndex(next, null)
                         }
                     }
                 )
                 1 -> FiioStyleCategorizedLibraryView(
+                    context = context,
                     tracks = playlist,
                     favoriteTitles = favoriteTitles,
                     isScanning = isScanning,
@@ -1206,22 +1161,52 @@ fun WalkmanMasterRoot(
                     onSelectTrack = { track ->
                         val realIndex = playlist.indexOfFirst { it.id == track.id && it.title == track.title }
                         if (realIndex >= 0) {
-                            playAtIndex(realIndex, 0L)
+                            playAtIndex(realIndex, null)
                             activeTab = 0
                         }
                     }
                 )
-                2 -> FullSonyDsp10BandAndVinylView(
+                2 -> FullSonyDspAndAudiophileToolsView(
                     masterVol = masterVol,
                     megaBass = megaBass,
                     vinylProcessor = vinylProcessor,
                     clearAudio = clearAudioPlus,
                     dseeUltimate = dseeUltimate,
+                    channelBalance = channelBalance,
+                    phaseInvert = phaseInvert,
+                    crossfade = crossfadeEnabled,
+                    tapeSpeed = tapeSpeed,
+                    sleepTimerRemainingSec = sleepTimerRemainingSec,
                     eq10Bands = eq10Bands,
                     audioOutput = audioOutput,
                     onMasterVolChange = {
                         masterVol = it
                         onSetMasterVolume(it)
+                    },
+                    onSetSleepMinutes = { mins ->
+                        sleepTimerRemainingSec = mins * 60
+                        onSetSleepMultiplier(1.0f)
+                        if (mins > 0) {
+                            Toast.makeText(context, "Hẹn giờ tắt nhạc sau $mins phút (Giảm âm 60s cuối)", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, "Đã tắt Hẹn giờ ngủ", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    onTapeSpeedChange = {
+                        tapeSpeed = it
+                        onSetTapeSpeed(it)
+                    },
+                    onCrossfadeToggle = {
+                        crossfadeEnabled = it
+                        onSetCrossfade(it)
+                    },
+                    onBalanceChange = {
+                        channelBalance = it
+                        onSetChannelBalance(it)
+                    },
+                    onPhaseInvertToggle = {
+                        phaseInvert = it
+                        onSetPhaseInvert(it)
                     },
                     onVinylToggle = {
                         vinylProcessor = it
@@ -1256,7 +1241,7 @@ fun WalkmanMasterRoot(
 }
 
 @Composable
-fun FullScreenWalkmanDeckV8(
+fun FullScreenWalkmanDeckV9(
     skin: WalkmanSkin,
     track: AudioTrack?,
     audioOutput: AudioOutputState,
@@ -1265,17 +1250,20 @@ fun FullScreenWalkmanDeckV8(
     isPlaying: Boolean,
     playMode: PlayMode,
     isFavorite: Boolean,
-    expandFullLyrics: Boolean,
-    lyrics: List<LyricLine>,
-    isFetchingLyrics: Boolean,
+    keepScreenOn: Boolean,
+    sleepTimerRemainingSec: Int,
+    tapeSpeed: Float,
+    cuePoints: List<CuePoint>,
     posMs: Int,
     durMs: Int,
     masterVol: Float,
     onVolumeChange: (Float) -> Unit,
     onSeek: (Int) -> Unit,
+    onAddCuePoint: () -> Unit,
+    onClearCuePoints: () -> Unit,
+    onToggleDeskMode: () -> Unit,
     onCyclePlayMode: () -> Unit,
     onToggleFavorite: () -> Unit,
-    onToggleExpandLyrics: () -> Unit,
     onPlayPause: () -> Unit,
     onPrev: () -> Unit,
     onNext: () -> Unit
@@ -1314,8 +1302,6 @@ fun FullScreenWalkmanDeckV8(
         WalkmanSkin.A306 -> Brush.verticalGradient(listOf(Color(0xFF221D15), Color(0xFF14151C), Color(0xFF0A0B0E)))
     }
 
-    val activeLineIdx = lyrics.indexOfLast { it.timeMs <= posMs }.coerceAtLeast(0)
-
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1330,6 +1316,7 @@ fun FullScreenWalkmanDeckV8(
         verticalArrangement = Arrangement.SpaceBetween,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
+        // 1. Header Walkman + Nút bật/tắt Giữ sáng màn hình (Desk Clock & VU Mode)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1345,31 +1332,48 @@ fun FullScreenWalkmanDeckV8(
                     fontSize = 12.sp,
                     color = if (skin == WalkmanSkin.TPSL2) Color(0xFF0F172A) else Color.White
                 )
-                Text(
-                    text = "📁 ${track?.folderInfo ?: "SIGNATURE SERIES"}",
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = accentColor
-                )
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "📁 ${track?.folderInfo ?: "SIGNATURE SERIES"}",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = accentColor
+                    )
+                    if (sleepTimerRemainingSec > 0) {
+                        Text(
+                            text = "🌙 ${sleepTimerRemainingSec / 60}m${sleepTimerRemainingSec % 60}s",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Black,
+                            color = Color(0xFF22C55E),
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                    if (tapeSpeed != 1.0f) {
+                        Text(
+                            text = "⚡ ${"%.2f".format(tapeSpeed)}x",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Black,
+                            color = Color(0xFF38BDF8),
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(if (isPlaying) Color(0xFF22C55E) else Color.Gray)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = if (isFetchingLyrics) "VERIFYING UTF-8..." else "UTF-8 LYRICS",
-                    fontSize = 9.sp,
-                    fontWeight = FontWeight.Black,
-                    color = if (skin == WalkmanSkin.TPSL2) Color(0xFF0F172A) else accentColor,
-                    fontFamily = FontFamily.Monospace
-                )
+
+            Button(
+                onClick = onToggleDeskMode,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (keepScreenOn) Color(0xFF22C55E) else Color(0xFF0F172A),
+                    contentColor = if (keepScreenOn) Color.Black else Color.White
+                ),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                modifier = Modifier.height(28.dp)
+            ) {
+                Text(if (keepScreenOn) "☀ GIỮ SÁNG: BẬT" else "☀ GIỮ SÁNG", fontSize = 9.sp, fontWeight = FontWeight.Black)
             }
         }
 
+        // 2. BẢNG THÔNG TIN DAC / CODEC / BITRATE
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1399,187 +1403,176 @@ fun FullScreenWalkmanDeckV8(
             }
         }
 
+        // 3. MÀN HÌNH CHÍNH (Hiển thị rộng rãi Đồng hồ VU / Băng Cassette + Hệ thống đánh dấu đoạn nhạc hay Cue Points)
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
                 .background(Color(0xFF080B12), RoundedCornerShape(16.dp))
                 .border(2.dp, Color(0xFF334155), RoundedCornerShape(16.dp))
-                .padding(10.dp)
+                .padding(12.dp)
         ) {
             Column(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.SpaceBetween,
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                if (expandFullLyrics) {
-                    val listState = rememberLazyListState()
-                    LaunchedEffect(activeLineIdx) {
-                        if (lyrics.isNotEmpty()) {
-                            listState.animateScrollToItem((activeLineIdx - 1).coerceAtLeast(0))
-                        }
-                    }
-
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f)
-                            .clickable { onToggleExpandLyrics() },
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(
-                            text = "CHẠM ĐỂ THU NHỎ VỀ MẶT ĐỒNG HỒ WALKMAN",
-                            color = Color.Gray,
-                            fontSize = 9.sp,
-                            fontFamily = FontFamily.Monospace
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        LazyColumn(
-                            state = listState,
-                            modifier = Modifier.fillMaxSize(),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                when (skin) {
+                    WalkmanSkin.WM1ZM2 -> {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xFF1D1709), RoundedCornerShape(12.dp))
+                                .border(2.dp, Color(0xFFEAB308), RoundedCornerShape(12.dp))
+                                .padding(10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
                         ) {
-                            itemsIndexed(lyrics) { idx, line ->
-                                val isCurrent = idx == activeLineIdx
-                                Text(
-                                    text = line.text,
-                                    color = if (isCurrent) accentColor else Color.LightGray.copy(alpha = 0.6f),
-                                    fontSize = if (isCurrent) 15.sp else 12.sp,
-                                    fontWeight = if (isCurrent) FontWeight.Black else FontWeight.Normal,
-                                    textAlign = TextAlign.Center,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { onSeek(line.timeMs.toInt()) }
-                                        .padding(vertical = 3.dp)
-                                )
-                            }
-                        }
-                    }
-                } else {
-                    when (skin) {
-                        WalkmanSkin.WM1ZM2 -> {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(Color(0xFF1D1709), RoundedCornerShape(10.dp))
-                                    .border(1.dp, Color(0xFFEAB308), RoundedCornerShape(10.dp))
-                                    .padding(8.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally
-                            ) {
-                                Text("DSD REMASTER • S-MASTER HX™ DIGITAL AMP", color = Color(0xFFEAB308), fontSize = 9.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                        Text("CH-L", color = Color.Gray, fontSize = 8.sp, fontFamily = FontFamily.Monospace)
-                                        Canvas(modifier = Modifier.size(width = 110.dp, height = 46.dp)) {
-                                            drawArc(color = Color(0xFFEAB308).copy(alpha = 0.35f), startAngle = 190f, sweepAngle = 160f, useCenter = false, style = Stroke(width = 4f))
-                                            val swingL = if (isPlaying) (sin(angle * 0.12f) * 35f) else -38f
-                                            rotate(swingL, pivot = Offset(size.width / 2, size.height)) {
-                                                drawLine(color = Color(0xFFEF4444), start = Offset(size.width / 2, size.height), end = Offset(size.width / 2, 4f), strokeWidth = 4f)
-                                            }
+                            Text("DSD REMASTER • S-MASTER HX™ DIGITAL AMP", color = Color(0xFFEAB308), fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("CH-L", color = Color.Gray, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+                                    Canvas(modifier = Modifier.size(width = 120.dp, height = 68.dp)) {
+                                        drawArc(color = Color(0xFFEAB308).copy(alpha = 0.35f), startAngle = 190f, sweepAngle = 160f, useCenter = false, style = Stroke(width = 4f))
+                                        val swingL = if (isPlaying) (sin(angle * 0.12f) * 35f) else -38f
+                                        rotate(swingL, pivot = Offset(size.width / 2, size.height)) {
+                                            drawLine(color = Color(0xFFEF4444), start = Offset(size.width / 2, size.height), end = Offset(size.width / 2, 4f), strokeWidth = 5f)
                                         }
                                     }
-                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                        Text("CH-R", color = Color.Gray, fontSize = 8.sp, fontFamily = FontFamily.Monospace)
-                                        Canvas(modifier = Modifier.size(width = 110.dp, height = 46.dp)) {
-                                            drawArc(color = Color(0xFFEAB308).copy(alpha = 0.35f), startAngle = 190f, sweepAngle = 160f, useCenter = false, style = Stroke(width = 4f))
-                                            val swingR = if (isPlaying) (sin((angle * 0.12f) + 1.2f) * 35f) else -38f
-                                            rotate(swingR, pivot = Offset(size.width / 2, size.height)) {
-                                                drawLine(color = Color(0xFFEF4444), start = Offset(size.width / 2, size.height), end = Offset(size.width / 2, 4f), strokeWidth = 4f)
-                                            }
+                                }
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("CH-R", color = Color.Gray, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+                                    Canvas(modifier = Modifier.size(width = 120.dp, height = 68.dp)) {
+                                        drawArc(color = Color(0xFFEAB308).copy(alpha = 0.35f), startAngle = 190f, sweepAngle = 160f, useCenter = false, style = Stroke(width = 4f))
+                                        val swingR = if (isPlaying) (sin((angle * 0.12f) + 1.2f) * 35f) else -38f
+                                        rotate(swingR, pivot = Offset(size.width / 2, size.height)) {
+                                            drawLine(color = Color(0xFFEF4444), start = Offset(size.width / 2, size.height), end = Offset(size.width / 2, 4f), strokeWidth = 5f)
                                         }
                                     }
                                 }
                             }
                         }
+                    }
 
-                        WalkmanSkin.TPSL2 -> {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(Color(0xFF162032), RoundedCornerShape(10.dp))
-                                    .border(1.dp, Color(0xFF475569), RoundedCornerShape(10.dp))
-                                    .padding(vertical = 8.dp, horizontal = 12.dp),
-                                horizontalArrangement = Arrangement.SpaceEvenly,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                LargeCassetteReel(if (isPlaying) angle else 0f)
+                    WalkmanSkin.TPSL2 -> {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xFFFDE68A), RoundedCornerShape(8.dp))
+                                .border(2.dp, Color(0xFFD97706), RoundedCornerShape(8.dp))
+                                .padding(horizontal = 12.dp, vertical = 4.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text("SONY CHF-60 • NORMAL POSITION", fontSize = 10.sp, fontWeight = FontWeight.Black, color = Color(0xFF92400E), fontFamily = FontFamily.Monospace)
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xFF162032), RoundedCornerShape(14.dp))
+                                .border(2.dp, Color(0xFF475569), RoundedCornerShape(14.dp))
+                                .padding(vertical = 14.dp, horizontal = 12.dp),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            LargeCassetteReel(if (isPlaying) angle else 0f)
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("TAPE COUNTER", fontSize = 8.sp, color = Color.LightGray, fontFamily = FontFamily.Monospace)
                                 Box(
                                     modifier = Modifier
                                         .background(Color.Black, RoundedCornerShape(4.dp))
                                         .border(1.dp, Color.Gray, RoundedCornerShape(4.dp))
-                                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                                        .padding(horizontal = 10.dp, vertical = 4.dp)
                                 ) {
-                                    Text("%03d".format((posMs / 1000) % 999), color = Color(0xFFF8FAFC), fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Black, fontSize = 15.sp)
-                                }
-                                LargeCassetteReel(if (isPlaying) angle else 0f)
-                            }
-                        }
-
-                        else -> {
-                            Box(contentAlignment = Alignment.Center, modifier = Modifier.size(82.dp)) {
-                                Canvas(modifier = Modifier.fillMaxSize()) {
-                                    rotate(if (isPlaying) angle else 0f) {
-                                        drawCircle(color = accentColor.copy(alpha = 0.2f), style = Stroke(width = 14f))
-                                        drawCircle(color = accentColor, radius = size.minDimension / 2.3f, style = Stroke(width = 5f))
-                                    }
-                                    drawCircle(color = Color.White, radius = 10f)
+                                    Text("%03d".format((posMs / 1000) % 999), color = Color(0xFFF8FAFC), fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Black, fontSize = 18.sp)
                                 }
                             }
+                            LargeCassetteReel(if (isPlaying) angle else 0f)
                         }
                     }
 
-                    val prevLine = lyrics.getOrNull(activeLineIdx - 1)?.text ?: ""
-                    val currLine = if (isFetchingLyrics) "Đang xác thực lời bài hát chuẩn UTF-8..." else (lyrics.getOrNull(activeLineIdx)?.text ?: "♪ ${trackTitle} ♪")
-                    val nextLine = lyrics.getOrNull(activeLineIdx + 1)?.text ?: ""
-
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(Color(0xFF0E131F), RoundedCornerShape(10.dp))
-                            .border(1.dp, accentColor.copy(alpha = 0.35f), RoundedCornerShape(10.dp))
-                            .clickable { onToggleExpandLyrics() }
-                            .padding(vertical = 8.dp, horizontal = 10.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(3.dp)
-                    ) {
-                        if (prevLine.isNotBlank()) {
-                            Text(
-                                text = prevLine,
-                                color = Color.Gray,
-                                fontSize = 11.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                textAlign = TextAlign.Center
-                            )
-                        }
-                        Text(
-                            text = currLine,
-                            color = accentColor,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Black,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            textAlign = TextAlign.Center
-                        )
-                        if (nextLine.isNotBlank()) {
-                            Text(
-                                text = nextLine,
-                                color = Color.LightGray.copy(alpha = 0.75f),
-                                fontSize = 11.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                textAlign = TextAlign.Center
-                            )
+                    else -> {
+                        Box(contentAlignment = Alignment.Center, modifier = Modifier.size(110.dp)) {
+                            Canvas(modifier = Modifier.fillMaxSize()) {
+                                rotate(if (isPlaying) angle else 0f) {
+                                    drawCircle(color = accentColor.copy(alpha = 0.2f), style = Stroke(width = 18f))
+                                    drawCircle(color = accentColor, radius = size.minDimension / 2.3f, style = Stroke(width = 6f))
+                                    drawLine(color = Color.White, start = Offset(size.width / 2, 10f), end = Offset(size.width / 2, 28f), strokeWidth = 5f)
+                                }
+                                drawCircle(color = Color.White, radius = 12f)
+                            }
                         }
                     }
                 }
 
+                // BẢNG ĐÁNH DẤU ĐOẠN NHẠC HAY (AUDIO BOOKMARKS / CUE POINTS CHO FILE DÀI)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF0E131F), RoundedCornerShape(10.dp))
+                        .border(1.dp, Color(0xFF26334D), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "📌 MỐC ĐOẠN NHẠC ĐÃ GHIM (${cuePoints.size})",
+                            color = accentColor,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Black
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            if (cuePoints.isNotEmpty()) {
+                                Text(
+                                    text = "Xóa mốc",
+                                    color = Color(0xFFEF4444),
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.clickable { onClearCuePoints() }
+                                )
+                            }
+                            Text(
+                                text = "+ GHIM ĐOẠN NÀY",
+                                color = Color(0xFF22C55E),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Black,
+                                modifier = Modifier.clickable { onAddCuePoint() }
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+                    if (cuePoints.isEmpty()) {
+                        Text(
+                            text = "Bấm '+ GHIM ĐOẠN NÀY' để đánh dấu bài hay trong file Liên khúc dài",
+                            color = Color.Gray,
+                            fontSize = 10.sp
+                        )
+                    } else {
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            itemsIndexed(cuePoints) { _, cue ->
+                                OutlinedButton(
+                                    onClick = { onSeek(cue.timeMs) },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    modifier = Modifier.height(26.dp)
+                                ) {
+                                    Text(cue.label, fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Tiêu đề bài hát & Ca sĩ
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(trackTitle, color = Color.White, fontWeight = FontWeight.Black, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(trackTitle, color = Color.White, fontWeight = FontWeight.Black, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(trackArtist, color = accentColor, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                 }
 
+                // Thanh tua nhạc (Seekbar)
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Slider(
                         value = posMs.toFloat(),
@@ -1598,6 +1591,7 @@ fun FullScreenWalkmanDeckV8(
 
         Spacer(modifier = Modifier.height(6.dp))
 
+        // 4. Master Volume Slider
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1617,6 +1611,7 @@ fun FullScreenWalkmanDeckV8(
 
         Spacer(modifier = Modifier.height(6.dp))
 
+        // 5. Cụm phím điều khiển + Chế độ phát + Nút Yêu thích
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -1685,7 +1680,7 @@ fun FullScreenWalkmanDeckV8(
 
 @Composable
 fun LargeCassetteReel(rotation: Float) {
-    Canvas(modifier = Modifier.size(54.dp)) {
+    Canvas(modifier = Modifier.size(58.dp)) {
         drawCircle(color = Color(0xFF271C19), radius = size.minDimension / 2)
         drawCircle(color = Color(0xFFE2E8F0), radius = size.minDimension / 2.8f, style = Stroke(width = 5f))
         rotate(rotation) {
@@ -1701,6 +1696,7 @@ fun LargeCassetteReel(rotation: Float) {
 
 @Composable
 fun FiioStyleCategorizedLibraryView(
+    context: Context,
     tracks: List<AudioTrack>,
     favoriteTitles: Set<String>,
     isScanning: Boolean,
@@ -1843,6 +1839,7 @@ fun FiioStyleCategorizedLibraryView(
                 itemsIndexed(displayedTracks) { index, track ->
                     val isFav = favoriteTitles.contains(track.title)
                     val isPlayingTrack = tracks.getOrNull(currentIndex)?.id == track.id
+                    val savedResumePos = PlaylistStorage.getSavedTrackPosition(context, track.title)
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1855,7 +1852,8 @@ fun FiioStyleCategorizedLibraryView(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text("${index + 1}. ${track.title}", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("${track.artist} • 📁 ${track.folderInfo} • ${track.formatName}", color = Color(0xFF94A3B8), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            val resumeText = if (savedResumePos > 10000) " • ⏱ Đang nghe: ${formatTimeMs(savedResumePos)}" else ""
+                            Text("${track.artist} • 📁 ${track.folderInfo}$resumeText", color = Color(0xFF94A3B8), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             if (track.duration > 0) {
@@ -1884,15 +1882,25 @@ fun FiioStyleCategorizedLibraryView(
 }
 
 @Composable
-fun FullSonyDsp10BandAndVinylView(
+fun FullSonyDspAndAudiophileToolsView(
     masterVol: Float,
     megaBass: Float,
     vinylProcessor: Boolean,
     clearAudio: Boolean,
     dseeUltimate: Boolean,
+    channelBalance: Float,
+    phaseInvert: Boolean,
+    crossfade: Boolean,
+    tapeSpeed: Float,
+    sleepTimerRemainingSec: Int,
     eq10Bands: List<Float>,
     audioOutput: AudioOutputState,
     onMasterVolChange: (Float) -> Unit,
+    onSetSleepMinutes: (Int) -> Unit,
+    onTapeSpeedChange: (Float) -> Unit,
+    onCrossfadeToggle: (Boolean) -> Unit,
+    onBalanceChange: (Float) -> Unit,
+    onPhaseInvertToggle: (Boolean) -> Unit,
     onVinylToggle: (Boolean) -> Unit,
     onClearAudioToggle: (Boolean) -> Unit,
     onDseeToggle: (Boolean) -> Unit,
@@ -1922,10 +1930,110 @@ fun FullSonyDsp10BandAndVinylView(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("SONY PURE AUDIO 7.0 ENGINE", fontWeight = FontWeight.Black, fontSize = 15.sp, color = Color(0xFFEAB308))
-            Text("✓ ANTI-CLIPPING ACTIVE", color = Color(0xFF22C55E), fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
+            Text("SONY PURE AUDIO 7.0 + AUDIOPHILE TOOLS", fontWeight = FontWeight.Black, fontSize = 14.sp, color = Color(0xFFEAB308))
+            Text("✓ V9.0 MASTER", color = Color(0xFF22C55E), fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
         }
 
+        // 1. HẸN GIỜ TẮT NHẠC GIẢM ÂM TỪ TỪ (FADE-OUT SLEEP TIMER)
+        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF141C2B))) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("🌙 HẸN GIỜ NGỦ (GIẢM ÂM TỪ TỪ 60S CUỐI)", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 12.sp)
+                    Text(
+                        text = if (sleepTimerRemainingSec > 0) "Còn ${sleepTimerRemainingSec / 60}p ${sleepTimerRemainingSec % 60}s" else "Đang tắt",
+                        color = Color(0xFF22C55E),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Black
+                    )
+                }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(0 to "TẮT", 15 to "15p", 30 to "30p", 45 to "45p", 60 to "60p").forEach { (mins, label) ->
+                        OutlinedButton(
+                            onClick = { onSetSleepMinutes(mins) },
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(vertical = 4.dp, horizontal = 2.dp)
+                        ) {
+                            Text(label, fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. TỐC ĐỘ BĂNG CASSETTE & CHUYỂN BÀI MƯỢT CROSSFADE
+        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF121826))) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("⚡ TỐC ĐỘ BĂNG & CAO ĐỘ (TAPE SPEED)", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 12.sp)
+                    Text("${"%.2f".format(tapeSpeed)}x", color = Color(0xFF38BDF8), fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
+                }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(0.85f to "0.85x Slow", 0.95f to "0.95x Tape", 1.0f to "1.0x Chuẩn", 1.10f to "1.10x Fast", 1.20f to "1.20x Night").forEach { (spd, title) ->
+                        OutlinedButton(
+                            onClick = { onTapeSpeedChange(spd) },
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(vertical = 4.dp, horizontal = 1.dp)
+                        ) {
+                            Text(title, fontSize = 9.sp, color = if (tapeSpeed == spd) Color(0xFFEAB308) else Color.White, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+                HorizontalDivider(color = Color(0xFF1E293B))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Smooth Crossfade Transition", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
+                        Text("Vuốt mượt âm lượng khi chuyển qua bài hát mới", color = Color.Gray, fontSize = 11.sp)
+                    }
+                    Switch(checked = crossfade, onCheckedChange = onCrossfadeToggle)
+                }
+            }
+        }
+
+        // 3. CÂN BẰNG KÊNH TRÁI/PHẢI (L/R BALANCE) & ĐẢO PHA 180° CHO DAC
+        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF121826))) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("🎧 CÂN BẰNG KÊNH TRÁI / PHẢI (L/R BALANCE)", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 12.sp)
+                    val balText = when {
+                        channelBalance < -0.05f -> "L +${(-channelBalance * 100).roundToInt()}%"
+                        channelBalance > 0.05f -> "R +${(channelBalance * 100).roundToInt()}%"
+                        else -> "CENTER (0)"
+                    }
+                    Text(balText, color = Color(0xFFEAB308), fontWeight = FontWeight.Black, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("L", color = Color.LightGray, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    Slider(
+                        value = channelBalance,
+                        onValueChange = onBalanceChange,
+                        valueRange = -0.5f..0.5f,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text("R", color = Color.LightGray, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    TextButton(onClick = { onBalanceChange(0f) }) {
+                        Text("Giữa", color = Color(0xFF38BDF8), fontSize = 11.sp)
+                    }
+                }
+                HorizontalDivider(color = Color(0xFF1E293B))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Phase Inverter (Đảo pha âm thanh 180°)", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
+                        Text("Đảo cực tín hiệu PCM cho USB-DAC & tai nghe cao cấp", color = Color.Gray, fontSize = 11.sp)
+                    }
+                    Switch(checked = phaseInvert, onCheckedChange = onPhaseInvertToggle)
+                }
+            }
+        }
+
+        // 4. MẠCH ÂM THANH SONY 7.0/8.1 NGUYÊN BẢN (VINYL, CLEARAUDIO+, DSEE HX, 10-BAND EQ)
         Card(
             colors = CardDefaults.cardColors(containerColor = Color(0xFF241C0C)),
             border = BorderStroke(1.dp, Color(0xFFEAB308))

@@ -11,8 +11,8 @@ android {
         applicationId = "com.sony.walkmanpro"
         minSdk = 26
         targetSdk = 34
-        versionCode = 45
-        versionName = "4.5-BluetoothFix"
+        versionCode = 50
+        versionName = "5.0-AudiophileEdition"
     }
 
     compileOptions {

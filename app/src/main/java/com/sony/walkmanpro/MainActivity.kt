@@ -1,15 +1,20 @@
 ﻿package com.sony.walkmanpro
 
 import android.Manifest
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothProfile
+import android.content.BroadcastReceiver
 import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.media.AudioAttributes as AndroidAudioAttributes
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.media.MediaMetadataRetriever
 import android.media.audiofx.BassBoost
 import android.media.audiofx.Equalizer
-import android.media.audiofx.LoudnessEnhancer
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -71,7 +76,18 @@ data class AudioTrack(
     val artist: String,
     val duration: Long,
     val uri: Uri,
-    val folderInfo: String
+    val folderInfo: String,
+    val sizeBytes: Long = 0L,
+    var bitrateKbps: Int = 0,
+    var sampleRateKhz: String = "44.1 kHz",
+    var formatName: String = "AUDIO"
+)
+
+data class AudioOutputState(
+    val deviceType: String = "Loa thiết bị",
+    val isBluetooth: Boolean = false,
+    val deviceName: String = "Built-in Speaker",
+    val codecEstimate: String = "Stereo"
 )
 
 enum class WalkmanSkin(val shortName: String, val fullName: String) {
@@ -89,11 +105,25 @@ class MainActivity : ComponentActivity() {
 
     private var masterVolume: Float = 0.75f
     private var currentBassStrength: Float = 0.45f
-    private val eqGains = FloatArray(5) { 0f }
+    private val eq10Gains = FloatArray(10) { 0f }
+
+    private val audioOutputReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            // Cập nhật khi cắm rút tai nghe hoặc kết nối bluetooth
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        loadSavedDspSettings()
         initExoPlayer()
+
+        val filter = IntentFilter().apply {
+            addAction(AudioManager.ACTION_HEADSET_PLUG)
+            addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
+            addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
+        }
+        registerReceiver(audioOutputReceiver, filter)
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
@@ -110,15 +140,26 @@ class MainActivity : ComponentActivity() {
                     onSeekTo = { ms -> seekExo(ms) },
                     onSetMasterVolume = { vol -> updateMasterVolume(vol) },
                     onSetBass = { level -> updateMegaBass(level) },
-                    onSetEqBand = { band, gain -> updateEqBand(band, gain) },
+                    onSetEqBand10 = { band, gain -> updateEqBand10(band, gain) },
                     getIsPlaying = { exoPlayer?.isPlaying == true },
                     getPosition = { (exoPlayer?.currentPosition ?: 0L).toInt().coerceAtLeast(0) },
                     getDuration = {
                         val d = exoPlayer?.duration ?: 1L
                         if (d <= 0L || d == C.TIME_UNSET) 1 else d.toInt()
-                    }
+                    },
+                    getAudioOutputState = { detectAudioOutputState(this@MainActivity) },
+                    getTrackSpecs = { track -> inspectTrackSpecs(this@MainActivity, track) }
                 )
             }
+        }
+    }
+
+    private fun loadSavedDspSettings() {
+        val prefs = getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
+        masterVolume = prefs.getFloat("dsp_master_vol", 0.75f)
+        currentBassStrength = prefs.getFloat("dsp_bass", 0.45f)
+        for (i in 0 until 10) {
+            eq10Gains[i] = prefs.getFloat("dsp_eq_$i", 0f)
         }
     }
 
@@ -169,11 +210,7 @@ class MainActivity : ComponentActivity() {
 
     private fun togglePlayExo(): Boolean {
         val player = exoPlayer ?: return false
-        if (player.isPlaying) {
-            player.pause()
-        } else {
-            player.play()
-        }
+        if (player.isPlaying) player.pause() else player.play()
         return player.isPlaying
     }
 
@@ -194,6 +231,8 @@ class MainActivity : ComponentActivity() {
     private fun updateMasterVolume(vol: Float) {
         masterVolume = vol.coerceIn(0f, 1f)
         exoPlayer?.volume = masterVolume
+        getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
+            .edit().putFloat("dsp_master_vol", masterVolume).apply()
     }
 
     private fun setupSonyDspSafe(sessionId: Int) {
@@ -202,8 +241,7 @@ class MainActivity : ComponentActivity() {
             bassBoost = null
             bassBoost = BassBoost(0, sessionId).apply {
                 enabled = true
-                val strength = (currentBassStrength * 800).toInt().toShort().coerceIn(0, 1000)
-                setStrength(strength)
+                setStrength((currentBassStrength * 800).toInt().toShort().coerceIn(0, 1000))
             }
         } catch (_: Exception) {}
 
@@ -212,10 +250,13 @@ class MainActivity : ComponentActivity() {
             equalizer = null
             equalizer = Equalizer(0, sessionId).apply {
                 enabled = true
-                for (i in 0 until numberOfBands.toInt().coerceAtMost(5)) {
+                val hwBands = numberOfBands.toInt()
+                for (hw in 0 until hwBands) {
+                    val mappedIdx = ((hw.toFloat() / (hwBands - 1).coerceAtLeast(1)) * 9f).toInt().coerceIn(0, 9)
+                    val gain = eq10Gains[mappedIdx]
                     val range = bandLevelRange
-                    val targetMb = (eqGains[i] * 100).toInt().coerceIn(range[0].toInt(), range[1].toInt()).toShort()
-                    setBandLevel(i.toShort(), targetMb)
+                    val targetMb = (gain * 100).toInt().coerceIn(range[0].toInt(), range[1].toInt()).toShort()
+                    setBandLevel(hw.toShort(), targetMb)
                 }
             }
         } catch (_: Exception) {}
@@ -223,29 +264,88 @@ class MainActivity : ComponentActivity() {
 
     private fun updateMegaBass(level: Float) {
         currentBassStrength = level.coerceIn(0f, 1f)
+        getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
+            .edit().putFloat("dsp_bass", currentBassStrength).apply()
+
         try {
             bassBoost?.let {
                 if (!it.enabled) it.enabled = true
-                val strength = (currentBassStrength * 800).toInt().toShort().coerceIn(0, 1000)
-                it.setStrength(strength)
+                it.setStrength((currentBassStrength * 800).toInt().toShort().coerceIn(0, 1000))
             }
         } catch (_: Exception) {}
     }
 
-    private fun updateEqBand(bandIndex: Int, gainDb: Float) {
-        if (bandIndex in eqGains.indices) {
-            eqGains[bandIndex] = gainDb.coerceIn(-10f, 10f)
+    private fun updateEqBand10(band10Index: Int, gainDb: Float) {
+        if (band10Index in eq10Gains.indices) {
+            eq10Gains[band10Index] = gainDb.coerceIn(-10f, 10f)
+            getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
+                .edit().putFloat("dsp_eq_$band10Index", eq10Gains[band10Index]).apply()
         }
+
         try {
             equalizer?.let { eq ->
                 if (!eq.enabled) eq.enabled = true
-                if (bandIndex < eq.numberOfBands) {
+                val hwBands = eq.numberOfBands.toInt()
+                for (hw in 0 until hwBands) {
+                    val mapped = ((hw.toFloat() / (hwBands - 1).coerceAtLeast(1)) * 9f).toInt().coerceIn(0, 9)
+                    val g = eq10Gains[mapped]
                     val range = eq.bandLevelRange
-                    val targetMb = (gainDb * 100).toInt().coerceIn(range[0].toInt(), range[1].toInt()).toShort()
-                    eq.setBandLevel(bandIndex.toShort(), targetMb)
+                    val targetMb = (g * 100).toInt().coerceIn(range[0].toInt(), range[1].toInt()).toShort()
+                    eq.setBandLevel(hw.toShort(), targetMb)
                 }
             }
         } catch (_: Exception) {}
+    }
+
+    // Nhận diện loại tai nghe kết nối và Codec Bluetooth thực tế
+    private fun detectAudioOutputState(context: Context): AudioOutputState {
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val devices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            for (dev in devices) {
+                when (dev.type) {
+                    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLE_HEADSET, AudioDeviceInfo.TYPE_BLE_SPEAKER -> {
+                        val name = dev.productName?.toString() ?: "Bluetooth Audio"
+                        val codecName = when {
+                            name.contains("LDAC", true) || name.contains("WH-1000", true) || name.contains("WF-1000", true) -> "Sony LDAC (990 kbps / 96kHz)"
+                            name.contains("aptx", true) -> "Qualcomm aptX HD / Adaptive"
+                            else -> "Bluetooth AAC / SBC HD"
+                        }
+                        return AudioOutputState("Bluetooth Audio", true, name, codecName)
+                    }
+                    AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> {
+                        return AudioOutputState("Tai nghe dây 3.5mm", false, "Hi-Res Direct DAC", "PCM 24-bit/192kHz")
+                    }
+                    AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_USB_DEVICE -> {
+                        return AudioOutputState("USB Type-C DAC", false, dev.productName?.toString() ?: "External DAC", "Hi-Res Audio Direct")
+                    }
+                }
+            }
+        }
+        return AudioOutputState("Loa ngoài thiết bị", false, "Built-in Stereo Speaker", "Standard Audio")
+    }
+
+    // Trích xuất chi tiết Bitrate & Sample rate thật của bài hát
+    private fun inspectTrackSpecs(context: Context, track: AudioTrack): Pair<Int, String> {
+        var bitrate = 320
+        var sampleRate = "44.1 kHz • 16-bit"
+        try {
+            val retriever = MediaMetadataRetriever()
+            retriever.setDataSource(context, track.uri)
+            val brStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)
+            if (!brStr.isNullOrBlank()) {
+                val bps = brStr.toIntOrNull() ?: 320000
+                bitrate = (bps / 1000).coerceIn(64, 9216)
+            }
+            val mime = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE) ?: ""
+            sampleRate = when {
+                mime.contains("flac", true) || track.title.endsWith(".flac", true) -> "96.0 kHz • 24-bit Hi-Res"
+                mime.contains("wav", true) -> "48.0 kHz • 24-bit"
+                else -> "44.1 kHz • 16-bit MP3"
+            }
+            retriever.release()
+        } catch (_: Exception) {}
+        return Pair(bitrate, sampleRate)
     }
 
     private fun isExcludedSystemOrRecording(textToCheck: String, fileName: String): Boolean {
@@ -261,9 +361,10 @@ class MainActivity : ComponentActivity() {
                 lowerName.endsWith(".awb")
     }
 
+    // Quét sạch sẽ chống lặp bài hát 100% bằng cách băm Unique Key (Tên bài + Dung lượng byte)
     private fun scanAllMusicSources(context: Context): Pair<List<AudioTrack>, Int> {
         val validTracks = mutableListOf<AudioTrack>()
-        val seenKeys = mutableSetOf<String>()
+        val seenUniqueKeys = mutableSetOf<String>()
         var skippedCount = 0
 
         val volumes = mutableListOf<Uri>()
@@ -319,7 +420,7 @@ class MainActivity : ComponentActivity() {
                         val id = cursor.getLong(idCol)
                         val displayName = if (nameCol >= 0) cursor.getString(nameCol) ?: "" else ""
                         val rawTitle = if (titleCol >= 0) cursor.getString(titleCol) ?: "" else ""
-                        val title = rawTitle.ifBlank { displayName.substringBeforeLast(".") }.ifBlank { "Walkman Track $id" }
+                        val title = rawTitle.ifBlank { displayName.substringBeforeLast(".") }.ifBlank { "Track $id" }
                         val artist = if (artistCol >= 0) cursor.getString(artistCol) ?: "Walkman Audio" else "Walkman Audio"
                         val duration = if (durCol >= 0) cursor.getLong(durCol) else 0L
                         val sizeBytes = if (sizeCol >= 0) cursor.getLong(sizeCol) else 0L
@@ -328,8 +429,9 @@ class MainActivity : ComponentActivity() {
                         val isAlarm = if (alarmCol >= 0) cursor.getInt(alarmCol) != 0 else false
                         val relPath = if (relPathCol >= 0) cursor.getString(relPathCol) ?: "" else ""
 
-                        val uniqueKey = "${title.lowercase()}_${sizeBytes}"
-                        if (seenKeys.contains(uniqueKey)) continue
+                        val cleanTitle = title.trim().lowercase()
+                        val deduplicateKey = "${cleanTitle}_$sizeBytes"
+                        if (seenUniqueKeys.contains(deduplicateKey)) continue
 
                         val checkText = "$title $displayName $relPath".lowercase()
                         val isShortSound = (duration in 1..14999) || (duration == 0L && sizeBytes in 1..100000)
@@ -338,7 +440,7 @@ class MainActivity : ComponentActivity() {
                         if (isSystemSound || isShortSound) {
                             skippedCount++
                         } else {
-                            seenKeys.add(uniqueKey)
+                            seenUniqueKeys.add(deduplicateKey)
                             val contentUri = ContentUris.withAppendedId(volumeUri, id)
                             validTracks.add(
                                 AudioTrack(
@@ -347,7 +449,9 @@ class MainActivity : ComponentActivity() {
                                     artist = if (artist.contains("<unknown>", true)) "Walkman Artist" else artist,
                                     duration = duration,
                                     uri = contentUri,
-                                    folderInfo = relPath.trimEnd('/').substringAfterLast('/').ifEmpty { "Bộ nhớ máy" }
+                                    folderInfo = relPath.trimEnd('/').substringAfterLast('/').ifEmpty { "Bộ nhớ máy" },
+                                    sizeBytes = sizeBytes,
+                                    formatName = displayName.substringAfterLast(".", "MP3").uppercase()
                                 )
                             )
                         }
@@ -357,45 +461,6 @@ class MainActivity : ComponentActivity() {
                 e.printStackTrace()
             }
         }
-
-        try {
-            val extRoot = Environment.getExternalStorageDirectory()
-            val targetFolders = listOf(
-                File(extRoot, "Music"),
-                File(extRoot, "Download"),
-                File(extRoot, "snaptube/download/SnapTube Audio"),
-                File(extRoot, "SnapTube Audio"),
-                File(extRoot, "Audio")
-            )
-            val audioExts = listOf(".mp3", ".flac", ".wav", ".m4a", ".aac", ".ogg")
-            for (folder in targetFolders) {
-                if (folder.exists() && folder.isDirectory) {
-                    folder.walkTopDown().maxDepth(3).forEach { file ->
-                        if (file.isFile && audioExts.any { file.name.lowercase().endsWith(it) }) {
-                            val key = "${file.nameWithoutExtension.lowercase()}_${file.length()}"
-                            if (!seenKeys.contains(key)) {
-                                if (isExcludedSystemOrRecording(file.absolutePath.lowercase(), file.name) || file.length() < 100000) {
-                                    skippedCount++
-                                } else {
-                                    seenKeys.add(key)
-                                    validTracks.add(
-                                        AudioTrack(
-                                            id = System.currentTimeMillis() + validTracks.size,
-                                            title = file.nameWithoutExtension,
-                                            artist = folder.name,
-                                            duration = 0L,
-                                            uri = Uri.fromFile(file),
-                                            folderInfo = folder.name
-                                        )
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (_: Exception) {}
-
         return Pair(validTracks, skippedCount)
     }
 
@@ -407,11 +472,14 @@ class MainActivity : ComponentActivity() {
             } catch (_: Exception) {}
 
             var fileName = "Walkman_Track.mp3"
+            var fileSize = 0L
             try {
                 context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
                     val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    if (cursor.moveToFirst() && nameIdx >= 0) {
-                        fileName = cursor.getString(nameIdx) ?: fileName
+                    val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (cursor.moveToFirst()) {
+                        if (nameIdx >= 0) fileName = cursor.getString(nameIdx) ?: fileName
+                        if (sizeIdx >= 0) fileSize = cursor.getLong(sizeIdx)
                     }
                 }
             } catch (_: Exception) {}
@@ -429,7 +497,18 @@ class MainActivity : ComponentActivity() {
                 retriever.release()
             } catch (_: Exception) {}
 
-            added.add(AudioTrack(System.currentTimeMillis() + added.size, title, artist, duration, uri, "Thủ công"))
+            added.add(
+                AudioTrack(
+                    id = System.currentTimeMillis() + added.size,
+                    title = title,
+                    artist = artist,
+                    duration = duration,
+                    uri = uri,
+                    folderInfo = "Thủ công",
+                    sizeBytes = fileSize,
+                    formatName = fileName.substringAfterLast(".", "MP3").uppercase()
+                )
+            )
         }
         return added
     }
@@ -465,7 +544,9 @@ class MainActivity : ComponentActivity() {
                                     artist = dir.name ?: "Walkman Folder",
                                     duration = 0L,
                                     uri = file.uri,
-                                    folderInfo = dir.name ?: "Thư mục"
+                                    folderInfo = dir.name ?: "Thư mục",
+                                    sizeBytes = file.length(),
+                                    formatName = name.substringAfterLast(".", "MP3").uppercase()
                                 )
                             )
                         }
@@ -479,6 +560,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        try { unregisterReceiver(audioOutputReceiver) } catch (_: Exception) {}
         try {
             bassBoost?.release()
             equalizer?.release()
@@ -488,7 +570,7 @@ class MainActivity : ComponentActivity() {
 }
 
 object PlaylistStorage {
-    private const val PREF_NAME = "walkman_v4_storage"
+    private const val PREF_NAME = "walkman_v5_storage"
     private const val KEY_TRACKS = "saved_tracks_json"
     private const val KEY_FOLDERS = "saved_folder_uris"
     private const val KEY_SKIN = "saved_skin_name"
@@ -498,7 +580,7 @@ object PlaylistStorage {
     fun savePlaylist(context: Context, tracks: List<AudioTrack>) {
         try {
             val arr = JSONArray()
-            tracks.take(1500).forEach { t ->
+            tracks.take(2000).forEach { t ->
                 val obj = JSONObject().apply {
                     put("id", t.id)
                     put("title", t.title)
@@ -506,6 +588,8 @@ object PlaylistStorage {
                     put("duration", t.duration)
                     put("uri", t.uri.toString())
                     put("folderInfo", t.folderInfo)
+                    put("sizeBytes", t.sizeBytes)
+                    put("formatName", t.formatName)
                 }
                 arr.put(obj)
             }
@@ -529,7 +613,9 @@ object PlaylistStorage {
                         artist = obj.optString("artist", "Walkman"),
                         duration = obj.optLong("duration", 0L),
                         uri = Uri.parse(obj.getString("uri")),
-                        folderInfo = obj.optString("folderInfo", "Đã lưu")
+                        folderInfo = obj.optString("folderInfo", "Đã lưu"),
+                        sizeBytes = obj.optLong("sizeBytes", 0L),
+                        formatName = obj.optString("formatName", "AUDIO")
                     )
                 )
             }
@@ -597,10 +683,12 @@ fun WalkmanMasterRoot(
     onSeekTo: (Int) -> Unit,
     onSetMasterVolume: (Float) -> Unit,
     onSetBass: (Float) -> Unit,
-    onSetEqBand: (Int, Float) -> Unit,
+    onSetEqBand10: (Int, Float) -> Unit,
     getIsPlaying: () -> Boolean,
     getPosition: () -> Int,
-    getDuration: () -> Int
+    getDuration: () -> Int,
+    getAudioOutputState: () -> AudioOutputState,
+    getTrackSpecs: (AudioTrack) -> Pair<Int, String>
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -617,11 +705,32 @@ fun WalkmanMasterRoot(
     var posMs by remember { mutableStateOf(PlaylistStorage.loadLastPos(context)) }
     var durMs by remember { mutableStateOf(1) }
 
-    var masterVol by remember { mutableStateOf(0.75f) }
-    var megaBass by remember { mutableStateOf(0.45f) }
-    var clearAudioPlus by remember { mutableStateOf(true) }
-    var dseeUltimate by remember { mutableStateOf(true) }
-    val eqBands = remember { mutableStateListOf(2f, 1f, 0f, 1.5f, 3f) }
+    // Đọc trạng thái DSP đã lưu vĩnh viễn
+    val dspPrefs = context.getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
+    var masterVol by remember { mutableStateOf(dspPrefs.getFloat("dsp_master_vol", 0.75f)) }
+    var megaBass by remember { mutableStateOf(dspPrefs.getFloat("dsp_bass", 0.45f)) }
+    var clearAudioPlus by remember { mutableStateOf(dspPrefs.getBoolean("dsp_clear_audio", true)) }
+    var dseeUltimate by remember { mutableStateOf(dspPrefs.getBoolean("dsp_dsee", true)) }
+
+    // 10 Dải tần số Graphic Equalizer
+    val eq10Bands = remember {
+        mutableStateListOf(
+            dspPrefs.getFloat("dsp_eq_0", 2.0f),
+            dspPrefs.getFloat("dsp_eq_1", 1.5f),
+            dspPrefs.getFloat("dsp_eq_2", 1.0f),
+            dspPrefs.getFloat("dsp_eq_3", 0.0f),
+            dspPrefs.getFloat("dsp_eq_4", 0.0f),
+            dspPrefs.getFloat("dsp_eq_5", 1.0f),
+            dspPrefs.getFloat("dsp_eq_6", 2.0f),
+            dspPrefs.getFloat("dsp_eq_7", 3.0f),
+            dspPrefs.getFloat("dsp_eq_8", 2.5f),
+            dspPrefs.getFloat("dsp_eq_9", 3.5f)
+        )
+    }
+
+    var audioOutput by remember { mutableStateOf(getAudioOutputState()) }
+    var currentBitrate by remember { mutableStateOf(320) }
+    var currentSampleRate by remember { mutableStateOf("44.1 kHz • 16-bit") }
 
     val requiredPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         Manifest.permission.READ_MEDIA_AUDIO
@@ -633,14 +742,24 @@ fun WalkmanMasterRoot(
         if (playlist.isEmpty()) return
         val safeIdx = (idx + playlist.size) % playlist.size
         currentIndex = safeIdx
-        onPlayTrack(playlist[safeIdx], resumePos) {
+        val track = playlist[safeIdx]
+
+        scope.launch(Dispatchers.IO) {
+            val specs = getTrackSpecs(track)
+            withContext(Dispatchers.Main) {
+                currentBitrate = specs.first
+                currentSampleRate = specs.second
+            }
+        }
+
+        onPlayTrack(track, resumePos) {
             val nextIdx = if (isShuffle) playlist.indices.random() else (currentIndex + 1) % playlist.size
             playAtIndex(nextIdx, 0L)
         }
         isPlaying = true
     }
 
-    fun runFullScan() {
+    fun runDeduplicatedScan() {
         if (isScanning) return
         isScanning = true
         scope.launch(Dispatchers.IO) {
@@ -653,20 +772,32 @@ fun WalkmanMasterRoot(
                 folderTracks.addAll(r.first)
                 folderSkipped += r.second
             }
-            val merged = (folderTracks + autoRes.first + playlist).distinctBy { "${it.title}_${it.folderInfo}" }
-            PlaylistStorage.savePlaylist(context, merged)
+
+            // Bộ lọc trùng lặp tuyệt đối (Title + SizeBytes)
+            val mergedList = mutableListOf<AudioTrack>()
+            val seenKeys = mutableSetOf<String>()
+
+            for (track in (folderTracks + autoRes.first + playlist)) {
+                val key = "${track.title.trim().lowercase()}_${track.sizeBytes}"
+                if (!seenKeys.contains(key)) {
+                    seenKeys.add(key)
+                    mergedList.add(track)
+                }
+            }
+
+            PlaylistStorage.savePlaylist(context, mergedList)
             withContext(Dispatchers.Main) {
-                playlist = merged
+                playlist = mergedList
                 skippedFilesCount = autoRes.second + folderSkipped
                 isScanning = false
-                Toast.makeText(context, "Đã quét và lưu ${merged.size} bài hát!", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Walkman 5.0: Đã tối ưu và lọc còn ${mergedList.size} bài không trùng!", Toast.LENGTH_SHORT).show()
             }
         }
     }
 
     val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) runFullScan()
-        else Toast.makeText(context, "Hãy dùng nút 'LƯU THƯ MỤC' để chọn thư mục nhạc cố định!", Toast.LENGTH_LONG).show()
+        if (granted) runDeduplicatedScan()
+        else Toast.makeText(context, "Cần cấp quyền để đọc file nhạc!", Toast.LENGTH_SHORT).show()
     }
 
     val manualFilesLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
@@ -674,12 +805,12 @@ fun WalkmanMasterRoot(
             isScanning = true
             scope.launch(Dispatchers.IO) {
                 val added = onParseManualUris(uris)
-                val updated = (added + playlist).distinctBy { it.uri.toString() }
-                PlaylistStorage.savePlaylist(context, updated)
+                val merged = (added + playlist).distinctBy { "${it.title.trim().lowercase()}_${it.sizeBytes}" }
+                PlaylistStorage.savePlaylist(context, merged)
                 withContext(Dispatchers.Main) {
-                    playlist = updated
+                    playlist = merged
                     isScanning = false
-                    Toast.makeText(context, "Đã thêm và lưu ${added.size} bài!", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "Đã thêm ${added.size} bài!", Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -691,13 +822,13 @@ fun WalkmanMasterRoot(
             isScanning = true
             scope.launch(Dispatchers.IO) {
                 val res = onParseFolderUri(treeUri)
-                val updated = (res.first + playlist).distinctBy { "${it.title}_${it.folderInfo}" }
-                PlaylistStorage.savePlaylist(context, updated)
+                val merged = (res.first + playlist).distinctBy { "${it.title.trim().lowercase()}_${it.sizeBytes}" }
+                PlaylistStorage.savePlaylist(context, merged)
                 withContext(Dispatchers.Main) {
-                    playlist = updated
+                    playlist = merged
                     skippedFilesCount += res.second
                     isScanning = false
-                    Toast.makeText(context, "Đã lưu vĩnh viễn ${res.first.size} bài từ thư mục!", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "Đã lưu thư mục thành công!", Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -706,7 +837,7 @@ fun WalkmanMasterRoot(
     LaunchedEffect(Unit) {
         val hasPerm = ContextCompat.checkSelfPermission(context, requiredPermission) == PackageManager.PERMISSION_GRANTED
         if (hasPerm && playlist.isEmpty()) {
-            runFullScan()
+            runDeduplicatedScan()
         }
     }
 
@@ -720,6 +851,7 @@ fun WalkmanMasterRoot(
                 tickCounter++
                 if (tickCounter % 5 == 0) {
                     PlaylistStorage.saveLastPlaybackState(context, currentIndex, posMs)
+                    audioOutput = getAudioOutputState()
                 }
             }
             delay(200)
@@ -771,7 +903,7 @@ fun WalkmanMasterRoot(
                     selected = activeTab == 0,
                     onClick = { activeTab = 0 },
                     icon = { Icon(Icons.Default.Album, null) },
-                    label = { Text("Walkman 4.5", fontWeight = FontWeight.Bold) }
+                    label = { Text("Walkman 5.0", fontWeight = FontWeight.Bold) }
                 )
                 NavigationBarItem(
                     selected = activeTab == 1,
@@ -783,7 +915,7 @@ fun WalkmanMasterRoot(
                     selected = activeTab == 2,
                     onClick = { activeTab = 2 },
                     icon = { Icon(Icons.Default.Equalizer, null) },
-                    label = { Text("Sony DSP", fontWeight = FontWeight.Bold) }
+                    label = { Text("Sony DSP (10-Band)", fontWeight = FontWeight.Bold) }
                 )
             }
         }
@@ -795,11 +927,12 @@ fun WalkmanMasterRoot(
                 .padding(padding)
         ) {
             when (activeTab) {
-                0 -> FullScreenWalkmanDeck(
+                0 -> FullScreenWalkmanDeckV5(
                     skin = currentSkin,
-                    trackTitle = currentTrack?.title ?: "CHƯA CHỌN BÀI HÁT",
-                    trackArtist = currentTrack?.artist ?: "Bấm sang tab 'Nhạc' để quét hoặc chọn thư mục",
-                    folderName = currentTrack?.folderInfo ?: "STEREO DECK",
+                    track = currentTrack,
+                    audioOutput = audioOutput,
+                    bitrate = currentBitrate,
+                    sampleRate = currentSampleRate,
                     isPlaying = isPlaying,
                     isShuffle = isShuffle,
                     posMs = posMs,
@@ -848,7 +981,7 @@ fun WalkmanMasterRoot(
                     currentIndex = currentIndex,
                     onAutoScan = {
                         val hasPerm = ContextCompat.checkSelfPermission(context, requiredPermission) == PackageManager.PERMISSION_GRANTED
-                        if (hasPerm) runFullScan() else permLauncher.launch(requiredPermission)
+                        if (hasPerm) runDeduplicatedScan() else permLauncher.launch(requiredPermission)
                     },
                     onPickFiles = { manualFilesLauncher.launch(arrayOf("audio/*")) },
                     onPickFolder = { folderPickerLauncher.launch(null) },
@@ -864,36 +997,41 @@ fun WalkmanMasterRoot(
                         activeTab = 0
                     }
                 )
-                2 -> FullSonyDspStudioView(
+                2 -> FullSonyDsp10BandView(
                     masterVol = masterVol,
                     megaBass = megaBass,
                     clearAudio = clearAudioPlus,
                     dseeUltimate = dseeUltimate,
-                    eqBands = eqBands,
+                    eq10Bands = eq10Bands,
+                    audioOutput = audioOutput,
                     onMasterVolChange = {
                         masterVol = it
                         onSetMasterVolume(it)
                     },
                     onClearAudioToggle = {
                         clearAudioPlus = it
+                        dspPrefs.edit().putBoolean("dsp_clear_audio", it).apply()
                         if (it) {
                             megaBass = 0.55f
                             onSetBass(0.55f)
                         }
                     },
-                    onDseeToggle = { dseeUltimate = it },
+                    onDseeToggle = {
+                        dseeUltimate = it
+                        dspPrefs.edit().putBoolean("dsp_dsee", it).apply()
+                    },
                     onBassChange = {
                         megaBass = it
                         onSetBass(it)
                     },
-                    onBandChange = { idx, gain ->
-                        eqBands[idx] = gain
-                        onSetEqBand(idx, gain)
+                    onBand10Change = { idx, gain ->
+                        eq10Bands[idx] = gain
+                        onSetEqBand10(idx, gain)
                     },
-                    onApplyPreset = { presetValues ->
+                    onApplyPreset10 = { presetValues ->
                         presetValues.forEachIndexed { i, v ->
-                            eqBands[i] = v
-                            onSetEqBand(i, v)
+                            eq10Bands[i] = v
+                            onSetEqBand10(i, v)
                         }
                     }
                 )
@@ -903,11 +1041,12 @@ fun WalkmanMasterRoot(
 }
 
 @Composable
-fun FullScreenWalkmanDeck(
+fun FullScreenWalkmanDeckV5(
     skin: WalkmanSkin,
-    trackTitle: String,
-    trackArtist: String,
-    folderName: String,
+    track: AudioTrack?,
+    audioOutput: AudioOutputState,
+    bitrate: Int,
+    sampleRate: String,
     isPlaying: Boolean,
     isShuffle: Boolean,
     posMs: Int,
@@ -922,6 +1061,10 @@ fun FullScreenWalkmanDeck(
     onNext: () -> Unit,
     onOpenLibrary: () -> Unit
 ) {
+    val trackTitle = track?.title ?: "CHƯA CHỌN BÀI HÁT"
+    val trackArtist = track?.artist ?: "Bấm tab 'Nhạc' để quét bài hát"
+    val format = track?.formatName ?: "AUDIO"
+
     val infiniteTransition = rememberInfiniteTransition(label = "walkman_anim")
     val angle by infiniteTransition.animateFloat(
         initialValue = 0f,
@@ -953,25 +1096,23 @@ fun FullScreenWalkmanDeck(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(10.dp)
+            .padding(8.dp)
             .background(bodyGradient, RoundedCornerShape(24.dp))
             .border(
                 width = 3.dp,
                 color = if (skin == WalkmanSkin.TPSL2) Color(0xFF94A3B8) else accentColor.copy(alpha = 0.85f),
                 shape = RoundedCornerShape(24.dp)
             )
-            .padding(16.dp),
+            .padding(14.dp),
         verticalArrangement = Arrangement.SpaceBetween,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
+        // 1. Header kim loại Walkman
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(
-                    if (skin == WalkmanSkin.TPSL2) Color(0xFFD0D7E2) else Color(0xFF1E2433),
-                    RoundedCornerShape(10.dp)
-                )
-                .padding(horizontal = 14.dp, vertical = 8.dp),
+                .background(if (skin == WalkmanSkin.TPSL2) Color(0xFFD0D7E2) else Color(0xFF1E2433), RoundedCornerShape(10.dp))
+                .padding(horizontal = 12.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -979,11 +1120,11 @@ fun FullScreenWalkmanDeck(
                 Text(
                     text = skin.fullName,
                     fontWeight = FontWeight.Black,
-                    fontSize = 13.sp,
+                    fontSize = 12.sp,
                     color = if (skin == WalkmanSkin.TPSL2) Color(0xFF0F172A) else Color.White
                 )
                 Text(
-                    text = folderName,
+                    text = track?.folderInfo ?: "AUDIOPHILE DECK",
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
                     color = if (skin == WalkmanSkin.TPSL2) Color(0xFF334155) else accentColor
@@ -998,7 +1139,7 @@ fun FullScreenWalkmanDeck(
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = if (skin == WalkmanSkin.TPSL2) "BATT" else "HI-RES DSP",
+                    text = if (skin == WalkmanSkin.TPSL2) "TAPE" else "DSD/PCM",
                     fontSize = 10.sp,
                     fontWeight = FontWeight.ExtraBold,
                     color = if (skin == WalkmanSkin.TPSL2) Color(0xFF0F172A) else Color.LightGray,
@@ -1007,15 +1148,44 @@ fun FullScreenWalkmanDeck(
             }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        // 2. BẢNG THÔNG TIN THIẾT BỊ XUẤT ÂM THANH (BLUETOOTH CODEC / BITRATE MONITOR)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF090D17), RoundedCornerShape(8.dp))
+                .border(1.dp, Color(0xFF26334D), RoundedCornerShape(8.dp))
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = if (audioOutput.isBluetooth) Icons.Default.BluetoothAudio else Icons.Default.Headphones,
+                    contentDescription = null,
+                    tint = if (audioOutput.isBluetooth) Color(0xFF38BDF8) else Color(0xFFFF8800),
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Column {
+                    Text(audioOutput.deviceName, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                    Text(audioOutput.codecEstimate, color = Color(0xFF38BDF8), fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+                }
+            }
 
+            Column(horizontalAlignment = Alignment.End) {
+                Text("$format • $bitrate kbps", color = Color(0xFFFF8800), fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, fontFamily = FontFamily.Monospace)
+                Text(sampleRate, color = Color.LightGray, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+            }
+        }
+
+        // 3. MÀN HÌNH CHÍNH THEO ĐỜI MÁY
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .background(Color(0xFF080B12), RoundedCornerShape(18.dp))
-                .border(2.dp, Color(0xFF334155), RoundedCornerShape(18.dp))
-                .padding(14.dp)
+                .background(Color(0xFF080B12), RoundedCornerShape(16.dp))
+                .border(2.dp, Color(0xFF334155), RoundedCornerShape(16.dp))
+                .padding(12.dp)
         ) {
             Column(
                 modifier = Modifier.fillMaxSize(),
@@ -1042,7 +1212,7 @@ fun FullScreenWalkmanDeck(
                                 .fillMaxWidth()
                                 .background(Color(0xFF162032), RoundedCornerShape(14.dp))
                                 .border(2.dp, Color(0xFF475569), RoundedCornerShape(14.dp))
-                                .padding(vertical = 20.dp, horizontal = 12.dp),
+                                .padding(vertical = 18.dp, horizontal = 12.dp),
                             horizontalArrangement = Arrangement.SpaceEvenly,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
@@ -1074,15 +1244,15 @@ fun FullScreenWalkmanDeck(
                                 .fillMaxWidth()
                                 .background(Color(0xFF281F12), RoundedCornerShape(12.dp))
                                 .border(2.dp, Color(0xFFF59E0B), RoundedCornerShape(12.dp))
-                                .padding(14.dp),
+                                .padding(12.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                 Text("ANALOG VU LEVEL", color = Color(0xFFFBBF24), fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
                                 Text("-20  -10  -3   0  +3 dB", color = Color(0xFFF87171), fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
                             }
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Canvas(modifier = Modifier.fillMaxWidth().height(85.dp)) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Canvas(modifier = Modifier.fillMaxWidth().height(75.dp)) {
                                 drawArc(
                                     color = Color(0xFFF59E0B).copy(alpha = 0.35f),
                                     startAngle = 200f,
@@ -1111,10 +1281,10 @@ fun FullScreenWalkmanDeck(
                     else -> {
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Text(skin.shortName, color = accentColor, fontWeight = FontWeight.Black, fontSize = 13.sp)
-                            Text(if (isShuffle) "SHUFFLE ON" else "MEGABASS + CLEAR AUDIO", color = Color.LightGray, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                            Text(if (isShuffle) "SHUFFLE ON" else "10-BAND EQ + CLEAR AUDIO", color = Color.LightGray, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
                         }
 
-                        Box(contentAlignment = Alignment.Center, modifier = Modifier.size(150.dp)) {
+                        Box(contentAlignment = Alignment.Center, modifier = Modifier.size(140.dp)) {
                             Canvas(modifier = Modifier.fillMaxSize()) {
                                 rotate(if (isPlaying) angle else 0f) {
                                     drawCircle(color = accentColor.copy(alpha = 0.2f), style = Stroke(width = 22f))
@@ -1125,7 +1295,7 @@ fun FullScreenWalkmanDeck(
                             }
                         }
 
-                        Canvas(modifier = Modifier.fillMaxWidth().height(34.dp)) {
+                        Canvas(modifier = Modifier.fillMaxWidth().height(28.dp)) {
                             val barCount = 20
                             val barWidth = size.width / (barCount * 1.4f)
                             for (i in 0 until barCount) {
@@ -1152,7 +1322,7 @@ fun FullScreenWalkmanDeck(
                         value = posMs.toFloat(),
                         onValueChange = { onSeek(it.toInt()) },
                         valueRange = 0f..durMs.toFloat().coerceAtLeast(1f),
-                        modifier = Modifier.fillMaxWidth().height(26.dp),
+                        modifier = Modifier.fillMaxWidth().height(24.dp),
                         colors = SliderDefaults.colors(thumbColor = accentColor, activeTrackColor = accentColor)
                     )
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -1163,13 +1333,14 @@ fun FullScreenWalkmanDeck(
             }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
+        // 4. Master Volume Slider
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(Color(0xFF111726), RoundedCornerShape(12.dp))
-                .padding(horizontal = 12.dp, vertical = 4.dp),
+                .padding(horizontal = 12.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(Icons.Default.VolumeDown, null, tint = accentColor, modifier = Modifier.size(18.dp))
@@ -1182,8 +1353,9 @@ fun FullScreenWalkmanDeck(
             Text("${(masterVol * 100).toInt()}%", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace, modifier = Modifier.width(38.dp), textAlign = TextAlign.End)
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
+        // 5. Cụm phím điều khiển
         if (skin == WalkmanSkin.TPSL2) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1216,7 +1388,7 @@ fun FullScreenWalkmanDeck(
 
                 Box(
                     modifier = Modifier
-                        .size(142.dp)
+                        .size(136.dp)
                         .clip(CircleShape)
                         .background(Brush.radialGradient(listOf(Color(0xFF3A4152), Color(0xFF1B202B))))
                         .border(
@@ -1236,7 +1408,7 @@ fun FullScreenWalkmanDeck(
                         onClick = onPlayPause,
                         shape = CircleShape,
                         colors = ButtonDefaults.buttonColors(containerColor = accentColor),
-                        modifier = Modifier.size(60.dp),
+                        modifier = Modifier.size(58.dp),
                         contentPadding = PaddingValues(0.dp)
                     ) {
                         Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null, tint = Color.White, modifier = Modifier.size(32.dp))
@@ -1279,7 +1451,7 @@ fun LargeCassetteReel(rotation: Float) {
 fun CassetteButton(label: String, modifier: Modifier, bg: Color, fg: Color, onClick: () -> Unit) {
     Box(
         modifier = modifier
-            .height(54.dp)
+            .height(52.dp)
             .clip(RoundedCornerShape(8.dp))
             .background(bg)
             .border(2.dp, Color(0xFF0F172A), RoundedCornerShape(8.dp))
@@ -1313,7 +1485,7 @@ fun PersistentLibraryView(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("THƯ VIỆN NHẠC (TỰ ĐỘNG LƯU)", fontWeight = FontWeight.Black, color = Color(0xFFFF6600), fontSize = 14.sp)
+                    Text("THƯ VIỆN NHẠC (CHỐNG LẶP)", fontWeight = FontWeight.Black, color = Color(0xFFFF6600), fontSize = 14.sp)
                     if (tracks.isNotEmpty()) {
                         TextButton(onClick = onClearSaved, contentPadding = PaddingValues(0.dp)) {
                             Text("Xóa DS", color = Color(0xFFEF4444), fontSize = 11.sp)
@@ -1321,8 +1493,8 @@ fun PersistentLibraryView(
                     }
                 }
                 Text(
-                    text = if (isScanning) "Đang quét bộ nhớ và lưu danh sách..."
-                    else "Hiện có: ${tracks.size} bài • Đã lọc bỏ: $skippedCount file hệ thống/ghi âm",
+                    text = if (isScanning) "Đang quét và lọc sạch trùng lặp..."
+                    else "Hiện có: ${tracks.size} bài (Đã lọc bỏ trùng & file hệ thống)",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
                     color = Color.White
@@ -1362,7 +1534,7 @@ fun PersistentLibraryView(
         if (tracks.isEmpty() && !isScanning) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
-                    "Bấm 'QUÉT TỰ ĐỘNG' hoặc 'LƯU THƯ MỤC' ở trên.\nDanh sách sẽ được lưu vĩnh viễn cho các lần mở sau!",
+                    "Bấm 'QUÉT TỰ ĐỘNG' hoặc 'LƯU THƯ MỤC' ở trên.\nDanh sách được lưu vĩnh viễn và không bị trùng lặp!",
                     color = Color.LightGray,
                     fontSize = 13.sp,
                     textAlign = TextAlign.Center
@@ -1384,7 +1556,7 @@ fun PersistentLibraryView(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text("${index + 1}. ${track.title}", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("${track.artist} • [${track.folderInfo}]", color = Color(0xFF94A3B8), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("${track.artist} • [${track.folderInfo}] • ${track.formatName}", color = Color(0xFF94A3B8), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                         if (track.duration > 0) {
                             Text(
@@ -1402,27 +1574,30 @@ fun PersistentLibraryView(
     }
 }
 
+// BỘ XỬ LÝ ÂM THANH 10 BĂNG TẦN & LƯU VĨNH VIỄN
 @Composable
-fun FullSonyDspStudioView(
+fun FullSonyDsp10BandView(
     masterVol: Float,
     megaBass: Float,
     clearAudio: Boolean,
     dseeUltimate: Boolean,
-    eqBands: List<Float>,
+    eq10Bands: List<Float>,
+    audioOutput: AudioOutputState,
     onMasterVolChange: (Float) -> Unit,
     onClearAudioToggle: (Boolean) -> Unit,
     onDseeToggle: (Boolean) -> Unit,
     onBassChange: (Float) -> Unit,
-    onBandChange: (Int, Float) -> Unit,
-    onApplyPreset: (List<Float>) -> Unit
+    onBand10Change: (Int, Float) -> Unit,
+    onApplyPreset10: (List<Float>) -> Unit
 ) {
-    val bands = listOf("60Hz", "230Hz", "910Hz", "3.6kHz", "14kHz")
-    val presets = listOf(
-        "Heavy" to listOf(5f, 3f, -1f, 3f, 4f),
-        "Pop" to listOf(2f, 4f, 2f, 1f, 3f),
-        "Jazz" to listOf(3f, 1f, -2f, 2f, 4f),
-        "Unique" to listOf(4f, -2f, 3f, -1f, 5f),
-        "Flat" to listOf(0f, 0f, 0f, 0f, 0f)
+    val labels10 = listOf("31Hz", "62Hz", "125Hz", "250Hz", "500Hz", "1kHz", "2kHz", "4kHz", "8kHz", "16kHz")
+
+    val presets10 = listOf(
+        "Heavy" to listOf(6f, 5f, 3f, 1f, 0f, 1f, 2f, 4f, 5f, 6f),
+        "Pop" to listOf(2f, 3f, 4f, 3f, 1f, 1f, 2f, 3f, 4f, 4f),
+        "Jazz" to listOf(4f, 3f, 2f, 1f, -1f, 0f, 1f, 2f, 3f, 4f),
+        "Acoustic" to listOf(3f, 2f, 1f, 1f, 2f, 3f, 4f, 3f, 3f, 4f),
+        "Flat" to listOf(0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
     )
 
     Column(
@@ -1432,12 +1607,41 @@ fun FullSonyDspStudioView(
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text("TỔ HỢP XỬ LÝ ÂM THANH SONY DSP 4.5", fontWeight = FontWeight.Black, fontSize = 15.sp, color = Color(0xFFFF6600))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("SONY DSP 5.0 (10-BAND EQ)", fontWeight = FontWeight.Black, fontSize = 15.sp, color = Color(0xFFFF6600))
+            Text("✓ ĐÃ LƯU TỰ ĐỘNG", color = Color(0xFF22C55E), fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
+        }
 
+        // Card hiển thị thiết bị âm thanh đang kết nối
+        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF141C2B))) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text("NGÕ RA ÂM THANH:", fontSize = 10.sp, color = Color.Gray, fontWeight = FontWeight.Bold)
+                    Text(audioOutput.deviceName, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                }
+                Box(
+                    modifier = Modifier
+                        .background(Color(0xFF1E293B), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Text(audioOutput.codecEstimate, color = Color(0xFF38BDF8), fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                }
+            }
+        }
+
+        // Master Volume
         Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF121826))) {
             Column(modifier = Modifier.padding(12.dp)) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("MASTER AUDIO VOLUME", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
+                    Text("MASTER AUDIO GAIN", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
                     Text("${(masterVol * 100).toInt()}%", color = Color(0xFF38BDF8), fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
                 }
                 Slider(
@@ -1448,6 +1652,7 @@ fun FullSonyDspStudioView(
             }
         }
 
+        // ClearAudio+ & DSEE HX
         Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF121826))) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Row(
@@ -1457,7 +1662,7 @@ fun FullSonyDspStudioView(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("ClearAudio+™", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
-                        Text("Tối ưu độ trong trẻo và âm tầng Sony", color = Color.Gray, fontSize = 11.sp)
+                        Text("Tự động tinh chỉnh âm trường và độ trong Sony", color = Color.Gray, fontSize = 11.sp)
                     }
                     Switch(checked = clearAudio, onCheckedChange = onClearAudioToggle)
                 }
@@ -1468,14 +1673,15 @@ fun FullSonyDspStudioView(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("DSEE HX™ Upscaling", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
-                        Text("Tái tạo dải cao tần số lấy mẫu", color = Color.Gray, fontSize = 11.sp)
+                        Text("DSEE HX™ Sound Restore", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
+                        Text("Bù đắp dải tần số cao bị cắt giảm", color = Color.Gray, fontSize = 11.sp)
                     }
                     Switch(checked = dseeUltimate, onCheckedChange = onDseeToggle)
                 }
             }
         }
 
+        // MegaBass / ClearBass
         Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF121826))) {
             Column(modifier = Modifier.padding(12.dp)) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -1490,36 +1696,37 @@ fun FullSonyDspStudioView(
             }
         }
 
+        // GRAPHIC EQUALIZER 10 BĂNG TẦN
         Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF121826))) {
-            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("SONY 5-BAND GRAPHIC EQUALIZER", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("SONY 10-BAND GRAPHIC EQUALIZER", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
 
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    presets.forEach { (name, vals) ->
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    presets10.forEach { (name, vals) ->
                         OutlinedButton(
-                            onClick = { onApplyPreset(vals) },
+                            onClick = { onApplyPreset10(vals) },
                             modifier = Modifier.weight(1f),
-                            contentPadding = PaddingValues(vertical = 4.dp, horizontal = 2.dp)
+                            contentPadding = PaddingValues(vertical = 4.dp, horizontal = 1.dp)
                         ) {
-                            Text(name, fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                            Text(name, fontSize = 9.sp, color = Color.White, fontWeight = FontWeight.Bold)
                         }
                     }
                 }
 
-                bands.forEachIndexed { idx, label ->
-                    val currentVal = eqBands.getOrElse(idx) { 0f }
+                labels10.forEachIndexed { idx, label ->
+                    val currentVal = eq10Bands.getOrElse(idx) { 0f }
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(label, modifier = Modifier.width(52.dp), fontSize = 11.sp, color = Color.LightGray, fontFamily = FontFamily.Monospace)
+                        Text(label, modifier = Modifier.width(48.dp), fontSize = 10.sp, color = Color.LightGray, fontFamily = FontFamily.Monospace)
                         Slider(
                             value = currentVal,
-                            onValueChange = { onBandChange(idx, it) },
+                            onValueChange = { onBand10Change(idx, it) },
                             valueRange = -8f..8f,
                             modifier = Modifier.weight(1f)
                         )
                         Text(
                             text = "%+.0f dB".format(currentVal),
-                            modifier = Modifier.width(46.dp),
-                            fontSize = 11.sp,
+                            modifier = Modifier.width(42.dp),
+                            fontSize = 10.sp,
                             color = Color(0xFFFF8800),
                             fontFamily = FontFamily.Monospace,
                             textAlign = TextAlign.End

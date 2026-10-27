@@ -248,7 +248,9 @@ class MainActivity : ComponentActivity() {
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build()
 
+        val mediaSourceFactory = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(applicationContext, WalkmanExtractorsFactory())
         sharedExoPlayer = ExoPlayer.Builder(applicationContext, renderersFactory)
+            .setMediaSourceFactory(mediaSourceFactory)
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_LOCAL) // Giữ CPU giải mã âm thanh liên tục khi thoát ra ngoài
@@ -1044,7 +1046,7 @@ fun WalkmanMasterRoot(
                     selected = activeTab == 0,
                     onClick = { activeTab = 0 },
                     icon = { Icon(Icons.Default.Album, null) },
-                    label = { Text("Walkman 9.1", fontWeight = FontWeight.Bold) }
+                    label = { Text("Walkman 9.2", fontWeight = FontWeight.Bold) }
                 )
                 NavigationBarItem(
                     selected = activeTab == 1,
@@ -1880,7 +1882,7 @@ fun FullSonyDspAndAudiophileToolsView(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text("SONY PURE AUDIO 7.0 + AUDIOPHILE TOOLS", fontWeight = FontWeight.Black, fontSize = 14.sp, color = Color(0xFFEAB308))
-            Text("✓ V9.1 BACKGROUND ON", color = Color(0xFF22C55E), fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
+            Text("✓ ✓ DSD .DFF/.DSF READY", color = Color(0xFF22C55E), fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
         }
 
         Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF141C2B))) {
@@ -2084,3 +2086,4 @@ fun FullSonyDspAndAudiophileToolsView(
         }
     }
 }
+

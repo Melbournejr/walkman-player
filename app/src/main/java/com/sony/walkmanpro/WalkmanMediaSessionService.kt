@@ -1,20 +1,24 @@
 ﻿package com.sony.walkmanpro
 
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.os.Build
+import android.os.PowerManager
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.media.app.NotificationCompat as MediaNotificationCompat
 import androidx.media3.common.C
 import androidx.media3.common.audio.AudioProcessor
@@ -26,7 +30,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.tanh
 
-// BỘ XỬ LÝ DSP BẢN 7.0/8.1 NGUYÊN BẢN + BỔ SUNG L/R CHANNEL BALANCE & PHASE INVERTER
+// BỘ XỬ LÝ DSP BẢN 7.0/9.0 NGUYÊN BẢN
 @UnstableApi
 class SonyRealTimeDspProcessor : BaseAudioProcessor() {
     @Volatile var vinylEnabled: Boolean = true
@@ -34,8 +38,6 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
     @Volatile var dseeEnabled: Boolean = true
     @Volatile var megaBassLevel: Float = 0.45f
     @Volatile var eq10Gains = FloatArray(10) { 0f }
-
-    // Tính năng mới: Cân bằng kênh Trái/Phải (-1.0f = Trái, 0.0f = Giữa, +1.0f = Phải) & Đảo pha 180 độ
     @Volatile var channelBalance: Float = 0f
     @Volatile var phaseInvert: Boolean = false
 
@@ -62,7 +64,6 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
         outputBuffer.order(ByteOrder.LITTLE_ENDIAN)
         inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
 
-        // Giữ nguyên mạch Pre-gain 0.78f chuẩn 7.0/8.1 không gây rè loa ngoài
         val preGain = 0.78f
         val eqLowGain = ((eq10Gains[0] + eq10Gains[1] + eq10Gains[2]) / 3f) * 0.05f
         val eqMidGain = ((eq10Gains[3] + eq10Gains[4] + eq10Gains[5] + eq10Gains[6]) / 4f) * 0.04f
@@ -112,7 +113,6 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
                 right = tanh(right) * 0.95f
             }
 
-            // Áp dụng cân bằng Trái/Phải (L/R Balance) & Đảo pha (Phase Inverter)
             left = left * leftPanGain * phaseSign
             right = right * rightPanGain * phaseSign
 
@@ -136,10 +136,19 @@ class WalkmanNotificationReceiver : BroadcastReceiver() {
 }
 
 class WalkmanMediaSessionService : MediaSessionService() {
+    private var wakeLock: PowerManager.WakeLock? = null
+
     companion object {
         const val CHANNEL_ID = "walkman_playback_channel"
         const val NOTIF_ID = 7001
         var mediaSessionCompat: MediaSessionCompat? = null
+        var activeServiceInstance: WalkmanMediaSessionService? = null
+
+        private var lastTitle: String = "Sony Walkman Signature"
+        private var lastArtist: String = "Hi-Res Audio Player"
+        private var lastPlaying: Boolean = false
+        private var lastPosMs: Long = 0L
+        private var lastDurMs: Long = 1000L
 
         fun updateNowPlayingNotification(
             context: Context,
@@ -150,21 +159,16 @@ class WalkmanMediaSessionService : MediaSessionService() {
             durMs: Long,
             onCommand: (String) -> Unit
         ) {
-            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val chan = NotificationChannel(
-                    CHANNEL_ID,
-                    "Walkman Playback Controls",
-                    NotificationManager.IMPORTANCE_LOW
-                ).apply {
-                    description = "Điều khiển nhạc Walkman trên thanh trạng thái"
-                    setShowBadge(false)
-                }
-                nm.createNotificationChannel(chan)
-            }
+            lastTitle = title
+            lastArtist = artist
+            lastPlaying = isPlaying
+            lastPosMs = posMs
+            lastDurMs = durMs
+
+            ensureChannel(context)
 
             if (mediaSessionCompat == null) {
-                mediaSessionCompat = MediaSessionCompat(context, "SonyWalkmanSession").apply {
+                mediaSessionCompat = MediaSessionCompat(context.applicationContext, "SonyWalkmanSession").apply {
                     isActive = true
                     setCallback(object : MediaSessionCompat.Callback() {
                         override fun onPlay() = onCommand("PLAY_PAUSE")
@@ -176,6 +180,45 @@ class WalkmanMediaSessionService : MediaSessionService() {
                 }
             }
 
+            val notification = buildMediaNotification(context, title, artist, isPlaying, posMs, durMs)
+
+            // Kích hoạt chuẩn Foreground Service để hệ thống Android/HyperOS tuyệt đối không đóng app khi thoát ra màn hình chính
+            val srv = activeServiceInstance
+            if (srv != null) {
+                srv.promoteToForeground(notification, isPlaying)
+            } else {
+                try {
+                    val serviceIntent = Intent(context.applicationContext, WalkmanMediaSessionService::class.java)
+                    ContextCompat.startForegroundService(context.applicationContext, serviceIntent)
+                } catch (_: Exception) {}
+                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                nm.notify(NOTIF_ID, notification)
+            }
+        }
+
+        private fun ensureChannel(context: Context) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                val chan = NotificationChannel(
+                    CHANNEL_ID,
+                    "Walkman Playback Controls",
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "Duy trì phát nhạc nền Walkman và điều khiển trên thanh trạng thái"
+                    setShowBadge(false)
+                }
+                nm.createNotificationChannel(chan)
+            }
+        }
+
+        fun buildMediaNotification(
+            context: Context,
+            title: String,
+            artist: String,
+            isPlaying: Boolean,
+            posMs: Long,
+            durMs: Long
+        ): Notification {
             val artBitmap = createWalkmanCoverArt()
             val metadata = MediaMetadataCompat.Builder()
                 .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
@@ -224,7 +267,7 @@ class WalkmanMediaSessionService : MediaSessionService() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
 
-            val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+            return NotificationCompat.Builder(context, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_media_play)
                 .setContentTitle(title)
                 .setContentText(artist)
@@ -232,7 +275,8 @@ class WalkmanMediaSessionService : MediaSessionService() {
                 .setLargeIcon(artBitmap)
                 .setContentIntent(openIntent)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                .setOngoing(isPlaying)
+                .setOngoing(true)
+                .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
                 .addAction(android.R.drawable.ic_media_previous, "Previous", prevIntent)
                 .addAction(
                     if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
@@ -246,8 +290,6 @@ class WalkmanMediaSessionService : MediaSessionService() {
                         .setShowActionsInCompactView(0, 1, 2)
                 )
                 .build()
-
-            nm.notify(NOTIF_ID, notification)
         }
 
         private fun createWalkmanCoverArt(): Bitmap {
@@ -266,6 +308,64 @@ class WalkmanMediaSessionService : MediaSessionService() {
             canvas.drawText("W", 128f, 162f, paint)
             return bmp
         }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        activeServiceInstance = this
+        ensureChannel(this)
+        acquireAudioWakeLock()
+        val initialNotif = buildMediaNotification(this, lastTitle, lastArtist, lastPlaying, lastPosMs, lastDurMs)
+        promoteToForeground(initialNotif, true)
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        activeServiceInstance = this
+        ensureChannel(this)
+        val notif = buildMediaNotification(this, lastTitle, lastArtist, lastPlaying, lastPosMs, lastDurMs)
+        promoteToForeground(notif, lastPlaying)
+        return START_STICKY
+    }
+
+    fun promoteToForeground(notification: Notification, isPlaying: Boolean) {
+        try {
+            if (isPlaying) acquireAudioWakeLock()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+            } else {
+                startForeground(NOTIF_ID, notification)
+            }
+        } catch (_: Exception) {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.notify(NOTIF_ID, notification)
+        }
+    }
+
+    private fun acquireAudioWakeLock() {
+        try {
+            if (wakeLock == null) {
+                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WalkmanPro::AudioPlaybackWakeLock").apply {
+                    setReferenceCounted(false)
+                }
+            }
+            if (wakeLock?.isHeld == false) {
+                wakeLock?.acquire(6 * 60 * 60 * 1000L) // Giữ CPU âm thanh suốt 6 tiếng liên tục
+            }
+        } catch (_: Exception) {}
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // Giữ nhạc tiếp tục phát ngay cả khi vuốt đa nhiệm hoặc thoát ra màn hình chính
+        super.onTaskRemoved(rootIntent)
+    }
+
+    override fun onDestroy() {
+        activeServiceInstance = null
+        try {
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+        } catch (_: Exception) {}
+        super.onDestroy()
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = null

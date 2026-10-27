@@ -23,7 +23,7 @@ class WalkmanExtractorsFactory : ExtractorsFactory {
 
     override fun createExtractors(): Array<Extractor> {
         val std = defaultFactory.createExtractors()
-        return arrayOf(DsdAudioExtractor()) + std
+        return arrayOf<Extractor>(DsdAudioExtractor()) + std
     }
 }
 
@@ -356,3 +356,4 @@ class DsdAudioExtractor : Extractor {
 
     override fun release() {}
 }
+

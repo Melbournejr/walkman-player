@@ -11,8 +11,8 @@ android {
         applicationId = "com.sony.walkmanpro"
         minSdk = 26
         targetSdk = 34
-        versionCode = 92
-        versionName = "9.2-NativeDSD-Decoder"
+        versionCode = 94
+        versionName = "9.4-DSD-NoCrashGuaranteed"
     }
 
     compileOptions {

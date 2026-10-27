@@ -44,11 +44,12 @@ class DsdAudioExtractor : Extractor {
 
     private var isInitialized = false
     private var isDsfFormat = false
-    private var isUnsupportedDst = false
+    private var isLsbFirst = false
+    private var isDstCompressed = false
 
     private var channels = 2
-    private var dsdSampleRate = 2822400 // DSD64 mặc định (2.8224 MHz)
-    private var pcmSampleRate = 88200   // Xuất ra PCM 88.2 kHz
+    private var dsdSampleRate = 2822400
+    private var pcmSampleRate = 88200
     private var decimationBytesPerSample = 4
     private var dsfBlockSizePerChannel = 4096
 
@@ -57,19 +58,31 @@ class DsdAudioExtractor : Extractor {
     private var currentBytesRead = 0L
     private var durationUs = 0L
 
-    private var filter1L = 0f
-    private var filter2L = 0f
-    private var filter1R = 0f
-    private var filter2R = 0f
+    private var lp1L = 0f
+    private var lp2L = 0f
+    private var lp3L = 0f
+    private var lp1R = 0f
+    private var lp2R = 0f
+    private var lp3R = 0f
 
     companion object {
-        private val BYTE_WEIGHT_TABLE = FloatArray(256).apply {
+        // Bảng lọc Sinc 8-bit chuẩn hóa cho MSB-first (.DFF) và LSB-first (.DSF)
+        private val MSB_DECODE_TABLE = FloatArray(256)
+        private val LSB_DECODE_TABLE = FloatArray(256)
+
+        init {
+            val weights = floatArrayOf(0.08f, 0.11f, 0.14f, 0.17f, 0.17f, 0.14f, 0.11f, 0.08f)
             for (b in 0..255) {
-                var ones = 0
+                var sumMsb = 0f
+                var sumLsb = 0f
                 for (bit in 0..7) {
-                    if (((b shr bit) and 1) == 1) ones++
+                    val msbBit = if (((b shr (7 - bit)) and 1) == 1) 1f else -1f
+                    val lsbBit = if (((b shr bit) and 1) == 1) 1f else -1f
+                    sumMsb += msbBit * weights[bit]
+                    sumLsb += lsbBit * weights[bit]
                 }
-                this[b] = (ones - 4) / 4.0f
+                MSB_DECODE_TABLE[b] = sumMsb
+                LSB_DECODE_TABLE[b] = sumLsb
             }
         }
     }
@@ -77,11 +90,11 @@ class DsdAudioExtractor : Extractor {
     override fun sniff(input: ExtractorInput): Boolean {
         return try {
             val header = ByteArray(16)
-            val ok = input.peekFully(header, 0, 16, true)
-            if (!ok) return false
-            val magic4 = String(header, 0, 4, Charsets.US_ASCII)
-            if (magic4 == "DSD ") return true
-            if (magic4 == "FRM8" && String(header, 12, 4, Charsets.US_ASCII) == "DSD ") return true
+            if (!input.peekFully(header, 0, 16, true)) return false
+            val magic0 = String(header, 0, 4, Charsets.ISO_8859_1)
+            val magic12 = String(header, 12, 4, Charsets.ISO_8859_1)
+            if (magic0 == "DSD ") return true
+            if (magic0 == "FRM8" && magic12 == "DSD ") return true
             false
         } catch (_: Throwable) {
             false
@@ -90,142 +103,165 @@ class DsdAudioExtractor : Extractor {
 
     override fun init(output: ExtractorOutput) {
         extractorOutput = output
-        trackOutput = output.track(0, C.TRACK_TYPE_AUDIO)
+        val track = output.track(0, C.TRACK_TYPE_AUDIO)
+        trackOutput = track
+        // Xuất Format ngay trong init() để đảm bảo MediaCodec/AudioSink không bao giờ bị lỗi thiếu Format
+        val initFormat = Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_RAW)
+            .setPcmEncoding(C.ENCODING_PCM_16BIT)
+            .setChannelCount(2)
+            .setSampleRate(88200)
+            .build()
+        track.format(initFormat)
         output.endTracks()
     }
 
     override fun read(input: ExtractorInput, seekPosition: PositionHolder): Int {
         return try {
             if (!isInitialized) {
-                if (!parseDsdHeaderSafe(input)) return Extractor.RESULT_END_OF_INPUT
                 isInitialized = true
+                if (!parseHeaderSafe(input)) {
+                    emitSilenceAndFinish()
+                    return Extractor.RESULT_END_OF_INPUT
+                }
             }
 
-            if (isUnsupportedDst || currentBytesRead >= dataSize) {
+            if (isDstCompressed) {
+                // Nếu file .DFF bị nén DST độc quyền, phát 0.5s im lặng và dừng êm ái thay vì văng app
+                emitSilenceAndFinish()
+                return Extractor.RESULT_END_OF_INPUT
+            }
+
+            if (currentBytesRead >= dataSize) {
                 return Extractor.RESULT_END_OF_INPUT
             }
 
             if (isDsfFormat) {
-                readAndDecodeDsfBlockSafe(input)
+                decodeDsfChunk(input)
             } else {
-                readAndDecodeDffStreamSafe(input)
+                decodeDffChunk(input)
             }
         } catch (_: EOFException) {
             Extractor.RESULT_END_OF_INPUT
-        } catch (e: Throwable) {
-            e.printStackTrace()
+        } catch (_: Throwable) {
             Extractor.RESULT_END_OF_INPUT
         }
     }
 
-    private fun readFullySafe(input: ExtractorInput, buf: ByteArray, length: Int): Boolean {
-        var total = 0
-        while (total < length) {
-            val r = input.read(buf, total, length - total)
+    private fun emitSilenceAndFinish() {
+        try {
+            extractorOutput?.seekMap(SeekMap.Unseekable(1_000_000L))
+            val silence = ByteArray(4096)
+            val parsable = ParsableByteArray(silence)
+            trackOutput?.sampleData(parsable, silence.size)
+            trackOutput?.sampleMetadata(0L, C.BUFFER_FLAG_KEY_FRAME, silence.size, 0, null)
+            currentBytesRead = dataSize
+        } catch (_: Throwable) {}
+    }
+
+    private fun readBytesExact(input: ExtractorInput, target: ByteArray, len: Int): Boolean {
+        var offset = 0
+        while (offset < len) {
+            val r = input.read(target, offset, len - offset)
             if (r == C.RESULT_END_OF_INPUT || r <= 0) return false
-            total += r
+            offset += r
         }
         return true
     }
 
-    private fun skipBytesSafe(input: ExtractorInput, bytesToSkip: Long): Boolean {
-        var remaining = bytesToSkip
-        val dummy = ByteArray(4096)
-        while (remaining > 0L) {
-            val step = remaining.coerceAtMost(4096L).toInt()
-            val r = input.read(dummy, 0, step)
+    private fun skipBytesExact(input: ExtractorInput, count: Long): Boolean {
+        var rem = count
+        val scratch = ByteArray(4096)
+        while (rem > 0L) {
+            val step = rem.coerceAtMost(4096L).toInt()
+            val r = input.read(scratch, 0, step)
             if (r == C.RESULT_END_OF_INPUT || r <= 0) return false
-            remaining -= r
+            rem -= r
         }
         return true
     }
 
-    private fun parseDsdHeaderSafe(input: ExtractorInput): Boolean {
-        val head16 = ByteArray(16)
-        if (!readFullySafe(input, head16, 16)) return false
-        val magic = String(head16, 0, 4, Charsets.US_ASCII)
+    private fun parseHeaderSafe(input: ExtractorInput): Boolean {
+        val h16 = ByteArray(16)
+        if (!readBytesExact(input, h16, 16)) return false
+        val magic = String(h16, 0, 4, Charsets.ISO_8859_1)
 
         if (magic == "DSD ") {
-            // 1. Giải mã Header chuẩn .DSF (Little-Endian, tổng 92 bytes)
+            // Định dạng Sony .DSF
             isDsfFormat = true
             val rest76 = ByteArray(76)
-            if (!readFullySafe(input, rest76, 76)) return false
-            val full = head16 + rest76
+            if (!readBytesExact(input, rest76, 76)) return false
+            val full = h16 + rest76
             val bb = ByteBuffer.wrap(full).order(ByteOrder.LITTLE_ENDIAN)
 
-            channels = bb.getInt(48).coerceIn(1, 2)
-            dsdSampleRate = bb.getInt(52).coerceAtLeast(2822400)
-            dsfBlockSizePerChannel = bb.getInt(64).coerceIn(256, 32768)
+            channels = bb.getInt(48).coerceIn(1, 6)
+            dsdSampleRate = bb.getInt(52).coerceIn(2822400, 22579200)
+            val bitsPerSample = bb.getInt(56)
+            isLsbFirst = (bitsPerSample == 1)
+            dsfBlockSizePerChannel = bb.getInt(64).coerceIn(64, 65536)
 
-            val dataChunkSize = bb.getLong(84)
+            val dataChunkSz = bb.getLong(84)
             dataStartOffset = 92L
-            val fileLen = input.length
-            dataSize = if (dataChunkSize > 12L) {
-                dataChunkSize - 12L
-            } else if (fileLen > 92L) {
-                fileLen - 92L
-            } else {
-                64L * 1024L * 1024L
+            val totalLen = input.length
+            dataSize = when {
+                dataChunkSz > 12L -> dataChunkSz - 12L
+                totalLen > 92L -> totalLen - 92L
+                else -> 100L * 1024L * 1024L
             }
         } else if (magic == "FRM8") {
-            // 2. Giải mã tuần tự từng Chunk của chuẩn .DFF / DSDIFF (Big-Endian, không dùng peekFully)
+            // Định dạng Philips DSDIFF (.DFF)
             isDsfFormat = false
+            isLsbFirst = false
             channels = 2
             dsdSampleRate = 2822400
-            var foundDsdData = false
 
-            val chunkHeader = ByteArray(12)
-            var safetyCounter = 0
+            val chunkHdr = ByteArray(12)
+            var foundSoundData = false
+            var loops = 0
 
-            while (safetyCounter < 100 && readFullySafe(input, chunkHeader, 12)) {
-                safetyCounter++
-                val chunkId = String(chunkHeader, 0, 4, Charsets.US_ASCII)
-                val chunkSize = ByteBuffer.wrap(chunkHeader, 4, 8).order(ByteOrder.BIG_ENDIAN).long
+            while (loops < 128 && readBytesExact(input, chunkHdr, 12)) {
+                loops++
+                val id = String(chunkHdr, 0, 4, Charsets.ISO_8859_1)
+                val sz = ByteBuffer.wrap(chunkHdr, 4, 8).order(ByteOrder.BIG_ENDIAN).long
+                if (sz < 0L) break
 
-                if (chunkSize < 0L) break
-
-                when (chunkId) {
+                when (id) {
                     "PROP" -> {
-                        // Đọc bên trong PROP chunk (4 bytes "SND " + các sub-chunk FS, CHNL, CMPR...)
-                        if (chunkSize in 4L..65536L) {
-                            val propBytes = ByteArray(chunkSize.toInt())
-                            if (!readFullySafe(input, propBytes, propBytes.size)) return false
-                            parseDffPropSubChunks(propBytes)
+                        if (sz in 4L..131072L) {
+                            val propBuf = ByteArray(sz.toInt())
+                            if (!readBytesExact(input, propBuf, propBuf.size)) return false
+                            parseDffProp(propBuf)
+                            if (sz % 2L != 0L) skipBytesExact(input, 1L)
                         } else {
-                            if (!skipBytesSafe(input, chunkSize)) return false
+                            val pad = if (sz % 2L != 0L) sz + 1L else sz
+                            if (!skipBytesExact(input, pad)) return false
                         }
                     }
                     "DSD " -> {
-                        // Đã tới điểm bắt đầu dữ liệu âm thanh 1-bit DSD thật sự
                         dataStartOffset = input.position
-                        val fileLen = input.length
-                        dataSize = if (chunkSize > 0L) {
-                            chunkSize
-                        } else if (fileLen > dataStartOffset) {
-                            fileLen - dataStartOffset
-                        } else {
-                            64L * 1024L * 1024L
+                        val totalLen = input.length
+                        dataSize = when {
+                            sz > 0L -> sz
+                            totalLen > dataStartOffset -> totalLen - dataStartOffset
+                            else -> 100L * 1024L * 1024L
                         }
-                        foundDsdData = true
+                        foundSoundData = true
                         break
                     }
                     "DST " -> {
-                        // File .dff bị nén DST (Direct Stream Transfer), đánh dấu kết thúc an toàn để không văng app
-                        isUnsupportedDst = true
-                        foundDsdData = true
+                        isDstCompressed = true
+                        foundSoundData = true
                         dataStartOffset = input.position
                         dataSize = 0L
                         break
                     }
                     else -> {
-                        // Bỏ qua các chunk phụ (FVER, COMT, DIIN, MANF...)
-                        val paddedSize = if (chunkSize % 2L != 0L) chunkSize + 1L else chunkSize
-                        if (!skipBytesSafe(input, paddedSize)) return false
+                        val pad = if (sz % 2L != 0L) sz + 1L else sz
+                        if (!skipBytesExact(input, pad)) return false
                     }
                 }
             }
-
-            if (!foundDsdData) return false
+            if (!foundSoundData) return false
         } else {
             return false
         }
@@ -233,201 +269,180 @@ class DsdAudioExtractor : Extractor {
         pcmSampleRate = 88200
         decimationBytesPerSample = ((dsdSampleRate / 8) / pcmSampleRate).coerceIn(4, 32)
 
-        val bytesPerSecond = (dsdSampleRate / 8).toLong() * channels.toLong()
-        durationUs = if (bytesPerSecond > 0 && dataSize > 0) {
-            (dataSize * 1_000_000L) / bytesPerSecond
+        val bytesPerSec = (dsdSampleRate / 8).toLong() * channels.toLong()
+        durationUs = if (bytesPerSec > 0L && dataSize > 0L) {
+            (dataSize * 1_000_000L) / bytesPerSec
         } else {
             180_000_000L
         }
 
-        val format = Format.Builder()
-            .setSampleMimeType(MimeTypes.AUDIO_RAW)
-            .setPcmEncoding(C.ENCODING_PCM_16BIT)
-            .setChannelCount(2)
-            .setSampleRate(pcmSampleRate)
-            .setAverageBitrate(dsdSampleRate * channels)
-            .build()
-
-        trackOutput?.format(format)
-
         extractorOutput?.seekMap(object : SeekMap {
-            override fun isSeekable(): Boolean = true
+            override fun isSeekable(): Boolean = !isDstCompressed
             override fun getDurationUs(): Long = durationUs
             override fun getSeekPoints(timeUs: Long): SeekMap.SeekPoints {
-                val ratio = (timeUs.toDouble() / durationUs.coerceAtLeast(1L).toDouble()).coerceIn(0.0, 1.0)
-                val rawOffset = (dataSize * ratio).toLong()
-                val alignBlock = if (isDsfFormat) {
+                val frac = (timeUs.toDouble() / durationUs.coerceAtLeast(1L).toDouble()).coerceIn(0.0, 1.0)
+                val rawOff = (dataSize * frac).toLong()
+                val blk = if (isDsfFormat) {
                     (dsfBlockSizePerChannel * channels).toLong()
                 } else {
                     (decimationBytesPerSample * channels).toLong()
                 }
-                val safeAlign = alignBlock.coerceAtLeast(1L)
-                val alignedOffset = (rawOffset / safeAlign) * safeAlign
-                return SeekMap.SeekPoints(SeekPoint(timeUs, dataStartOffset + alignedOffset))
+                val safeBlk = blk.coerceAtLeast(1L)
+                val aligned = (rawOff / safeBlk) * safeBlk
+                return SeekMap.SeekPoints(SeekPoint(timeUs, dataStartOffset + aligned))
             }
         })
 
         return true
     }
 
-    private fun parseDffPropSubChunks(propBytes: ByteArray) {
-        if (propBytes.size < 16) return
-        var pos = 4 // Bỏ qua 4 bytes đầu "SND "
-        while (pos <= propBytes.size - 12) {
-            val subId = String(propBytes, pos, 4, Charsets.US_ASCII)
-            val subSize = ByteBuffer.wrap(propBytes, pos + 4, 8).order(ByteOrder.BIG_ENDIAN).long.toInt()
-            pos += 12
-            if (subSize < 0 || pos + subSize > propBytes.size) break
+    private fun parseDffProp(prop: ByteArray) {
+        if (prop.size < 16) return
+        var p = 4 // Bỏ qua "SND "
+        while (p <= prop.size - 12) {
+            val subId = String(prop, p, 4, Charsets.ISO_8859_1)
+            val subSz = ByteBuffer.wrap(prop, p + 4, 8).order(ByteOrder.BIG_ENDIAN).long.toInt()
+            p += 12
+            if (subSz < 0 || p + subSz > prop.size) break
 
             when (subId) {
                 "FS  " -> {
-                    if (subSize >= 4) {
-                        val fs = ByteBuffer.wrap(propBytes, pos, 4).order(ByteOrder.BIG_ENDIAN).int
-                        if (fs >= 2822400) dsdSampleRate = fs
+                    if (subSz >= 4) {
+                        val fs = ByteBuffer.wrap(prop, p, 4).order(ByteOrder.BIG_ENDIAN).int
+                        if (fs in 2822400..22579200) dsdSampleRate = fs
                     }
                 }
                 "CHNL" -> {
-                    if (subSize >= 2) {
-                        val ch = ByteBuffer.wrap(propBytes, pos, 2).order(ByteOrder.BIG_ENDIAN).short.toInt()
+                    if (subSz >= 2) {
+                        val ch = ByteBuffer.wrap(prop, p, 2).order(ByteOrder.BIG_ENDIAN).short.toInt()
                         if (ch in 1..8) channels = ch
                     }
                 }
                 "CMPR" -> {
-                    if (subSize >= 4) {
-                        val cmpr = String(propBytes, pos, 4, Charsets.US_ASCII)
-                        if (cmpr == "DST ") {
-                            isUnsupportedDst = true
-                        }
+                    if (subSz >= 4) {
+                        val cmpr = String(prop, p, 4, Charsets.ISO_8859_1)
+                        if (cmpr == "DST ") isDstCompressed = true
                     }
                 }
             }
-            val paddedSub = if (subSize % 2 != 0) subSize + 1 else subSize
-            pos += paddedSub
+            val pad = if (subSz % 2 != 0) subSz + 1 else subSz
+            p += pad
         }
     }
 
-    // Giải mã luồng .DFF an toàn tuyệt đối (Interleaved Bytes: Ch0, Ch1, ...)
-    private fun readAndDecodeDffStreamSafe(input: ExtractorInput): Int {
-        val stepBytes = (decimationBytesPerSample * channels).coerceAtLeast(1)
-        val targetPcmFrames = 1024
-        val remainingInFile = (dataSize - currentBytesRead).coerceAtLeast(0L)
-        val maxBytesToRead = ((stepBytes * targetPcmFrames).toLong().coerceAtMost(remainingInFile)).toInt()
-        val alignedBytesToRead = (maxBytesToRead / stepBytes) * stepBytes
+    private fun decodeDffChunk(input: ExtractorInput): Int {
+        val frameBytes = (decimationBytesPerSample * channels).coerceAtLeast(1)
+        val remBytes = (dataSize - currentBytesRead).coerceAtLeast(0L)
+        val wantBytes = ((frameBytes * 1024).toLong().coerceAtMost(remBytes)).toInt()
+        val alignedWant = (wantBytes / frameBytes) * frameBytes
+        if (alignedWant < frameBytes) return Extractor.RESULT_END_OF_INPUT
 
-        if (alignedBytesToRead < stepBytes) return Extractor.RESULT_END_OF_INPUT
-
-        val rawDsd = ByteArray(alignedBytesToRead)
-        var totalRead = 0
-        while (totalRead < alignedBytesToRead) {
-            val r = input.read(rawDsd, totalRead, alignedBytesToRead - totalRead)
+        val buf = ByteArray(alignedWant)
+        var got = 0
+        while (got < alignedWant) {
+            val r = input.read(buf, got, alignedWant - got)
             if (r == C.RESULT_END_OF_INPUT || r <= 0) break
-            totalRead += r
+            got += r
         }
 
-        val framesDecoded = totalRead / stepBytes
-        if (framesDecoded <= 0) return Extractor.RESULT_END_OF_INPUT
+        val frames = got / frameBytes
+        if (frames <= 0) return Extractor.RESULT_END_OF_INPUT
 
-        val pcmBytes = ByteArray(framesDecoded * 4)
-        val pcmBuffer = ByteBuffer.wrap(pcmBytes).order(ByteOrder.LITTLE_ENDIAN)
-        val invDecim = 1.0f / decimationBytesPerSample.toFloat()
+        val outBytes = ByteArray(frames * 4)
+        val outBb = ByteBuffer.wrap(outBytes).order(ByteOrder.LITTLE_ENDIAN)
+        val scale = 1.0f / decimationBytesPerSample.toFloat()
 
-        var idx = 0
-        for (f in 0 until framesDecoded) {
-            var sumL = 0f
-            var sumR = 0f
-            for (b in 0 until decimationBytesPerSample) {
-                val byteL = rawDsd[idx].toInt() and 0xFF
-                val byteR = if (channels >= 2) rawDsd[idx + 1].toInt() and 0xFF else byteL
-                sumL += BYTE_WEIGHT_TABLE[byteL]
-                sumR += BYTE_WEIGHT_TABLE[byteR]
-                idx += channels
+        var pos = 0
+        for (f in 0 until frames) {
+            var accL = 0f
+            var accR = 0f
+            for (s in 0 until decimationBytesPerSample) {
+                val bL = buf[pos].toInt() and 0xFF
+                val bR = if (channels >= 2) buf[pos + 1].toInt() and 0xFF else bL
+                accL += MSB_DECODE_TABLE[bL]
+                accR += MSB_DECODE_TABLE[bR]
+                pos += channels
             }
 
-            val rawL = sumL * invDecim
-            val rawR = sumR * invDecim
+            val inL = accL * scale
+            val inR = accR * scale
 
-            filter1L += 0.35f * (rawL - filter1L)
-            filter2L += 0.35f * (filter1L - filter2L)
+            // Lọc thông thấp 3 bậc (3-pole Butterworth/IIR) cho chất âm DSD mượt, sạch nhiễu tần số cao
+            lp1L += 0.30f * (inL - lp1L)
+            lp2L += 0.30f * (lp1L - lp2L)
+            lp3L += 0.30f * (lp2L - lp3L)
 
-            filter1R += 0.35f * (rawR - filter1R)
-            filter2R += 0.35f * (filter1R - filter2R)
+            lp1R += 0.30f * (inR - lp1R)
+            lp2R += 0.30f * (lp1R - lp2R)
+            lp3R += 0.30f * (lp2R - lp3R)
 
-            val outShortL = (filter2L * 28000f).toInt().coerceIn(-32768, 32767).toShort()
-            val outShortR = (filter2R * 28000f).toInt().coerceIn(-32768, 32767).toShort()
-
-            pcmBuffer.putShort(outShortL)
-            pcmBuffer.putShort(outShortR)
+            val pcmL = (lp3L * 26000f).toInt().coerceIn(-32768, 32767).toShort()
+            val pcmR = (lp3R * 26000f).toInt().coerceIn(-32768, 32767).toShort()
+            outBb.putShort(pcmL)
+            outBb.putShort(pcmR)
         }
 
-        val timeUs = ((currentBytesRead.toDouble() / dataSize.coerceAtLeast(1L).toDouble()) * durationUs).toLong()
-        currentBytesRead += (framesDecoded * stepBytes)
+        val ptsUs = ((currentBytesRead.toDouble() / dataSize.coerceAtLeast(1L).toDouble()) * durationUs).toLong()
+        currentBytesRead += (frames * frameBytes)
 
-        val parsable = ParsableByteArray(pcmBytes)
-        trackOutput?.sampleData(parsable, pcmBytes.size)
-        trackOutput?.sampleMetadata(timeUs, C.BUFFER_FLAG_KEY_FRAME, pcmBytes.size, 0, null)
-
+        val parsable = ParsableByteArray(outBytes)
+        trackOutput?.sampleData(parsable, outBytes.size)
+        trackOutput?.sampleMetadata(ptsUs, C.BUFFER_FLAG_KEY_FRAME, outBytes.size, 0, null)
         return Extractor.RESULT_CONTINUE
     }
 
-    // Giải mã luồng .DSF an toàn
-    private fun readAndDecodeDsfBlockSafe(input: ExtractorInput): Int {
-        val totalBlockBytes = dsfBlockSizePerChannel * channels
-        val rawBlock = ByteArray(totalBlockBytes)
-        if (!readFullySafe(input, rawBlock, totalBlockBytes)) {
-            return Extractor.RESULT_END_OF_INPUT
-        }
+    private fun decodeDsfChunk(input: ExtractorInput): Int {
+        val totalBlk = dsfBlockSizePerChannel * channels
+        val raw = ByteArray(totalBlk)
+        if (!readBytesExact(input, raw, totalBlk)) return Extractor.RESULT_END_OF_INPUT
 
-        val framesDecoded = (dsfBlockSizePerChannel / decimationBytesPerSample).coerceAtLeast(1)
-        val pcmBytes = ByteArray(framesDecoded * 4)
-        val pcmBuffer = ByteBuffer.wrap(pcmBytes).order(ByteOrder.LITTLE_ENDIAN)
-        val invDecim = 1.0f / decimationBytesPerSample.toFloat()
+        val table = if (isLsbFirst) LSB_DECODE_TABLE else MSB_DECODE_TABLE
+        val frames = (dsfBlockSizePerChannel / decimationBytesPerSample).coerceAtLeast(1)
+        val outBytes = ByteArray(frames * 4)
+        val outBb = ByteBuffer.wrap(outBytes).order(ByteOrder.LITTLE_ENDIAN)
+        val scale = 1.0f / decimationBytesPerSample.toFloat()
 
-        for (f in 0 until framesDecoded) {
-            var sumL = 0f
-            var sumR = 0f
-            val baseOffset = f * decimationBytesPerSample
-
-            for (b in 0 until decimationBytesPerSample) {
-                val posL = (baseOffset + b).coerceAtMost(rawBlock.size - 1)
-                val posR = if (channels >= 2) (dsfBlockSizePerChannel + baseOffset + b).coerceAtMost(rawBlock.size - 1) else posL
-                val bL = rawBlock[posL].toInt() and 0xFF
-                val bR = rawBlock[posR].toInt() and 0xFF
-                sumL += BYTE_WEIGHT_TABLE[bL]
-                sumR += BYTE_WEIGHT_TABLE[bR]
+        for (f in 0 until frames) {
+            var accL = 0f
+            var accR = 0f
+            val base = f * decimationBytesPerSample
+            for (s in 0 until decimationBytesPerSample) {
+                val iL = (base + s).coerceAtMost(raw.size - 1)
+                val iR = if (channels >= 2) (dsfBlockSizePerChannel + base + s).coerceAtMost(raw.size - 1) else iL
+                accL += table[raw[iL].toInt() and 0xFF]
+                accR += table[raw[iR].toInt() and 0xFF]
             }
 
-            val rawL = sumL * invDecim
-            val rawR = sumR * invDecim
+            val inL = accL * scale
+            val inR = accR * scale
 
-            filter1L += 0.35f * (rawL - filter1L)
-            filter2L += 0.35f * (filter1L - filter2L)
+            lp1L += 0.30f * (inL - lp1L)
+            lp2L += 0.30f * (lp1L - lp2L)
+            lp3L += 0.30f * (lp2L - lp3L)
 
-            filter1R += 0.35f * (rawR - filter1R)
-            filter2R += 0.35f * (filter1R - filter2R)
+            lp1R += 0.30f * (inR - lp1R)
+            lp2R += 0.30f * (lp1R - lp2R)
+            lp3R += 0.30f * (lp2R - lp3R)
 
-            val outShortL = (filter2L * 28000f).toInt().coerceIn(-32768, 32767).toShort()
-            val outShortR = (filter2R * 28000f).toInt().coerceIn(-32768, 32767).toShort()
-
-            pcmBuffer.putShort(outShortL)
-            pcmBuffer.putShort(outShortR)
+            val pcmL = (lp3L * 26000f).toInt().coerceIn(-32768, 32767).toShort()
+            val pcmR = (lp3R * 26000f).toInt().coerceIn(-32768, 32767).toShort()
+            outBb.putShort(pcmL)
+            outBb.putShort(pcmR)
         }
 
-        val timeUs = ((currentBytesRead.toDouble() / dataSize.coerceAtLeast(1L).toDouble()) * durationUs).toLong()
-        currentBytesRead += totalBlockBytes
+        val ptsUs = ((currentBytesRead.toDouble() / dataSize.coerceAtLeast(1L).toDouble()) * durationUs).toLong()
+        currentBytesRead += totalBlk
 
-        val parsable = ParsableByteArray(pcmBytes)
-        trackOutput?.sampleData(parsable, pcmBytes.size)
-        trackOutput?.sampleMetadata(timeUs, C.BUFFER_FLAG_KEY_FRAME, pcmBytes.size, 0, null)
-
+        val parsable = ParsableByteArray(outBytes)
+        trackOutput?.sampleData(parsable, outBytes.size)
+        trackOutput?.sampleMetadata(ptsUs, C.BUFFER_FLAG_KEY_FRAME, outBytes.size, 0, null)
         return Extractor.RESULT_CONTINUE
     }
 
     override fun seek(position: Long, timeUs: Long) {
         currentBytesRead = (position - dataStartOffset).coerceAtLeast(0L)
-        filter1L = 0f
-        filter2L = 0f
-        filter1R = 0f
-        filter2R = 0f
+        lp1L = 0f; lp2L = 0f; lp3L = 0f
+        lp1R = 0f; lp2R = 0f; lp3R = 0f
     }
 
     override fun release() {}

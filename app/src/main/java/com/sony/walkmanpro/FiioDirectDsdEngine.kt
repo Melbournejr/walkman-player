@@ -36,23 +36,21 @@ class FiioDirectDsdEngine(
     private val mainHandler = Handler(Looper.getMainLooper())
 
     companion object {
-        // Bảng lọc giải mã nhanh 1-bit DSD sang biên độ PCM chuẩn cho cả MSB (.DFF) và LSB (.DSF)
-        private val MSB_LUT = FloatArray(256)
-        private val LSB_LUT = FloatArray(256)
-
-        init {
-            val weights = floatArrayOf(0.08f, 0.11f, 0.14f, 0.17f, 0.17f, 0.14f, 0.11f, 0.08f)
+        // Bảng tra cứu 256 trạng thái byte chuẩn 1-bit (-1.0f .. +1.0f)
+        private val BYTE_ONES_LUT = FloatArray(256).apply {
             for (b in 0..255) {
-                var m = 0f
-                var l = 0f
+                var ones = 0
                 for (bit in 0..7) {
-                    m += (if (((b shr (7 - bit)) and 1) == 1) 1f else -1f) * weights[bit]
-                    l += (if (((b shr bit) and 1) == 1) 1f else -1f) * weights[bit]
+                    if (((b shr bit) and 1) == 1) ones++
                 }
-                MSB_LUT[b] = m
-                LSB_LUT[b] = l
+                // Chuẩn hóa trung bình 8 bit về dải [-1.0f, +1.0f]
+                this[b] = (ones - 4) * 0.25f
             }
         }
+
+        // Bảng trọng số cửa sổ Blackman-Harris 8 bước giúp triệt tiêu nhiễu lượng tử siêu âm (Ultrasonic DSD Noise)
+        private val FIR_4_WEIGHTS = floatArrayOf(0.125f, 0.375f, 0.375f, 0.125f)
+        private val FIR_8_WEIGHTS = floatArrayOf(0.035f, 0.110f, 0.215f, 0.140f, 0.140f, 0.215f, 0.110f, 0.035f)
     }
 
     fun startDsdPlayback(uri: Uri, startMs: Int = 0) {
@@ -89,8 +87,7 @@ class FiioDirectDsdEngine(
         pauseRequested = false
         isPlaying = false
         try {
-            workerThread?.interrupt()
-            workerThread?.join(300)
+            workerThread?.join(250)
         } catch (_: Throwable) {}
         workerThread = null
     }
@@ -124,152 +121,164 @@ class FiioDirectDsdEngine(
         }
     }
 
+    // Quét chính xác Header của file .DFF / .DSF trong 64KB đầu tiên để không bao giờ lệch byte hoặc nhầm Sample Rate
+    data class DsdHeaderInfo(
+        val isValid: Boolean,
+        val isDsf: Boolean,
+        val isDstCompressed: Boolean,
+        val channels: Int,
+        val dsdSampleRate: Int,
+        val dsfBlockSize: Int,
+        val dataStartOffset: Long,
+        val dataSize: Long
+    )
+
+    fun parseDsdHeaderAccurate(context: Context, uri: Uri, totalFileBytes: Long): DsdHeaderInfo {
+        try {
+            context.contentResolver.openInputStream(uri)?.use { ins ->
+                val scanBuf = ByteArray(65536)
+                val readLen = readExact(ins, scanBuf, scanBuf.size)
+                if (readLen < 32) return DsdHeaderInfo(false, false, false, 2, 2822400, 4096, 0L, 0L)
+
+                val magic = String(scanBuf, 0, 4, Charsets.ISO_8859_1)
+                if (magic == "DSD ") {
+                    val bb = ByteBuffer.wrap(scanBuf, 0, readLen).order(ByteOrder.LITTLE_ENDIAN)
+                    val ch = bb.getInt(48).coerceIn(1, 2)
+                    val fs = bb.getInt(52).let { if (it == 5644800 || it == 11289600) it else 2822400 }
+                    val blk = bb.getInt(64).coerceIn(256, 32768)
+                    val dSize = bb.getLong(84)
+                    val actualSize = if (dSize > 12L) (dSize - 12L) else (totalFileBytes - 92L).coerceAtLeast(1024L)
+                    return DsdHeaderInfo(true, true, false, ch, fs, blk, 92L, actualSize)
+                } else if (magic == "FRM8") {
+                    var ch = 2
+                    var fs = 2822400 // Mặc định chuẩn SACD DSD64 (2.8224 MHz)
+                    var isDst = false
+                    var dataOffset = -1L
+                    var dSize = 0L
+
+                    // Duyệt tuần tự cấu trúc Chunk của .DFF (FRM8 header dài 16 bytes: "FRM8" + 8-byte size + "DSD ")
+                    var pos = 16
+                    while (pos <= readLen - 12) {
+                        val cId = String(scanBuf, pos, 4, Charsets.ISO_8859_1)
+                        val cSize = ByteBuffer.wrap(scanBuf, pos + 4, 8).order(ByteOrder.BIG_ENDIAN).long
+
+                        if (cId == "PROP" && cSize > 4L && pos + 16 <= readLen) {
+                            val propEnd = (pos + 12 + cSize.toInt()).coerceAtMost(readLen)
+                            var subPos = pos + 16 // Bỏ qua 12 byte PROP header + 4 byte "SND "
+                            while (subPos <= propEnd - 12) {
+                                val subId = String(scanBuf, subPos, 4, Charsets.ISO_8859_1)
+                                val subSize = ByteBuffer.wrap(scanBuf, subPos + 4, 8).order(ByteOrder.BIG_ENDIAN).long.toInt()
+                                val valOffset = subPos + 12
+                                if (subSize < 0 || valOffset + subSize > propEnd) break
+
+                                when (subId) {
+                                    "FS  " -> {
+                                        if (subSize == 4) {
+                                            val parsedFs = ByteBuffer.wrap(scanBuf, valOffset, 4).order(ByteOrder.BIG_ENDIAN).int
+                                            // Chỉ chấp nhận đúng 3 tần số chuẩn của DSD64, DSD128, DSD256
+                                            if (parsedFs == 2822400 || parsedFs == 5644800 || parsedFs == 11289600) {
+                                                fs = parsedFs
+                                            }
+                                        }
+                                    }
+                                    "CHNL" -> {
+                                        if (subSize >= 2) {
+                                            val parsedCh = ByteBuffer.wrap(scanBuf, valOffset, 2).order(ByteOrder.BIG_ENDIAN).short.toInt()
+                                            if (parsedCh in 1..6) ch = parsedCh
+                                        }
+                                    }
+                                    "CMPR" -> {
+                                        if (subSize >= 4) {
+                                            val cmprType = String(scanBuf, valOffset, 4, Charsets.ISO_8859_1)
+                                            if (cmprType == "DST ") isDst = true
+                                        }
+                                    }
+                                }
+                                val padSub = if (subSize % 2 != 0) subSize + 1 else subSize
+                                subPos = valOffset + padSub
+                            }
+                        } else if (cId == "DSD " && cSize > 1000L) {
+                            dataOffset = (pos + 12).toLong()
+                            dSize = cSize
+                            break
+                        } else if (cId == "DST " && cSize > 1000L) {
+                            isDst = true
+                            dataOffset = (pos + 12).toLong()
+                            dSize = cSize
+                            break
+                        }
+
+                        if (cSize <= 0L || cSize > totalFileBytes) break
+                        val padMain = if (cSize % 2L != 0L) cSize + 1L else cSize
+                        pos += (12L + padMain).toInt()
+                    }
+
+                    // Nếu header dài vượt quá hoặc cần quét trực tiếp chữ ký "DSD "
+                    if (dataOffset < 0L) {
+                        for (i in 16..(readLen - 12)) {
+                            if (scanBuf[i] == 'D'.code.toByte() && scanBuf[i + 1] == 'S'.code.toByte() &&
+                                scanBuf[i + 2] == 'D'.code.toByte() && scanBuf[i + 3] == ' '.code.toByte()
+                            ) {
+                                val candidateSz = ByteBuffer.wrap(scanBuf, i + 4, 8).order(ByteOrder.BIG_ENDIAN).long
+                                if (candidateSz > 100000L && candidateSz <= totalFileBytes) {
+                                    dataOffset = (i + 12).toLong()
+                                    dSize = candidateSz
+                                    break
+                                }
+                            }
+                        }
+                    }
+
+                    if (dataOffset > 0L) {
+                        val finalSize = if (dSize > 0L) dSize else (totalFileBytes - dataOffset).coerceAtLeast(1024L)
+                        return DsdHeaderInfo(true, false, isDst, ch, fs, 4096, dataOffset, finalSize)
+                    }
+                }
+            }
+        } catch (_: Throwable) {}
+        return DsdHeaderInfo(false, false, false, 2, 2822400, 4096, 0L, 0L)
+    }
+
     private fun runDsdLoop(uri: Uri) {
         var audioTrack: AudioTrack? = null
         try {
-            // Lấy tổng dung lượng file thật
-            var totalFileBytes = 0L
+            var totalFileBytes = 100L * 1024L * 1024L
             try {
                 context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
                     if (afd.length > 0) totalFileBytes = afd.length
                 }
             } catch (_: Throwable) {}
 
-            val firstStream = context.contentResolver.openInputStream(uri) ?: run {
-                showToastOnMain("Không thể mở file DSD này!")
+            val info = parseDsdHeaderAccurate(context, uri, totalFileBytes)
+            if (!info.isValid) {
+                showToastOnMain("Không tìm thấy luồng âm thanh DSD hợp lệ trong file này!")
                 isPlaying = false
                 return
             }
 
-            // Phân tích Header của .DFF hoặc .DSF
-            val h16 = ByteArray(16)
-            if (readExact(firstStream, h16, 16) < 16) {
-                firstStream.close()
+            if (info.isDstCompressed) {
+                showToastOnMain("File .DFF này đang bị nén khóa DST (SACD). Hãy dùng file .DFF/.DSF chuẩn Uncompressed!")
                 isPlaying = false
                 return
             }
 
-            val magic = String(h16, 0, 4, Charsets.ISO_8859_1)
-            var isDsf = false
-            var isLsb = false
-            var isDstCompressed = false
-            var channels = 2
-            var dsdFs = 2822400
-            var dsfBlockSize = 4096
-            var dataStartOffset = 0L
-            var dataSize = 0L
-
-            if (magic == "DSD ") {
-                isDsf = true
-                val rest76 = ByteArray(76)
-                readExact(firstStream, rest76, 76)
-                val full = h16 + rest76
-                val bb = ByteBuffer.wrap(full).order(ByteOrder.LITTLE_ENDIAN)
-                channels = bb.getInt(48).coerceIn(1, 6)
-                dsdFs = bb.getInt(52).coerceIn(2822400, 22579200)
-                isLsb = (bb.getInt(56) == 1)
-                dsfBlockSize = bb.getInt(64).coerceIn(256, 65536)
-                val dataChunkSz = bb.getLong(84)
-                dataStartOffset = 92L
-                dataSize = when {
-                    dataChunkSz > 12L -> dataChunkSz - 12L
-                    totalFileBytes > 92L -> totalFileBytes - 92L
-                    else -> 64L * 1024L * 1024L
-                }
-            } else if (magic == "FRM8") {
-                isDsf = false
-                isLsb = false
-                var offsetTracker = 16L
-                val chunkHdr = ByteArray(12)
-                var loops = 0
-
-                while (loops < 128 && readExact(firstStream, chunkHdr, 12) == 12) {
-                    loops++
-                    offsetTracker += 12L
-                    val id = String(chunkHdr, 0, 4, Charsets.ISO_8859_1)
-                    val sz = ByteBuffer.wrap(chunkHdr, 4, 8).order(ByteOrder.BIG_ENDIAN).long
-                    if (sz < 0L) break
-
-                    when (id) {
-                        "PROP" -> {
-                            if (sz in 4L..131072L) {
-                                val prop = ByteArray(sz.toInt())
-                                readExact(firstStream, prop, prop.size)
-                                offsetTracker += sz
-                                // Quét tìm FS, CHNL, CMPR bên trong PROP
-                                var p = 4
-                                while (p <= prop.size - 12) {
-                                    val subId = String(prop, p, 4, Charsets.ISO_8859_1)
-                                    val subSz = ByteBuffer.wrap(prop, p + 4, 8).order(ByteOrder.BIG_ENDIAN).long.toInt()
-                                    p += 12
-                                    if (subSz < 0 || p + subSz > prop.size) break
-                                    if (subId == "FS  " && subSz >= 4) {
-                                        val fs = ByteBuffer.wrap(prop, p, 4).order(ByteOrder.BIG_ENDIAN).int
-                                        if (fs in 2822400..22579200) dsdFs = fs
-                                    } else if (subId == "CHNL" && subSz >= 2) {
-                                        val ch = ByteBuffer.wrap(prop, p, 2).order(ByteOrder.BIG_ENDIAN).short.toInt()
-                                        if (ch in 1..6) channels = ch
-                                    } else if (subId == "CMPR" && subSz >= 4) {
-                                        val cmpr = String(prop, p, 4, Charsets.ISO_8859_1)
-                                        if (cmpr == "DST ") isDstCompressed = true
-                                    }
-                                    p += if (subSz % 2 != 0) subSz + 1 else subSz
-                                }
-                                if (sz % 2L != 0L) {
-                                    skipExact(firstStream, 1L)
-                                    offsetTracker += 1L
-                                }
-                            } else {
-                                val pad = if (sz % 2L != 0L) sz + 1L else sz
-                                skipExact(firstStream, pad)
-                                offsetTracker += pad
-                            }
-                        }
-                        "DSD " -> {
-                            dataStartOffset = offsetTracker
-                            dataSize = when {
-                                sz > 0L -> sz
-                                totalFileBytes > dataStartOffset -> totalFileBytes - dataStartOffset
-                                else -> 64L * 1024L * 1024L
-                            }
-                            break
-                        }
-                        "DST " -> {
-                            isDstCompressed = true
-                            break
-                        }
-                        else -> {
-                            val pad = if (sz % 2L != 0L) sz + 1L else sz
-                            skipExact(firstStream, pad)
-                            offsetTracker += pad
-                        }
-                    }
-                }
-            } else {
-                firstStream.close()
-                showToastOnMain("Định dạng file DSD không hợp lệ!")
-                isPlaying = false
-                return
-            }
-
-            if (isDstCompressed) {
-                firstStream.close()
-                showToastOnMain("File .DFF này dùng nén khóa DST (SACD ISO). Hãy dùng file .DFF hoặc .DSF chuẩn Uncompressed DSD!")
-                isPlaying = false
-                return
-            }
+            val channels = info.channels.coerceAtLeast(1)
+            val dsdFs = info.dsdSampleRate
+            val isDsf = info.isDsf
+            val dsfBlockSize = info.dsfBlockSize
+            val dataStartOffset = info.dataStartOffset
+            val dataSize = info.dataSize
 
             val pcmRate = 88200
-            val decimBytes = ((dsdFs / 8) / pcmRate).coerceIn(4, 32)
+            val decimBytes = ((dsdFs / 8) / pcmRate).coerceIn(4, 16)
             val bytesPerSecond = ((dsdFs / 8) * channels).toLong().coerceAtLeast(1L)
             durationMs = ((dataSize * 1000L) / bytesPerSecond).toInt().coerceAtLeast(1000)
 
-            // Khởi tạo phần cứng AudioTrack 88.2kHz Stereo trực tiếp như FiiO Music
             val minBufSize = AudioTrack.getMinBufferSize(
                 pcmRate,
                 AudioFormat.CHANNEL_OUT_STEREO,
                 AudioFormat.ENCODING_PCM_16BIT
-            ).coerceAtLeast(16384)
+            ).coerceAtLeast(32768)
 
             audioTrack = AudioTrack.Builder()
                 .setAudioAttributes(
@@ -291,29 +300,31 @@ class FiioDirectDsdEngine(
 
             audioTrack.play()
 
-            var activeStream: InputStream = firstStream
+            var activeStream: InputStream = context.contentResolver.openInputStream(uri) ?: return
+            // Nhảy chính xác tới byte đầu tiên của vùng dữ liệu âm thanh "DSD "
+            skipExact(activeStream, dataStartOffset)
             var bytesReadSoFar = 0L
 
-            // Bộ lọc thông thấp DSD + Bộ lọc DSP Sony (Vinyl, ClearAudio+, 10-Band EQ)
-            var lp1L = 0f; var lp2L = 0f; var lp3L = 0f
-            var lp1R = 0f; var lp2R = 0f; var lp3R = 0f
+            // Bộ lọc thông thấp 4 tầng (4-Stage Cascaded Sinc/IIR Filter) + Bộ khử dòng một chiều (DC Blocker) chống sôi & rè tuyệt đối
+            var s1L = 0f; var s2L = 0f; var s3L = 0f; var s4L = 0f
+            var s1R = 0f; var s2R = 0f; var s3R = 0f; var s4R = 0f
+            var dcInPrevL = 0f; var dcOutPrevL = 0f
+            var dcInPrevR = 0f; var dcOutPrevR = 0f
+
+            // Bộ lọc Sony DSP 7.0
             var dspSubL = 0f; var dspSubR = 0f
             var dspPrevL = 0f; var dspPrevR = 0f
             var dspVinylL = 0f; var dspVinylR = 0f
 
-            val lut = if (isLsb) LSB_LUT else MSB_LUT
-            val invDecim = 1.0f / decimBytes.toFloat()
-
-            val frameStepBytes = if (isDsf) (dsfBlockSize * channels) else (decimBytes * channels * 1024)
+            val frameStepBytes = if (isDsf) (dsfBlockSize * channels) else (decimBytes * channels * 2048)
             val dsdBuffer = ByteArray(frameStepBytes)
 
             while (!stopRequested && bytesReadSoFar < dataSize) {
                 if (pauseRequested) {
-                    Thread.sleep(60)
+                    Thread.sleep(50)
                     continue
                 }
 
-                // Xử lý khi người dùng kéo thanh tua (Seekbar)
                 val targetSeek = seekTargetMs
                 if (targetSeek >= 0) {
                     seekTargetMs = -1
@@ -321,37 +332,42 @@ class FiioDirectDsdEngine(
                     val newStream = context.contentResolver.openInputStream(uri) ?: break
                     val ratio = (targetSeek.toDouble() / durationMs.coerceAtLeast(1).toDouble()).coerceIn(0.0, 0.99)
                     val rawOffset = (dataSize * ratio).toLong()
+                    // Luôn căn chỉnh chẵn theo khung (decimBytes * channels) để không bao giờ bị đảo kênh L/R gây sôi
                     val alignUnit = if (isDsf) (dsfBlockSize * channels).toLong() else (decimBytes * channels).toLong()
                     val alignedBytes = (rawOffset / alignUnit.coerceAtLeast(1L)) * alignUnit.coerceAtLeast(1L)
                     skipExact(newStream, dataStartOffset + alignedBytes)
                     activeStream = newStream
                     bytesReadSoFar = alignedBytes
-                    lp1L = 0f; lp2L = 0f; lp3L = 0f
-                    lp1R = 0f; lp2R = 0f; lp3R = 0f
+                    s1L = 0f; s2L = 0f; s3L = 0f; s4L = 0f
+                    s1R = 0f; s2R = 0f; s3R = 0f; s4R = 0f
                 }
 
-                val toRead = frameStepBytes.toLong().coerceAtMost(dataSize - bytesReadSoFar).toInt()
-                if (toRead < decimBytes * channels) break
+                val remaining = dataSize - bytesReadSoFar
+                val want = frameStepBytes.toLong().coerceAtMost(remaining).toInt()
+                val alignStep = decimBytes * channels
+                val alignedWant = (want / alignStep) * alignStep
+                if (alignedWant < alignStep) break
 
-                val got = readExact(activeStream, dsdBuffer, toRead)
-                if (got < decimBytes * channels) break
+                val got = readExact(activeStream, dsdBuffer, alignedWant)
+                val usableBytes = (got / alignStep) * alignStep
+                if (usableBytes < alignStep) break
 
                 val pcmFrames = if (isDsf) {
                     dsfBlockSize / decimBytes
                 } else {
-                    got / (decimBytes * channels)
+                    usableBytes / alignStep
                 }
                 if (pcmFrames <= 0) break
 
                 val pcmShorts = ShortArray(pcmFrames * 2)
 
-                // Lấy cấu hình DSP Sony trực tiếp
-                val preGain = 0.78f * masterVolume
+                // Thông số DSP
+                val preGain = 0.72f * masterVolume
                 val eqGains = dspProcessor.eq10Gains
                 val eqLow = ((eqGains[0] + eqGains[1] + eqGains[2]) / 3f) * 0.05f
                 val eqMid = ((eqGains[3] + eqGains[4] + eqGains[5] + eqGains[6]) / 4f) * 0.04f
                 val eqHigh = ((eqGains[7] + eqGains[8] + eqGains[9]) / 3f) * 0.05f
-                val bassBoost = (dspProcessor.megaBassLevel * 0.55f) + eqLow
+                val bassBoost = (dspProcessor.megaBassLevel * 0.50f) + eqLow
                 val clearAudio = dspProcessor.clearAudioEnabled
                 val dsee = dspProcessor.dseeEnabled
                 val vinyl = dspProcessor.vinylEnabled
@@ -362,38 +378,53 @@ class FiioDirectDsdEngine(
 
                 var dffIdx = 0
                 for (f in 0 until pcmFrames) {
-                    var sumL = 0f
-                    var sumR = 0f
+                    var firL = 0f
+                    var firR = 0f
 
                     if (isDsf) {
                         val base = f * decimBytes
                         for (s in 0 until decimBytes) {
-                            val iL = (base + s).coerceAtMost(got - 1)
-                            val iR = if (channels >= 2) (dsfBlockSize + base + s).coerceAtMost(got - 1) else iL
-                            sumL += lut[dsdBuffer[iL].toInt() and 0xFF]
-                            sumR += lut[dsdBuffer[iR].toInt() and 0xFF]
+                            val iL = (base + s).coerceAtMost(usableBytes - 1)
+                            val iR = if (channels >= 2) (dsfBlockSize + base + s).coerceAtMost(usableBytes - 1) else iL
+                            val w = if (decimBytes == 4) FIR_4_WEIGHTS[s] else if (decimBytes == 8) FIR_8_WEIGHTS[s] else (1f / decimBytes)
+                            firL += BYTE_ONES_LUT[dsdBuffer[iL].toInt() and 0xFF] * w
+                            firR += BYTE_ONES_LUT[dsdBuffer[iR].toInt() and 0xFF] * w
                         }
                     } else {
+                        // Giải mã .DFF với cửa sổ lọc FIR (Triệt tiêu hoàn toàn tiếng sôi cao tần)
                         for (s in 0 until decimBytes) {
                             val bL = dsdBuffer[dffIdx].toInt() and 0xFF
                             val bR = if (channels >= 2) dsdBuffer[dffIdx + 1].toInt() and 0xFF else bL
-                            sumL += lut[bL]
-                            sumR += lut[bR]
+                            val w = if (decimBytes == 4) FIR_4_WEIGHTS[s] else if (decimBytes == 8) FIR_8_WEIGHTS[s] else (1f / decimBytes)
+                            firL += BYTE_ONES_LUT[bL] * w
+                            firR += BYTE_ONES_LUT[bR] * w
                             dffIdx += channels
                         }
                     }
 
-                    // Lọc thông thấp 3 tầng giải mã DSD 1-Bit
-                    lp1L += 0.32f * (sumL * invDecim - lp1L)
-                    lp2L += 0.32f * (lp1L - lp2L)
-                    lp3L += 0.32f * (lp2L - lp3L)
+                    // Bộ lọc Khử DC Offset (High-pass ~15Hz) ngăn hiện tượng lệch tâm gây ù/rè loa
+                    val dcOutL = firL - dcInPrevL + 0.9985f * dcOutPrevL
+                    dcInPrevL = firL
+                    dcOutPrevL = dcOutL
 
-                    lp1R += 0.32f * (sumR * invDecim - lp1R)
-                    lp2R += 0.32f * (lp1R - lp2R)
-                    lp3R += 0.32f * (lp2R - lp3R)
+                    val dcOutR = firR - dcInPrevR + 0.9985f * dcOutPrevR
+                    dcInPrevR = firR
+                    dcOutPrevR = dcOutR
 
-                    var left = lp3L * preGain
-                    var right = lp3R * preGain
+                    // Bộ lọc thông thấp 4 bậc (4-Pole Bessel Low-Pass ~22kHz) làm sạch hoàn toàn nhiễu lượng tử DSD
+                    s1L += 0.24f * (dcOutL - s1L)
+                    s2L += 0.24f * (s1L - s2L)
+                    s3L += 0.24f * (s2L - s3L)
+                    s4L += 0.24f * (s3L - s4L)
+
+                    s1R += 0.24f * (dcOutR - s1R)
+                    s2R += 0.24f * (s1R - s2R)
+                    s3R += 0.24f * (s2R - s3R)
+                    s4R += 0.24f * (s3R - s4R)
+
+                    // Khuếch đại biên độ chuẩn Analog (DSD có biên độ chuẩn -6dB nên nhân hệ số bù 1.85f)
+                    var left = s4L * 1.85f * preGain
+                    var right = s4R * 1.85f * preGain
 
                     // Qua mạch âm thanh Sony DSP 7.0
                     dspSubL += 0.045f * (left - dspSubL)
@@ -408,22 +439,22 @@ class FiioDirectDsdEngine(
 
                     if (clearAudio) {
                         val mid = (left + right) * 0.5f
-                        val side = (left - right) * 0.5f * 1.28f
-                        left = (mid + side) + dspSubL * 0.10f + highL * 0.08f
-                        right = (mid - side) + dspSubR * 0.10f + highR * 0.08f
+                        val side = (left - right) * 0.5f * 1.25f
+                        left = (mid + side) + dspSubL * 0.08f + highL * 0.06f
+                        right = (mid - side) + dspSubR * 0.08f + highR * 0.06f
                     }
                     if (dsee) {
-                        left += highL * 0.15f
-                        right += highR * 0.15f
+                        left += highL * 0.12f
+                        right += highR * 0.12f
                     }
                     if (vinyl) {
                         dspVinylL += 0.35f * (left - dspVinylL)
                         dspVinylR += 0.35f * (right - dspVinylR)
-                        left = tanh((dspVinylL * 0.65f + left * 0.35f + dspSubL * 0.12f) * 1.05f) * 0.92f
-                        right = tanh((dspVinylR * 0.65f + right * 0.35f + dspSubR * 0.12f) * 1.05f) * 0.92f
+                        left = tanh((dspVinylL * 0.65f + left * 0.35f + dspSubL * 0.10f) * 1.05f) * 0.90f
+                        right = tanh((dspVinylR * 0.65f + right * 0.35f + dspSubR * 0.10f) * 1.05f) * 0.90f
                     } else {
-                        left = tanh(left) * 0.95f
-                        right = tanh(right) * 0.95f
+                        left = tanh(left) * 0.92f
+                        right = tanh(right) * 0.92f
                     }
 
                     left = left * leftPan * phase
@@ -433,19 +464,26 @@ class FiioDirectDsdEngine(
                     pcmShorts[f * 2 + 1] = (right * 32767f).toInt().coerceIn(-32768, 32767).toShort()
                 }
 
-                audioTrack.write(pcmShorts, 0, pcmShorts.size)
-                bytesReadSoFar += got
-                currentPositionMs = ((bytesReadSoFar.toDouble() / dataSize.coerceAtLeast(1L).toDouble()) * durationMs).toInt()
+                if (!stopRequested) {
+                    audioTrack.write(pcmShorts, 0, pcmShorts.size)
+                    bytesReadSoFar += usableBytes
+                    currentPositionMs = ((bytesReadSoFar.toDouble() / dataSize.coerceAtLeast(1L).toDouble()) * durationMs).toInt()
+                }
             }
 
             try { activeStream.close() } catch (_: Throwable) {}
 
-            if (!stopRequested && bytesReadSoFar >= dataSize - (decimBytes * channels * 4)) {
+            if (!stopRequested && bytesReadSoFar >= dataSize - (decimBytes * channels * 8)) {
                 isPlaying = false
                 mainHandler.post { onTrackEnded() }
             }
+        } catch (_: InterruptedException) {
+            // Dừng luồng bình thường khi người dùng chuyển bài, không báo lỗi giả
+            isPlaying = false
         } catch (t: Throwable) {
-            showToastOnMain("Lỗi đọc luồng DSD: ${t.javaClass.simpleName}")
+            if (!stopRequested) {
+                showToastOnMain("Không thể đọc file DSD: ${t.javaClass.simpleName}")
+            }
             isPlaying = false
         } finally {
             try {

@@ -556,45 +556,19 @@ class MainActivity : ComponentActivity() {
 
     private fun parseDsdSpecsDirectly(context: Context, uri: Uri): Pair<Int, String> {
         try {
-            context.contentResolver.openInputStream(uri)?.use { ins ->
-                val buf = ByteArray(512)
-                val read = ins.read(buf)
-                if (read >= 64) {
-                    val magic = String(buf, 0, 4, Charsets.ISO_8859_1)
-                    if (magic == "DSD ") {
-                        val bb = ByteBuffer.wrap(buf).order(ByteOrder.LITTLE_ENDIAN)
-                        val ch = bb.getInt(48).coerceIn(1, 6)
-                        val fs = bb.getInt(52).coerceAtLeast(2822400)
-                        val kbps = (fs * ch) / 1000
-                        val dsdName = when {
-                            fs >= 11289600 -> "DSD256 11.2 MHz • 1-bit"
-                            fs >= 5644800 -> "DSD128 5.6 MHz • 1-bit"
-                            else -> "DSD64 2.8 MHz • 1-bit"
-                        }
-                        return Pair(kbps, dsdName)
-                    } else if (magic == "FRM8") {
-                        var fs = 2822400
-                        for (i in 0..(read - 16)) {
-                            if (buf[i] == 'F'.code.toByte() && buf[i + 1] == 'S'.code.toByte() &&
-                                buf[i + 2] == ' '.code.toByte() && buf[i + 3] == ' '.code.toByte()
-                            ) {
-                                val parsed = ByteBuffer.wrap(buf, i + 12, 4).order(ByteOrder.BIG_ENDIAN).int
-                                if (parsed >= 2822400) fs = parsed
-                                break
-                            }
-                        }
-                        val kbps = (fs * 2) / 1000
-                        val dsdName = when {
-                            fs >= 11289600 -> "DSDIFF DSD256 11.2 MHz"
-                            fs >= 5644800 -> "DSDIFF DSD128 5.6 MHz"
-                            else -> "DSDIFF DSD64 2.8 MHz"
-                        }
-                        return Pair(kbps, dsdName)
-                    }
+            val engine = sharedDsdEngine ?: FiioDirectDsdEngine(context, sharedDspProcessor) {}
+            val info = engine.parseDsdHeaderAccurate(context, uri, 100L * 1024L * 1024L)
+            if (info.isValid) {
+                val kbps = (info.dsdSampleRate * info.channels) / 1000
+                val dsdName = when {
+                    info.dsdSampleRate >= 11289600 -> "DSD256 11.2 MHz • 1-bit"
+                    info.dsdSampleRate >= 5644800 -> "DSD128 5.6 MHz • 1-bit"
+                    else -> "DSD64 2.8 MHz • 1-bit"
                 }
+                return Pair(kbps, dsdName)
             }
         } catch (_: Throwable) {}
-        return Pair(5644, "DSD 2.8 MHz • 1-bit Direct")
+        return Pair(5644, "DSD64 2.8 MHz • 1-bit")
     }
 
     private fun isExcluded(text: String, file: String): Boolean {
@@ -1182,7 +1156,7 @@ fun WalkmanMasterRoot(
                     selected = activeTab == 0,
                     onClick = { activeTab = 0 },
                     icon = { Icon(Icons.Default.Album, null) },
-                    label = { Text("Walkman 9.5", fontWeight = FontWeight.Bold) }
+                    label = { Text("Walkman 9.6", fontWeight = FontWeight.Bold) }
                 )
                 NavigationBarItem(
                     selected = activeTab == 1,
@@ -2015,7 +1989,7 @@ fun FullSonyDspAndAudiophileToolsView(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text("SONY PURE AUDIO 7.0 + FIIO DSD ENGINE", fontWeight = FontWeight.Black, fontSize = 14.sp, color = Color(0xFFEAB308))
-            Text("✓ V9.5 DIRECT DSD", color = Color(0xFF22C55E), fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
+            Text("✓ V9.6 CLEAN DSD", color = Color(0xFF22C55E), fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
         }
 
         Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF141C2B))) {
@@ -2219,3 +2193,4 @@ fun FullSonyDspAndAudiophileToolsView(
         }
     }
 }
+

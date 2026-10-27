@@ -11,8 +11,8 @@ android {
         applicationId = "com.sony.walkmanpro"
         minSdk = 26
         targetSdk = 34
-        versionCode = 94
-        versionName = "9.4-DSD-NoCrashGuaranteed"
+        versionCode = 95
+        versionName = "9.5-FiioDirectDSD"
     }
 
     compileOptions {
@@ -30,7 +30,6 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.8.2")
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("androidx.media3:media3-exoplayer:1.2.1")
-    implementation("androidx.media3:media3-extractor:1.2.1")
     implementation("androidx.media3:media3-common:1.2.1")
     implementation("androidx.media3:media3-session:1.2.1")
     implementation(platform("androidx.compose:compose-bom:2024.02.00"))

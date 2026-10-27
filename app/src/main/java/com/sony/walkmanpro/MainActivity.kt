@@ -64,7 +64,6 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -113,7 +112,9 @@ class MainActivity : ComponentActivity() {
     companion object {
         var onExternalCommand: ((String) -> Unit)? = null
         private var sharedExoPlayer: ExoPlayer? = null
+        private var sharedDsdEngine: FiioDirectDsdEngine? = null
         private val sharedDspProcessor = SonyRealTimeDspProcessor()
+        @Volatile private var isDsdModeActive: Boolean = false
     }
 
     private var onTrackEndedCallback: (() -> Unit)? = null
@@ -129,10 +130,10 @@ class MainActivity : ComponentActivity() {
     private val backgroundKeepAliveRunnable = object : Runnable {
         override fun run() {
             try {
-                val player = sharedExoPlayer
-                if (player != null && player.isPlaying) {
-                    val pos = player.currentPosition.toInt().coerceAtLeast(0)
-                    val dur = player.duration.coerceAtLeast(1000L)
+                val playing = getActiveIsPlaying()
+                if (playing) {
+                    val pos = getActivePosition()
+                    val dur = getActiveDuration().toLong().coerceAtLeast(1000L)
                     currentTrackRef?.let { t ->
                         PlaylistStorage.saveTrackPosition(applicationContext, t.title, pos, currentIndexRef)
                         WalkmanMediaSessionService.updateNowPlayingNotification(
@@ -157,7 +158,7 @@ class MainActivity : ComponentActivity() {
         startPersistentForegroundService()
         requestIgnoreBatteryOptimizationsIfNeeded()
         loadSavedDspSettings()
-        initCustomDspExoPlayer()
+        initAudioEngines()
         backgroundHandler.post(backgroundKeepAliveRunnable)
 
         setContent {
@@ -170,11 +171,11 @@ class MainActivity : ComponentActivity() {
                         currentTrackRef = track
                         currentIndexRef = idx
                         onTrackEndedCallback = onEnd
-                        playWithExo(track, startMs)
+                        playTrackUnified(track, startMs)
                     },
-                    onTogglePlay = { togglePlayExo() },
-                    onStopPlayback = { stopExo() },
-                    onSeekTo = { ms -> seekExo(ms) },
+                    onTogglePlay = { togglePlayUnified() },
+                    onStopPlayback = { stopUnified() },
+                    onSeekTo = { ms -> seekUnified(ms) },
                     onSetMasterVolume = { vol -> updateMasterVolume(vol) },
                     onSetSleepMultiplier = { mult ->
                         sleepFadeMultiplier = mult.coerceIn(0f, 1f)
@@ -190,16 +191,38 @@ class MainActivity : ComponentActivity() {
                     onSetTapeSpeed = { spd -> updateTapeSpeed(spd) },
                     onSetKeepScreenOn = { keepOn -> setDeskScreenKeepOn(keepOn) },
                     onSetEqBand10 = { band, gain -> updateEqBand10(band, gain) },
-                    getIsPlaying = { sharedExoPlayer?.isPlaying == true },
-                    getPosition = { (sharedExoPlayer?.currentPosition ?: 0L).toInt().coerceAtLeast(0) },
-                    getDuration = {
-                        val d = sharedExoPlayer?.duration ?: 1L
-                        if (d <= 0L || d == C.TIME_UNSET) 1 else d.toInt()
-                    },
+                    getIsPlaying = { getActiveIsPlaying() },
+                    getPosition = { getActivePosition() },
+                    getDuration = { getActiveDuration() },
                     getAudioOutputState = { detectAudioOutputState(this@MainActivity) },
                     getTrackSpecs = { track -> inspectTrackSpecsSafe(this@MainActivity, track) }
                 )
             }
+        }
+    }
+
+    private fun getActiveIsPlaying(): Boolean {
+        return if (isDsdModeActive) {
+            sharedDsdEngine?.isPlaying == true
+        } else {
+            sharedExoPlayer?.isPlaying == true
+        }
+    }
+
+    private fun getActivePosition(): Int {
+        return if (isDsdModeActive) {
+            (sharedDsdEngine?.currentPositionMs ?: 0).coerceAtLeast(0)
+        } else {
+            (sharedExoPlayer?.currentPosition ?: 0L).toInt().coerceAtLeast(0)
+        }
+    }
+
+    private fun getActiveDuration(): Int {
+        return if (isDsdModeActive) {
+            (sharedDsdEngine?.durationMs ?: 180000).coerceAtLeast(1)
+        } else {
+            val d = sharedExoPlayer?.duration ?: 1L
+            if (d <= 0L || d == C.TIME_UNSET) 1 else d.toInt()
         }
     }
 
@@ -232,7 +255,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun initCustomDspExoPlayer() {
+    private fun initAudioEngines() {
+        if (sharedDsdEngine == null) {
+            sharedDsdEngine = FiioDirectDsdEngine(applicationContext, sharedDspProcessor) {
+                onTrackEndedCallback?.invoke()
+            }
+        }
+
         if (sharedExoPlayer != null) return
 
         val renderersFactory = object : DefaultRenderersFactory(applicationContext) {
@@ -252,11 +281,7 @@ class MainActivity : ComponentActivity() {
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build()
 
-        // Gắn trực tiếp WalkmanExtractorsFactory (chứa bộ giải mã DSD .DFF & .DSF) vào ExoPlayer
-        val mediaSourceFactory = DefaultMediaSourceFactory(applicationContext, WalkmanExtractorsFactory())
-
         sharedExoPlayer = ExoPlayer.Builder(applicationContext, renderersFactory)
-            .setMediaSourceFactory(mediaSourceFactory)
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_LOCAL)
@@ -265,7 +290,7 @@ class MainActivity : ComponentActivity() {
                 playbackParameters = PlaybackParameters(tapeSpeed, tapeSpeed)
                 addListener(object : Player.Listener {
                     override fun onPlaybackStateChanged(playbackState: Int) {
-                        if (playbackState == Player.STATE_ENDED) {
+                        if (!isDsdModeActive && playbackState == Player.STATE_ENDED) {
                             onTrackEndedCallback?.invoke()
                         }
                     }
@@ -273,8 +298,8 @@ class MainActivity : ComponentActivity() {
                     override fun onPlayerError(error: PlaybackException) {
                         Toast.makeText(
                             applicationContext,
-                            "Không thể giải mã luồng âm thanh này (${error.errorCodeName})",
-                            Toast.LENGTH_LONG
+                            "Không thể phát file này (${error.errorCodeName})",
+                            Toast.LENGTH_SHORT
                         ).show()
                     }
                 })
@@ -298,57 +323,27 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun applyEffectiveVolume() {
-        sharedExoPlayer?.volume = (masterVolume * sleepFadeMultiplier).coerceIn(0f, 1f)
+        val eff = (masterVolume * sleepFadeMultiplier).coerceIn(0f, 1f)
+        sharedExoPlayer?.volume = eff
+        sharedDsdEngine?.masterVolume = eff
     }
 
-    private fun playWithExo(track: AudioTrack, startMs: Long = 0L) {
-        try {
-            // Kiểm tra nhanh nếu là file .DFF bị nén DST độc quyền thì báo cho người dùng biết
-            if (track.formatName.equals("DFF", true) && isDstCompressedDff(track.uri)) {
-                Toast.makeText(
-                    this,
-                    "File .DFF này đang bị khóa nén DST (Direct Stream Transfer). Hãy dùng file .DFF / .DSF chuẩn Uncompressed DSD!",
-                    Toast.LENGTH_LONG
-                ).show()
-            }
-
-            startPersistentForegroundService()
-            val player = sharedExoPlayer ?: return
-            player.setMediaItem(MediaItem.fromUri(track.uri))
-            player.prepare()
-            if (startMs > 0) player.seekTo(startMs)
-            player.playbackParameters = PlaybackParameters(tapeSpeed, tapeSpeed)
-
-            if (crossfadeEnabled) {
-                player.volume = 0.05f
-                player.play()
-                val targetVol = (masterVolume * sleepFadeMultiplier).coerceIn(0f, 1f)
-                Thread {
-                    for (step in 1..12) {
-                        try {
-                            Thread.sleep(90)
-                            val v = (targetVol * (step / 12f)).coerceIn(0f, 1f)
-                            runOnUiThread { sharedExoPlayer?.volume = v }
-                        } catch (_: Throwable) {}
-                    }
-                }.start()
-            } else {
-                applyEffectiveVolume()
-                player.play()
-            }
-        } catch (e: Throwable) {
-            Toast.makeText(this, "Không thể phát: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+    private fun isDsdTrack(track: AudioTrack): Boolean {
+        val fmt = track.formatName.lowercase()
+        val title = track.title.lowercase()
+        val uriStr = track.uri.toString().lowercase()
+        if (fmt == "dff" || fmt == "dsf" || title.endsWith(".dff") || title.endsWith(".dsf") ||
+            uriStr.endsWith(".dff") || uriStr.endsWith(".dsf")
+        ) {
+            return true
         }
-    }
-
-    private fun isDstCompressedDff(uri: Uri): Boolean {
+        // Kiểm tra trực tiếp 4 byte đầu tiên của file ("FRM8" hoặc "DSD ")
         return try {
-            contentResolver.openInputStream(uri)?.use { ins ->
-                val head = ByteArray(1024)
-                val n = ins.read(head)
-                if (n > 32) {
-                    val str = String(head, 0, n, Charsets.ISO_8859_1)
-                    str.contains("CMPR") && str.contains("DST ")
+            contentResolver.openInputStream(track.uri)?.use { ins ->
+                val b = ByteArray(4)
+                if (ins.read(b) == 4) {
+                    val m = String(b, 0, 4, Charsets.ISO_8859_1)
+                    m == "FRM8" || m == "DSD "
                 } else false
             } ?: false
         } catch (_: Throwable) {
@@ -356,29 +351,83 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun togglePlayExo(): Boolean {
-        val player = sharedExoPlayer ?: return false
-        if (player.isPlaying) {
-            player.pause()
-        } else {
+    private fun playTrackUnified(track: AudioTrack, startMs: Long = 0L) {
+        try {
             startPersistentForegroundService()
-            applyEffectiveVolume()
-            player.play()
+            if (isDsdTrack(track)) {
+                // Chuyển sang FiioDirectDsdEngine để chạy mượt .DFF / .DSF qua AudioTrack
+                isDsdModeActive = true
+                sharedExoPlayer?.pause()
+                sharedDsdEngine?.masterVolume = (masterVolume * sleepFadeMultiplier).coerceIn(0f, 1f)
+                sharedDsdEngine?.startDsdPlayback(track.uri, startMs.toInt())
+            } else {
+                // Chạy ExoPlayer cho MP3, FLAC, WAV, M4A
+                isDsdModeActive = false
+                sharedDsdEngine?.stop()
+                val player = sharedExoPlayer ?: return
+                player.setMediaItem(MediaItem.fromUri(track.uri))
+                player.prepare()
+                if (startMs > 0) player.seekTo(startMs)
+                player.playbackParameters = PlaybackParameters(tapeSpeed, tapeSpeed)
+
+                if (crossfadeEnabled) {
+                    player.volume = 0.05f
+                    player.play()
+                    val targetVol = (masterVolume * sleepFadeMultiplier).coerceIn(0f, 1f)
+                    Thread {
+                        for (step in 1..12) {
+                            try {
+                                Thread.sleep(90)
+                                val v = (targetVol * (step / 12f)).coerceIn(0f, 1f)
+                                runOnUiThread { sharedExoPlayer?.volume = v }
+                            } catch (_: Throwable) {}
+                        }
+                    }.start()
+                } else {
+                    applyEffectiveVolume()
+                    player.play()
+                }
+            }
+        } catch (e: Throwable) {
+            Toast.makeText(this, "Không thể phát: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
         }
-        return player.isPlaying
     }
 
-    private fun stopExo() {
-        sharedExoPlayer?.let {
-            it.pause()
-            it.seekTo(0)
+    private fun togglePlayUnified(): Boolean {
+        return if (isDsdModeActive) {
+            sharedDsdEngine?.togglePlayPause() ?: false
+        } else {
+            val player = sharedExoPlayer ?: return false
+            if (player.isPlaying) {
+                player.pause()
+            } else {
+                startPersistentForegroundService()
+                applyEffectiveVolume()
+                player.play()
+            }
+            player.isPlaying
         }
     }
 
-    private fun seekExo(ms: Int) {
-        sharedExoPlayer?.let { player ->
-            val dur = if (player.duration > 0) player.duration else Long.MAX_VALUE
-            player.seekTo(ms.toLong().coerceIn(0L, dur))
+    private fun stopUnified() {
+        if (isDsdModeActive) {
+            sharedDsdEngine?.stop()
+        } else {
+            sharedExoPlayer?.let {
+                it.pause()
+                it.seekTo(0)
+            }
+        }
+    }
+
+    private fun seekUnified(ms: Int) {
+        if (isDsdModeActive) {
+            sharedDsdEngine?.seekTo(ms)
+        } else {
+            sharedExoPlayer?.let { player ->
+                val dur = if (player.duration > 0) player.duration else Long.MAX_VALUE
+                player.seekTo(ms.toLong().coerceIn(0L, dur))
+            }
         }
     }
 
@@ -473,15 +522,13 @@ class MainActivity : ComponentActivity() {
         return AudioOutputState("Loa ngoài thiết bị", false, "Stereo Speaker", "Standard Audio")
     }
 
-    // TUYỆT ĐỐI KHÔNG GỌI MediaMetadataRetriever CHO FILE .DFF / .DSF ĐỂ TRÁNH VĂNG APP Ở TẦNG C++ NATIVE
     private fun inspectTrackSpecsSafe(context: Context, track: AudioTrack): Pair<Int, String> {
-        val lowerTitle = track.title.lowercase()
-        val lowerFmt = track.formatName.lowercase()
-
-        if (lowerFmt == "dff" || lowerFmt == "dsf" || lowerTitle.endsWith(".dff") || lowerTitle.endsWith(".dsf")) {
+        if (isDsdTrack(track)) {
             return parseDsdSpecsDirectly(context, track.uri)
         }
 
+        val lowerTitle = track.title.lowercase()
+        val lowerFmt = track.formatName.lowercase()
         var bitrate = 320
         var sampleRate = "44.1 kHz • 16-bit"
         val retriever = MediaMetadataRetriever()
@@ -527,15 +574,13 @@ class MainActivity : ComponentActivity() {
                         return Pair(kbps, dsdName)
                     } else if (magic == "FRM8") {
                         var fs = 2822400
-                        for (i in 0..(read - 8)) {
+                        for (i in 0..(read - 16)) {
                             if (buf[i] == 'F'.code.toByte() && buf[i + 1] == 'S'.code.toByte() &&
                                 buf[i + 2] == ' '.code.toByte() && buf[i + 3] == ' '.code.toByte()
                             ) {
-                                if (i + 16 <= read) {
-                                    val parsed = ByteBuffer.wrap(buf, i + 12, 4).order(ByteOrder.BIG_ENDIAN).int
-                                    if (parsed >= 2822400) fs = parsed
-                                    break
-                                }
+                                val parsed = ByteBuffer.wrap(buf, i + 12, 4).order(ByteOrder.BIG_ENDIAN).int
+                                if (parsed >= 2822400) fs = parsed
+                                break
                             }
                         }
                         val kbps = (fs * 2) / 1000
@@ -913,6 +958,9 @@ fun WalkmanMasterRoot(
             savedPosForThisTrack.toLong()
         } else 0L
 
+        posMs = startMs.toInt()
+        durMs = track.duration.toInt().coerceAtLeast(1)
+
         scope.launch(Dispatchers.IO) {
             val specs = getTrackSpecs(track)
             withContext(Dispatchers.Main) {
@@ -1134,7 +1182,7 @@ fun WalkmanMasterRoot(
                     selected = activeTab == 0,
                     onClick = { activeTab = 0 },
                     icon = { Icon(Icons.Default.Album, null) },
-                    label = { Text("Walkman 9.4", fontWeight = FontWeight.Bold) }
+                    label = { Text("Walkman 9.5", fontWeight = FontWeight.Bold) }
                 )
                 NavigationBarItem(
                     selected = activeTab == 1,
@@ -1158,7 +1206,7 @@ fun WalkmanMasterRoot(
                 .padding(padding)
         ) {
             when (activeTab) {
-                0 -> FullScreenWalkmanDeckV94(
+                0 -> FullScreenWalkmanDeckV95(
                     skin = currentSkin,
                     track = currentTrack,
                     audioOutput = audioOutput,
@@ -1328,7 +1376,7 @@ fun WalkmanMasterRoot(
 }
 
 @Composable
-fun FullScreenWalkmanDeckV94(
+fun FullScreenWalkmanDeckV95(
     skin: WalkmanSkin,
     track: AudioTrack?,
     audioOutput: AudioOutputState,
@@ -1508,7 +1556,7 @@ fun FullScreenWalkmanDeckV94(
                                 .padding(14.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
-                            Text("DSD NATIVE DECODER • S-MASTER HX™ AMP", color = Color(0xFFEAB308), fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                            Text("FIIO/SONY DIRECT DSD • S-MASTER HX™ AMP", color = Color(0xFFEAB308), fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
                             Spacer(modifier = Modifier.height(10.dp))
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1607,11 +1655,15 @@ fun FullScreenWalkmanDeckV94(
                     Text(trackArtist, color = accentColor, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                 }
 
+                // KHÓA AN TOÀN 100% CHO SLIDER SEEKBAR (Tránh lỗi IllegalArgumentException khi mở file DSD có duration = 0)
+                val safeMaxDur = durMs.toFloat().coerceAtLeast(1f)
+                val safeCurrPos = posMs.toFloat().coerceIn(0f, safeMaxDur)
+
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Slider(
-                        value = posMs.toFloat(),
+                        value = safeCurrPos,
                         onValueChange = { onSeek(it.toInt()) },
-                        valueRange = 0f..durMs.toFloat().coerceAtLeast(1f),
+                        valueRange = 0f..safeMaxDur,
                         modifier = Modifier.fillMaxWidth().height(24.dp),
                         colors = SliderDefaults.colors(thumbColor = accentColor, activeTrackColor = accentColor)
                     )
@@ -1634,7 +1686,7 @@ fun FullScreenWalkmanDeckV94(
         ) {
             Icon(Icons.Default.VolumeDown, null, tint = accentColor, modifier = Modifier.size(18.dp))
             Slider(
-                value = masterVol,
+                value = masterVol.coerceIn(0f, 1f),
                 onValueChange = onVolumeChange,
                 modifier = Modifier.weight(1f).height(22.dp),
                 colors = SliderDefaults.colors(thumbColor = accentColor, activeTrackColor = accentColor)
@@ -1962,8 +2014,8 @@ fun FullSonyDspAndAudiophileToolsView(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("SONY PURE AUDIO 7.0 + DSD ENGINE", fontWeight = FontWeight.Black, fontSize = 14.sp, color = Color(0xFFEAB308))
-            Text("✓ V9.4 DSD READY", color = Color(0xFF22C55E), fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
+            Text("SONY PURE AUDIO 7.0 + FIIO DSD ENGINE", fontWeight = FontWeight.Black, fontSize = 14.sp, color = Color(0xFFEAB308))
+            Text("✓ V9.5 DIRECT DSD", color = Color(0xFF22C55E), fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
         }
 
         Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF141C2B))) {
@@ -2037,7 +2089,7 @@ fun FullSonyDspAndAudiophileToolsView(
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("L", color = Color.LightGray, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                     Slider(
-                        value = channelBalance,
+                        value = channelBalance.coerceIn(-0.5f, 0.5f),
                         onValueChange = onBalanceChange,
                         valueRange = -0.5f..0.5f,
                         modifier = Modifier.weight(1f)
@@ -2120,7 +2172,7 @@ fun FullSonyDspAndAudiophileToolsView(
                     Text("+${(megaBass * 10).toInt()} dB", color = Color(0xFFFF6600), fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
                 }
                 Slider(
-                    value = megaBass,
+                    value = megaBass.coerceIn(0f, 1f),
                     onValueChange = onBassChange,
                     colors = SliderDefaults.colors(thumbColor = Color(0xFFFF5500), activeTrackColor = Color(0xFFFF5500))
                 )
@@ -2144,7 +2196,7 @@ fun FullSonyDspAndAudiophileToolsView(
                 }
 
                 labels10.forEachIndexed { idx, label ->
-                    val currentVal = eq10Bands.getOrElse(idx) { 0f }
+                    val currentVal = eq10Bands.getOrElse(idx) { 0f }.coerceIn(-8f, 8f)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(label, modifier = Modifier.width(48.dp), fontSize = 10.sp, color = Color.LightGray, fontFamily = FontFamily.Monospace)
                         Slider(

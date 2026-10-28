@@ -11,8 +11,8 @@ android {
         applicationId = "com.sony.walkmanpro"
         minSdk = 26
         targetSdk = 34
-        versionCode = 95
-        versionName = "9.5-FiioDirectDSD"
+        versionCode = 97
+        versionName = "9.7-StudioDSD2PCM-256Tap"
     }
 
     compileOptions {

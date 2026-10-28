@@ -557,7 +557,7 @@ class MainActivity : ComponentActivity() {
     private fun parseDsdSpecsDirectly(context: Context, uri: Uri): Pair<Int, String> {
         try {
             val engine = sharedDsdEngine ?: FiioDirectDsdEngine(context, sharedDspProcessor) {}
-            val info = engine.parseDsdHeaderAccurate(context, uri, 100L * 1024L * 1024L)
+            val info = engine.parseDsdHeaderAccurate(context, uri, 0L)
             if (info.isValid) {
                 val kbps = (info.dsdSampleRate * info.channels) / 1000
                 val dsdName = when {
@@ -1156,7 +1156,7 @@ fun WalkmanMasterRoot(
                     selected = activeTab == 0,
                     onClick = { activeTab = 0 },
                     icon = { Icon(Icons.Default.Album, null) },
-                    label = { Text("Walkman 9.6", fontWeight = FontWeight.Bold) }
+                    label = { Text("Walkman 9.7", fontWeight = FontWeight.Bold) }
                 )
                 NavigationBarItem(
                     selected = activeTab == 1,
@@ -2193,4 +2193,5 @@ fun FullSonyDspAndAudiophileToolsView(
         }
     }
 }
+
 

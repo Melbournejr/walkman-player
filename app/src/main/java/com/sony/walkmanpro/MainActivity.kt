@@ -20,9 +20,11 @@ import android.provider.Settings
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
@@ -36,12 +38,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.platform.LocalContext
@@ -70,10 +72,19 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import kotlin.math.roundToInt
 import kotlin.math.sin
+
+// Bảng màu Sony Walkman Signature Series (Black + Gold + Brushed Silver)
+private val BgDeepBlack = Color(0xFF090A0D)
+private val SurfaceDark = Color(0xFF12141A)
+private val SurfaceCard = Color(0xFF171A22)
+private val BorderSubtle = Color(0xFF262A36)
+private val SignatureGold = Color(0xFFD4AF37)
+private val SignatureGoldLight = Color(0xFFF3E5AB)
+private val BrushedSilver = Color(0xFF94A3B8)
+private val TextPrimary = Color(0xFFF8FAFC)
+private val TextSecondary = Color(0xFF64748B)
 
 data class AudioTrack(
     val id: Long,
@@ -87,9 +98,15 @@ data class AudioTrack(
 )
 
 enum class PlayMode(val label: String) {
-    SEQUENTIAL("Tuần tự"),
-    REPEAT_ONE("Lặp 1 bài"),
-    SHUFFLE("Xáo trộn")
+    SEQUENTIAL("Sequential"),
+    REPEAT_ONE("Repeat One"),
+    SHUFFLE("Shuffle")
+}
+
+enum class AppScreen {
+    NOW_PLAYING,
+    LIBRARY,
+    AUDIO_LAB
 }
 
 data class AudioOutputState(
@@ -98,14 +115,6 @@ data class AudioOutputState(
     val deviceName: String = "Built-in Speaker",
     val codecEstimate: String = "Stereo"
 )
-
-enum class WalkmanSkin(val shortName: String, val fullName: String) {
-    WM1ZM2("WM1ZM2 Gold", "SONY SIGNATURE NW-WM1ZM2"),
-    TPSL2("TPS-L2", "SONY WALKMAN TPS-L2 (1979)"),
-    W995I("W995i", "SONY ERICSSON W995i"),
-    W850I("W850i", "SONY ERICSSON W850i"),
-    A306("NW-A306", "SONY HI-RES NW-A306")
-}
 
 @UnstableApi
 class MainActivity : ComponentActivity() {
@@ -122,6 +131,7 @@ class MainActivity : ComponentActivity() {
     private var sleepFadeMultiplier: Float = 1.0f
     private var crossfadeEnabled: Boolean = true
     private var tapeSpeed: Float = 1.0f
+    private var pureDsdEnabled: Boolean = false
 
     private val backgroundHandler = Handler(Looper.getMainLooper())
     private var currentTrackRef: AudioTrack? = null
@@ -130,8 +140,7 @@ class MainActivity : ComponentActivity() {
     private val backgroundKeepAliveRunnable = object : Runnable {
         override fun run() {
             try {
-                val playing = getActiveIsPlaying()
-                if (playing) {
+                if (getActiveIsPlaying()) {
                     val pos = getActivePosition()
                     val dur = getActiveDuration().toLong().coerceAtLeast(1000L)
                     currentTrackRef?.let { t ->
@@ -162,8 +171,17 @@ class MainActivity : ComponentActivity() {
         backgroundHandler.post(backgroundKeepAliveRunnable)
 
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) {
-                WalkmanMasterRoot(
+            MaterialTheme(
+                colorScheme = darkColorScheme(
+                    background = BgDeepBlack,
+                    surface = SurfaceDark,
+                    primary = SignatureGold,
+                    onPrimary = Color.Black,
+                    onBackground = TextPrimary,
+                    onSurface = TextPrimary
+                )
+            ) {
+                SignatureWalkmanApp(
                     onAutoScanAll = { scanAllMusicSources(this@MainActivity) },
                     onParseManualUris = { uris -> parseManualFiles(this@MainActivity, uris) },
                     onParseFolderUri = { treeUri -> parseFolderTree(this@MainActivity, treeUri) },
@@ -181,6 +199,7 @@ class MainActivity : ComponentActivity() {
                         sleepFadeMultiplier = mult.coerceIn(0f, 1f)
                         applyEffectiveVolume()
                     },
+                    onSetPureDsdMode = { enabled -> updatePureDsdMode(enabled) },
                     onSetBass = { level -> updateMegaBass(level) },
                     onSetVinyl = { enabled -> updateVinylEffect(enabled) },
                     onSetClearAudio = { enabled -> updateClearAudio(enabled) },
@@ -259,6 +278,8 @@ class MainActivity : ComponentActivity() {
         if (sharedDsdEngine == null) {
             sharedDsdEngine = FiioDirectDsdEngine(applicationContext, sharedDspProcessor) {
                 onTrackEndedCallback?.invoke()
+            }.apply {
+                pureDsdMode = pureDsdEnabled
             }
         }
 
@@ -309,6 +330,8 @@ class MainActivity : ComponentActivity() {
     private fun loadSavedDspSettings() {
         val prefs = getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
         masterVolume = prefs.getFloat("dsp_master_vol", 0.75f)
+        pureDsdEnabled = prefs.getBoolean("dsp_pure_dsd_mode", false)
+        sharedDsdEngine?.pureDsdMode = pureDsdEnabled
         sharedDspProcessor.megaBassLevel = prefs.getFloat("dsp_bass", 0.45f)
         sharedDspProcessor.vinylEnabled = prefs.getBoolean("dsp_vinyl", true)
         sharedDspProcessor.clearAudioEnabled = prefs.getBoolean("dsp_clear_audio", true)
@@ -337,7 +360,6 @@ class MainActivity : ComponentActivity() {
         ) {
             return true
         }
-        // Kiểm tra trực tiếp 4 byte đầu tiên của file ("FRM8" hoặc "DSD ")
         return try {
             contentResolver.openInputStream(track.uri)?.use { ins ->
                 val b = ByteArray(4)
@@ -355,13 +377,12 @@ class MainActivity : ComponentActivity() {
         try {
             startPersistentForegroundService()
             if (isDsdTrack(track)) {
-                // Chuyển sang FiioDirectDsdEngine để chạy mượt .DFF / .DSF qua AudioTrack
                 isDsdModeActive = true
                 sharedExoPlayer?.pause()
+                sharedDsdEngine?.pureDsdMode = pureDsdEnabled
                 sharedDsdEngine?.masterVolume = (masterVolume * sleepFadeMultiplier).coerceIn(0f, 1f)
                 sharedDsdEngine?.startDsdPlayback(track.uri, startMs.toInt())
             } else {
-                // Chạy ExoPlayer cho MP3, FLAC, WAV, M4A
                 isDsdModeActive = false
                 sharedDsdEngine?.stop()
                 val player = sharedExoPlayer ?: return
@@ -438,6 +459,13 @@ class MainActivity : ComponentActivity() {
             .edit().putFloat("dsp_master_vol", masterVolume).apply()
     }
 
+    private fun updatePureDsdMode(enabled: Boolean) {
+        pureDsdEnabled = enabled
+        sharedDsdEngine?.pureDsdMode = enabled
+        getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
+            .edit().putBoolean("dsp_pure_dsd_mode", enabled).apply()
+    }
+
     private fun updateMegaBass(level: Float) {
         sharedDspProcessor.megaBassLevel = level.coerceIn(0f, 1f)
         getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
@@ -495,7 +523,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-        private var bluetoothA2dpProxy: android.bluetooth.BluetoothA2dp? = null
+    private var bluetoothA2dpProxy: android.bluetooth.BluetoothA2dp? = null
 
     private fun ensureBluetoothA2dpProxy(context: Context) {
         if (bluetoothA2dpProxy != null) return
@@ -532,14 +560,12 @@ class MainActivity : ComponentActivity() {
             }
 
             if (activeDevice != null) {
-                // 1. Lấy % Pin thật của tai nghe Bluetooth qua System Hidden API getBatteryLevel()
                 try {
                     val battMethod = activeDevice.javaClass.getMethod("getBatteryLevel")
                     val level = battMethod.invoke(activeDevice) as? Int ?: -1
                     if (level in 0..100) batteryPercent = level
                 } catch (_: Throwable) {}
 
-                // 2. Lấy chuẩn Codec thật đang phát (SBC, AAC, aptX, aptX HD, LDAC, aptX Adaptive, LHDC)
                 if (proxy != null) {
                     try {
                         val getCodecStatusMethod = proxy.javaClass.getMethod("getCodecStatus", android.bluetooth.BluetoothDevice::class.java)
@@ -553,11 +579,10 @@ class MainActivity : ComponentActivity() {
                                 realCodecName = when (codecType) {
                                     0 -> "Bluetooth SBC"
                                     1 -> "Bluetooth AAC"
-                                    2 -> "Qualcomm® aptX™ Audio"
+                                    2 -> "Qualcomm® aptX™"
                                     3 -> "Qualcomm® aptX™ HD"
-                                    4 -> "Sony LDAC™ Hi-Res (990kbps)"
-                                    5, 6 -> "Qualcomm® aptX™ Adaptive"
-                                    7, 8, 9 -> "Qualcomm® aptX™ Adaptive / TWS+"
+                                    4 -> "Sony LDAC™ Hi-Res"
+                                    5, 6, 7, 8, 9 -> "Qualcomm® aptX™ Adaptive"
                                     else -> "Qualcomm® aptX™ Adaptive"
                                 }
                             }
@@ -580,27 +605,27 @@ class MainActivity : ComponentActivity() {
                         val rawName = dev.productName?.toString() ?: "Bluetooth Audio"
                         val (realCodec, batteryLevel) = queryRealBluetoothCodecAndBattery(rawName)
                         val displayWithBattery = if (batteryLevel in 0..100) {
-                            "$rawName • 🔋 $batteryLevel%"
+                            "$rawName ($batteryLevel%)"
                         } else {
                             rawName
                         }
                         val codecLabel = realCodec ?: when {
-                            rawName.contains("LDAC", true) || rawName.contains("1000X", true) -> "Sony LDAC™ (990 kbps / 96kHz)"
+                            rawName.contains("LDAC", true) || rawName.contains("1000X", true) -> "Sony LDAC™"
                             rawName.contains("Noble", true) || rawName.contains("Falcon", true) || rawName.contains("aptx", true) -> "Qualcomm® aptX™ Adaptive"
-                            else -> "Bluetooth A2DP Hi-Res"
+                            else -> "Bluetooth A2DP"
                         }
-                        return AudioOutputState("Bluetooth Audio", true, displayWithBattery, codecLabel)
+                        return AudioOutputState("Bluetooth", true, displayWithBattery, codecLabel)
                     }
                     AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> {
-                        return AudioOutputState("Cổng 3.5mm / 4.4mm Balanced", false, "WM1ZM2 S-Master HX DAC", "Direct DSD / PCM 384kHz")
+                        return AudioOutputState("Wired 3.5mm/4.4mm", false, "Balanced / Single-Ended", "Direct PCM/DSD")
                     }
                     AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_USB_DEVICE -> {
-                        return AudioOutputState("USB-DAC", false, dev.productName?.toString() ?: "USB HiFi DAC", "Bit-Perfect PCM/DSD")
+                        return AudioOutputState("USB-DAC", false, dev.productName?.toString() ?: "USB HiFi DAC", "Bit-Perfect Output")
                     }
                 }
             }
         }
-        return AudioOutputState("Loa ngoài thiết bị", false, "Stereo Speaker", "Standard Audio")
+        return AudioOutputState("Speaker", false, "Internal Stereo Speaker", "PCM Output")
     }
 
     private fun inspectTrackSpecsSafe(context: Context, track: AudioTrack): Pair<Int, String> {
@@ -622,11 +647,11 @@ class MainActivity : ComponentActivity() {
             }
             val mime = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE) ?: ""
             sampleRate = when {
-                lowerTitle.contains("384k") || mime.contains("x-flac") -> "PCM 384.0 kHz • 32-bit"
-                lowerTitle.endsWith(".flac") || lowerFmt == "flac" -> "FLAC 192.0 kHz • 24-bit Hi-Res"
-                lowerTitle.endsWith(".mqa") || lowerFmt == "mqa" -> "MQA Studio 352.8 kHz"
-                lowerTitle.endsWith(".wav") -> "PCM 96.0 kHz • 24-bit"
-                else -> "44.1 kHz • 16-bit Stereo"
+                lowerTitle.contains("384k") || mime.contains("x-flac") -> "384.0 kHz • 32-bit"
+                lowerTitle.endsWith(".flac") || lowerFmt == "flac" -> "96.0 kHz • 24-bit"
+                lowerTitle.endsWith(".mqa") || lowerFmt == "mqa" -> "352.8 kHz • MQA"
+                lowerTitle.endsWith(".wav") -> "96.0 kHz • 24-bit"
+                else -> "44.1 kHz • 16-bit"
             }
         } catch (_: Throwable) {
         } finally {
@@ -642,14 +667,14 @@ class MainActivity : ComponentActivity() {
             if (info.isValid) {
                 val kbps = (info.dsdSampleRate * info.channels) / 1000
                 val dsdName = when {
-                    info.dsdSampleRate >= 11289600 -> "DSD256 11.2 MHz • 1-bit"
-                    info.dsdSampleRate >= 5644800 -> "DSD128 5.6 MHz • 1-bit"
-                    else -> "DSD64 2.8 MHz • 1-bit"
+                    info.dsdSampleRate >= 11289600 -> "DSD256 • 11.2 MHz"
+                    info.dsdSampleRate >= 5644800 -> "DSD128 • 5.6 MHz"
+                    else -> "DSD64 • 2.8 MHz"
                 }
                 return Pair(kbps, dsdName)
             }
         } catch (_: Throwable) {}
-        return Pair(5644, "DSD64 2.8 MHz • 1-bit")
+        return Pair(5644, "DSD64 • 2.8 MHz")
     }
 
     private fun isExcluded(text: String, file: String): Boolean {
@@ -700,7 +725,7 @@ class MainActivity : ComponentActivity() {
                         val id = c.getLong(idCol)
                         val name = if (nameCol >= 0) c.getString(nameCol) ?: "" else ""
                         val title = if (titleCol >= 0) c.getString(titleCol) ?: name.substringBeforeLast(".") else name.substringBeforeLast(".")
-                        val artist = if (artistCol >= 0) c.getString(artistCol) ?: "Walkman Audio" else "Walkman Audio"
+                        val artist = if (artistCol >= 0) c.getString(artistCol) ?: "Unknown Artist" else "Unknown Artist"
                         val dur = if (durCol >= 0) c.getLong(durCol) else 0L
                         val sz = if (sizeCol >= 0) c.getLong(sizeCol) else 0L
                         val relPath = if (relCol >= 0) c.getString(relCol) ?: "" else ""
@@ -739,7 +764,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             } catch (_: Throwable) {}
-            added.add(AudioTrack(System.currentTimeMillis() + added.size, fn.substringBeforeLast("."), "Audiophile Direct", 0L, uri, "File chọn lẻ", sz, fn.substringAfterLast(".", "DSD/PCM").uppercase()))
+            added.add(AudioTrack(System.currentTimeMillis() + added.size, fn.substringBeforeLast("."), "Direct Audio", 0L, uri, "Selected Files", sz, fn.substringAfterLast(".", "DSD/PCM").uppercase()))
         }
         return added
     }
@@ -762,7 +787,7 @@ class MainActivity : ComponentActivity() {
                         if (isExcluded(lower, n)) {
                             skipped++
                         } else {
-                            added.add(AudioTrack(System.currentTimeMillis() + added.size, n.substringBeforeLast("."), dir.name ?: "Hi-Res Folder", 0L, f.uri, dir.name ?: "Thư mục", f.length(), n.substringAfterLast(".", "PCM").uppercase()))
+                            added.add(AudioTrack(System.currentTimeMillis() + added.size, n.substringBeforeLast("."), dir.name ?: "Unknown Artist", 0L, f.uri, dir.name ?: "Folder", f.length(), n.substringAfterLast(".", "PCM").uppercase()))
                         }
                     }
                 }
@@ -771,17 +796,12 @@ class MainActivity : ComponentActivity() {
         try { scanDir(rootDir) } catch (_: Throwable) {}
         return Pair(added, skipped)
     }
-
-    override fun onDestroy() {
-        super.onDestroy()
-    }
 }
 
 object PlaylistStorage {
     private const val PREF_NAME = "walkman_v7_storage"
     private const val KEY_TRACKS = "saved_tracks_json"
     private const val KEY_FOLDERS = "saved_folder_uris"
-    private const val KEY_SKIN = "saved_skin_name"
     private const val KEY_LAST_INDEX = "saved_last_index"
     private const val KEY_LAST_POS = "saved_last_pos_ms"
     private const val KEY_FAVORITES = "saved_favorites_set"
@@ -818,7 +838,7 @@ object PlaylistStorage {
                     AudioTrack(
                         id = obj.optLong("id", i.toLong()),
                         title = obj.optString("title", "Track"),
-                        artist = obj.optString("artist", "Walkman"),
+                        artist = obj.optString("artist", "Unknown Artist"),
                         duration = obj.optLong("duration", 0L),
                         uri = Uri.parse(obj.getString("uri")),
                         folderInfo = obj.optString("folderInfo", "Music"),
@@ -880,15 +900,6 @@ object PlaylistStorage {
     fun getSavedFolderUris(context: Context): List<Uri> {
         return context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).getStringSet(KEY_FOLDERS, emptySet())?.map { Uri.parse(it) } ?: emptyList()
     }
-
-    fun saveSkin(context: Context, skin: WalkmanSkin) {
-        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit().putString(KEY_SKIN, skin.name).apply()
-    }
-
-    fun loadSkin(context: Context): WalkmanSkin {
-        val name = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).getString(KEY_SKIN, WalkmanSkin.WM1ZM2.name) ?: WalkmanSkin.WM1ZM2.name
-        return try { WalkmanSkin.valueOf(name) } catch (_: Throwable) { WalkmanSkin.WM1ZM2 }
-    }
 }
 
 fun formatTimeMs(ms: Int): String {
@@ -899,7 +910,7 @@ fun formatTimeMs(ms: Int): String {
 }
 
 @Composable
-fun WalkmanMasterRoot(
+fun SignatureWalkmanApp(
     onAutoScanAll: () -> Pair<List<AudioTrack>, Int>,
     onParseManualUris: (List<Uri>) -> List<AudioTrack>,
     onParseFolderUri: (Uri) -> Pair<List<AudioTrack>, Int>,
@@ -909,6 +920,7 @@ fun WalkmanMasterRoot(
     onSeekTo: (Int) -> Unit,
     onSetMasterVolume: (Float) -> Unit,
     onSetSleepMultiplier: (Float) -> Unit,
+    onSetPureDsdMode: (Boolean) -> Unit,
     onSetBass: (Float) -> Unit,
     onSetVinyl: (Boolean) -> Unit,
     onSetClearAudio: (Boolean) -> Unit,
@@ -928,8 +940,7 @@ fun WalkmanMasterRoot(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var activeTab by remember { mutableStateOf(0) }
-    var currentSkin by remember { mutableStateOf(PlaylistStorage.loadSkin(context)) }
+    var currentScreen by remember { mutableStateOf(AppScreen.NOW_PLAYING) }
     var playlist by remember { mutableStateOf(PlaylistStorage.loadPlaylist(context)) }
     var favoriteTitles by remember { mutableStateOf(PlaylistStorage.loadFavorites(context)) }
     var playMode by remember { mutableStateOf(PlaylistStorage.loadPlayMode(context)) }
@@ -940,11 +951,10 @@ fun WalkmanMasterRoot(
     var posMs by remember { mutableStateOf(PlaylistStorage.loadLastPos(context)) }
     var durMs by remember { mutableStateOf(1) }
 
-    var keepScreenOnDeskMode by remember { mutableStateOf(false) }
-    var sleepTimerRemainingSec by remember { mutableStateOf(0) }
-
+    // Trạng thái DSP & Audio Lab
     val dspPrefs = context.getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
     var masterVol by remember { mutableStateOf(dspPrefs.getFloat("dsp_master_vol", 0.75f)) }
+    var pureDsdMode by remember { mutableStateOf(dspPrefs.getBoolean("dsp_pure_dsd_mode", false)) }
     var megaBass by remember { mutableStateOf(dspPrefs.getFloat("dsp_bass", 0.45f)) }
     var vinylProcessor by remember { mutableStateOf(dspPrefs.getBoolean("dsp_vinyl", true)) }
     var clearAudioPlus by remember { mutableStateOf(dspPrefs.getBoolean("dsp_clear_audio", true)) }
@@ -953,6 +963,8 @@ fun WalkmanMasterRoot(
     var phaseInvert by remember { mutableStateOf(dspPrefs.getBoolean("dsp_phase_invert", false)) }
     var crossfadeEnabled by remember { mutableStateOf(dspPrefs.getBoolean("dsp_crossfade", true)) }
     var tapeSpeed by remember { mutableStateOf(dspPrefs.getFloat("dsp_tape_speed", 1.0f)) }
+    var keepScreenOnDeskMode by remember { mutableStateOf(false) }
+    var sleepTimerRemainingSec by remember { mutableStateOf(0) }
 
     val eq10Bands = remember {
         mutableStateListOf(
@@ -979,6 +991,11 @@ fun WalkmanMasterRoot(
         Manifest.permission.READ_MEDIA_AUDIO
     } else {
         Manifest.permission.READ_EXTERNAL_STORAGE
+    }
+
+    // Xử lý nút Back vật lý của điện thoại để quay về Now Playing
+    BackHandler(enabled = currentScreen != AppScreen.NOW_PLAYING) {
+        currentScreen = AppScreen.NOW_PLAYING
     }
 
     fun updateSystemMediaNotification(playing: Boolean) {
@@ -1009,7 +1026,6 @@ fun WalkmanMasterRoot(
 
         val savedPosForThisTrack = PlaylistStorage.getSavedTrackPosition(context, track.title)
         val startMs = customResumePos ?: if (track.duration > 600000L && savedPosForThisTrack > 10000) {
-            Toast.makeText(context, "Khôi phục vị trí đã nghe: ${formatTimeMs(savedPosForThisTrack)}", Toast.LENGTH_SHORT).show()
             savedPosForThisTrack.toLong()
         } else 0L
 
@@ -1047,7 +1063,6 @@ fun WalkmanMasterRoot(
                 isPlaying = false
                 onSetSleepMultiplier(1.0f)
                 updateSystemMediaNotification(false)
-                Toast.makeText(context, "Hẹn giờ ngủ: Đã giảm âm và tắt nhạc!", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -1114,7 +1129,7 @@ fun WalkmanMasterRoot(
             withContext(Dispatchers.Main) {
                 playlist = mergedList
                 isScanning = false
-                Toast.makeText(context, "Đã cập nhật ${mergedList.size} bài hát!", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Đã cập nhật ${mergedList.size} bài hát", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -1165,6 +1180,15 @@ fun WalkmanMasterRoot(
         if (hasPerm && playlist.isEmpty()) {
             runDeduplicatedScan()
         }
+        playlist.getOrNull(currentIndex)?.let { track ->
+            withContext(Dispatchers.IO) {
+                val specs = getTrackSpecs(track)
+                withContext(Dispatchers.Main) {
+                    currentBitrate = specs.first
+                    currentSampleRate = specs.second
+                }
+            }
+        }
     }
 
     LaunchedEffect(isPlaying) {
@@ -1188,101 +1212,33 @@ fun WalkmanMasterRoot(
     }
 
     val currentTrack = playlist.getOrNull(currentIndex)
-    val isCurrentFavorite = currentTrack != null && favoriteTitles.contains(currentTrack.title)
 
-    Scaffold(
-        topBar = {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFF0B0F19))
-                    .padding(horizontal = 6.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                WalkmanSkin.values().forEach { skin ->
-                    val selected = skin == currentSkin
-                    val skinColor = when (skin) {
-                        WalkmanSkin.WM1ZM2 -> Color(0xFFEAB308)
-                        WalkmanSkin.TPSL2 -> Color(0xFF38BDF8)
-                        WalkmanSkin.W995I -> Color(0xFFFF3B1D)
-                        WalkmanSkin.W850I -> Color(0xFFFF6600)
-                        WalkmanSkin.A306 -> Color(0xFFF59E0B)
-                    }
-
-                    Button(
-                        onClick = {
-                            currentSkin = skin
-                            PlaylistStorage.saveSkin(context, skin)
-                        },
-                        modifier = Modifier.weight(1f).height(38.dp),
-                        shape = RoundedCornerShape(10.dp),
-                        border = BorderStroke(1.dp, if (selected) skinColor else Color(0xFF334155)),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (selected) skinColor else Color(0xFF1E293B),
-                            contentColor = if (selected && skin == WalkmanSkin.WM1ZM2) Color.Black else Color.White
-                        ),
-                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 2.dp)
-                    ) {
-                        Text(
-                            text = skin.shortName,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-            }
-        },
-        bottomBar = {
-            NavigationBar(containerColor = Color(0xFF0B0F19)) {
-                NavigationBarItem(
-                    selected = activeTab == 0,
-                    onClick = { activeTab = 0 },
-                    icon = { Icon(Icons.Default.Album, null) },
-                    label = { Text("Walkman 9.8", fontWeight = FontWeight.Bold) }
-                )
-                NavigationBarItem(
-                    selected = activeTab == 1,
-                    onClick = { activeTab = 1 },
-                    icon = { Icon(Icons.Default.LibraryMusic, null) },
-                    label = { Text("Thư viện (${playlist.size})", fontWeight = FontWeight.Bold) }
-                )
-                NavigationBarItem(
-                    selected = activeTab == 2,
-                    onClick = { activeTab = 2 },
-                    icon = { Icon(Icons.Default.Equalizer, null) },
-                    label = { Text("Audio 7.0 & Tiện ích", fontWeight = FontWeight.Bold) }
-                )
-            }
-        }
-    ) { padding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color(0xFF05070D))
-                .padding(padding)
-        ) {
-            when (activeTab) {
-                0 -> FullScreenWalkmanDeckV95(
-                    skin = currentSkin,
+    // Chuyển màn hình mượt mà (AnimatedContent)
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(BgDeepBlack)
+            .systemBarsPadding()
+    ) {
+        AnimatedContent(
+            targetState = currentScreen,
+            transitionSpec = {
+                fadeIn(animationSpec = tween(260)) togetherWith fadeOut(animationSpec = tween(220))
+            },
+            label = "screen_transition"
+        ) { screen ->
+            when (screen) {
+                AppScreen.NOW_PLAYING -> SignatureNowPlayingScreen(
                     track = currentTrack,
-                    audioOutput = audioOutput,
-                    bitrate = currentBitrate,
-                    sampleRate = currentSampleRate,
+                    formatSummary = if (currentSampleRate.contains("DSD", true)) {
+                        currentSampleRate
+                    } else {
+                        "${currentTrack?.formatName ?: "PCM"} • $currentSampleRate"
+                    },
                     isPlaying = isPlaying,
                     playMode = playMode,
-                    isFavorite = isCurrentFavorite,
-                    keepScreenOn = keepScreenOnDeskMode,
-                    sleepTimerRemainingSec = sleepTimerRemainingSec,
-                    tapeSpeed = tapeSpeed,
                     posMs = posMs,
                     durMs = durMs,
-                    masterVol = masterVol,
-                    onVolumeChange = {
-                        masterVol = it
-                        onSetMasterVolume(it)
-                    },
                     onSeek = { target ->
                         posMs = target
                         onSeekTo(target)
@@ -1291,29 +1247,17 @@ fun WalkmanMasterRoot(
                         }
                         updateSystemMediaNotification(isPlaying)
                     },
-                    onToggleDeskMode = {
-                        keepScreenOnDeskMode = !keepScreenOnDeskMode
-                        onSetKeepScreenOn(keepScreenOnDeskMode)
-                        Toast.makeText(
-                            context,
-                            if (keepScreenOnDeskMode) "Đã bật Giữ sáng màn hình (Desk Mode)" else "Đã tắt Giữ sáng màn hình",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    },
-                    onCyclePlayMode = {
-                        val modes = PlayMode.values()
-                        playMode = modes[(playMode.ordinal + 1) % modes.size]
+                    onToggleShuffle = {
+                        playMode = if (playMode == PlayMode.SHUFFLE) PlayMode.SEQUENTIAL else PlayMode.SHUFFLE
                         PlaylistStorage.savePlayMode(context, playMode)
-                        Toast.makeText(context, "Chế độ: ${playMode.label}", Toast.LENGTH_SHORT).show()
                     },
-                    onToggleFavorite = {
-                        currentTrack?.let {
-                            favoriteTitles = PlaylistStorage.toggleFavorite(context, it.title)
-                        }
+                    onToggleRepeat = {
+                        playMode = if (playMode == PlayMode.REPEAT_ONE) PlayMode.SEQUENTIAL else PlayMode.REPEAT_ONE
+                        PlaylistStorage.savePlayMode(context, playMode)
                     },
                     onPlayPause = {
                         if (playlist.isEmpty()) {
-                            activeTab = 1
+                            currentScreen = AppScreen.LIBRARY
                         } else if (!isPlaying && !getIsPlaying()) {
                             playAtIndex(currentIndex, posMs.toLong())
                         } else {
@@ -1329,14 +1273,20 @@ fun WalkmanMasterRoot(
                             val next = if (playMode == PlayMode.SHUFFLE) playlist.indices.random() else currentIndex + 1
                             playAtIndex(next, null)
                         }
+                    },
+                    onOpenLibrary = { currentScreen = AppScreen.LIBRARY },
+                    onOpenAudioLab = {
+                        audioOutput = getAudioOutputState()
+                        currentScreen = AppScreen.AUDIO_LAB
                     }
                 )
-                1 -> FiioStyleCategorizedLibraryView(
+
+                AppScreen.LIBRARY -> SignatureLibraryScreen(
                     context = context,
                     tracks = playlist,
                     favoriteTitles = favoriteTitles,
-                    isScanning = isScanning,
                     currentIndex = currentIndex,
+                    onBackToPlayer = { currentScreen = AppScreen.NOW_PLAYING },
                     onAutoScan = {
                         val hasPerm = ContextCompat.checkSelfPermission(context, requiredPermission) == PackageManager.PERMISSION_GRANTED
                         if (hasPerm) runDeduplicatedScan() else permLauncher.launch(requiredPermission)
@@ -1355,55 +1305,41 @@ fun WalkmanMasterRoot(
                         val realIndex = playlist.indexOfFirst { it.id == track.id && it.title == track.title }
                         if (realIndex >= 0) {
                             playAtIndex(realIndex, null)
-                            activeTab = 0
+                            currentScreen = AppScreen.NOW_PLAYING
                         }
                     }
                 )
-                2 -> FullSonyDspAndAudiophileToolsView(
+
+                AppScreen.AUDIO_LAB -> SignatureAudioLabScreen(
+                    pureDsdMode = pureDsdMode,
                     masterVol = masterVol,
                     megaBass = megaBass,
-                    vinylProcessor = vinylProcessor,
                     clearAudio = clearAudioPlus,
-                    dseeUltimate = dseeUltimate,
-                    channelBalance = channelBalance,
+                    dsee = dseeUltimate,
+                    vinyl = vinylProcessor,
                     phaseInvert = phaseInvert,
+                    channelBalance = channelBalance,
                     crossfade = crossfadeEnabled,
                     tapeSpeed = tapeSpeed,
+                    keepScreenOn = keepScreenOnDeskMode,
                     sleepTimerRemainingSec = sleepTimerRemainingSec,
                     eq10Bands = eq10Bands,
+                    currentTrack = currentTrack,
+                    currentBitrate = currentBitrate,
+                    currentSampleRate = currentSampleRate,
                     audioOutput = audioOutput,
+                    onBack = { currentScreen = AppScreen.NOW_PLAYING },
+                    onPureDsdToggle = {
+                        pureDsdMode = it
+                        onSetPureDsdMode(it)
+                    },
                     onMasterVolChange = {
                         masterVol = it
                         onSetMasterVolume(it)
                     },
-                    onSetSleepMinutes = { mins ->
-                        sleepTimerRemainingSec = mins * 60
-                        onSetSleepMultiplier(1.0f)
-                        if (mins > 0) {
-                            Toast.makeText(context, "Hẹn giờ tắt nhạc sau $mins phút (Giảm âm 60s cuối)", Toast.LENGTH_SHORT).show()
-                        } else {
-                            Toast.makeText(context, "Đã tắt Hẹn giờ ngủ", Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                    onTapeSpeedChange = {
-                        tapeSpeed = it
-                        onSetTapeSpeed(it)
-                    },
-                    onCrossfadeToggle = {
-                        crossfadeEnabled = it
-                        onSetCrossfade(it)
-                    },
-                    onBalanceChange = {
-                        channelBalance = it
-                        onSetChannelBalance(it)
-                    },
-                    onPhaseInvertToggle = {
-                        phaseInvert = it
-                        onSetPhaseInvert(it)
-                    },
-                    onVinylToggle = {
-                        vinylProcessor = it
-                        onSetVinyl(it)
+                    onBassChange = {
+                        megaBass = it
+                        onSetBass(it)
                     },
                     onClearAudioToggle = {
                         clearAudioPlus = it
@@ -1413,19 +1349,43 @@ fun WalkmanMasterRoot(
                         dseeUltimate = it
                         onSetDsee(it)
                     },
-                    onBassChange = {
-                        megaBass = it
-                        onSetBass(it)
+                    onVinylToggle = {
+                        vinylProcessor = it
+                        onSetVinyl(it)
+                    },
+                    onPhaseInvertToggle = {
+                        phaseInvert = it
+                        onSetPhaseInvert(it)
+                    },
+                    onBalanceChange = {
+                        channelBalance = it
+                        onSetChannelBalance(it)
                     },
                     onBand10Change = { idx, gain ->
                         eq10Bands[idx] = gain
                         onSetEqBand10(idx, gain)
                     },
-                    onApplyPreset10 = { presetValues ->
-                        presetValues.forEachIndexed { i, v ->
-                            eq10Bands[i] = v
-                            onSetEqBand10(i, v)
+                    onResetEq = {
+                        for (i in 0 until 10) {
+                            eq10Bands[i] = 0f
+                            onSetEqBand10(i, 0f)
                         }
+                    },
+                    onCrossfadeToggle = {
+                        crossfadeEnabled = it
+                        onSetCrossfade(it)
+                    },
+                    onTapeSpeedChange = {
+                        tapeSpeed = it
+                        onSetTapeSpeed(it)
+                    },
+                    onKeepScreenOnToggle = {
+                        keepScreenOnDeskMode = it
+                        onSetKeepScreenOn(it)
+                    },
+                    onSetSleepMinutes = { mins ->
+                        sleepTimerRemainingSec = mins * 60
+                        onSetSleepMultiplier(1.0f)
                     }
                 )
             }
@@ -1433,416 +1393,922 @@ fun WalkmanMasterRoot(
     }
 }
 
+/**
+ * 1. MÀN HÌNH NOW PLAYING (TỐI GIẢN, CAO CẤP, TẬP TRUNG VÀO TRẢI NGHIỆM NGHE)
+ */
 @Composable
-fun FullScreenWalkmanDeckV95(
-    skin: WalkmanSkin,
+fun SignatureNowPlayingScreen(
     track: AudioTrack?,
-    audioOutput: AudioOutputState,
-    bitrate: Int,
-    sampleRate: String,
+    formatSummary: String,
     isPlaying: Boolean,
     playMode: PlayMode,
-    isFavorite: Boolean,
-    keepScreenOn: Boolean,
-    sleepTimerRemainingSec: Int,
-    tapeSpeed: Float,
     posMs: Int,
     durMs: Int,
-    masterVol: Float,
-    onVolumeChange: (Float) -> Unit,
     onSeek: (Int) -> Unit,
-    onToggleDeskMode: () -> Unit,
-    onCyclePlayMode: () -> Unit,
-    onToggleFavorite: () -> Unit,
+    onToggleShuffle: () -> Unit,
+    onToggleRepeat: () -> Unit,
     onPlayPause: () -> Unit,
     onPrev: () -> Unit,
-    onNext: () -> Unit
+    onNext: () -> Unit,
+    onOpenLibrary: () -> Unit,
+    onOpenAudioLab: () -> Unit
 ) {
-    val trackTitle = track?.title ?: "CHƯA CHỌN BÀI HÁT"
-    val trackArtist = track?.artist ?: "Bấm tab 'Thư viện' để chọn nhạc"
-    val format = track?.formatName ?: "AUDIO"
+    var showAnalogVu by remember { mutableStateOf(false) }
 
-    val infiniteTransition = rememberInfiniteTransition(label = "walkman_anim")
-    val angle by infiniteTransition.animateFloat(
+    val infiniteTransition = rememberInfiniteTransition(label = "signature_motion")
+    val discAngle by infiniteTransition.animateFloat(
         initialValue = 0f,
         targetValue = 360f,
-        animationSpec = infiniteRepeatable(tween(2600, easing = LinearEasing)),
-        label = "reel_angle"
+        animationSpec = infiniteRepeatable(tween(12000, easing = LinearEasing)),
+        label = "disc_rotation"
     )
-    val pulse by infiniteTransition.animateFloat(
-        initialValue = 0.2f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(480, easing = FastOutSlowInEasing), RepeatMode.Reverse),
-        label = "beat_pulse"
+    val vuPhase by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 6.283f,
+        animationSpec = infiniteRepeatable(tween(1600, easing = LinearEasing)),
+        label = "vu_motion"
     )
-
-    val accentColor = when (skin) {
-        WalkmanSkin.WM1ZM2 -> Color(0xFFEAB308)
-        WalkmanSkin.TPSL2 -> Color(0xFF38BDF8)
-        WalkmanSkin.W995I -> Color(0xFFFF3B1D)
-        WalkmanSkin.W850I -> Color(0xFFFF6600)
-        WalkmanSkin.A306 -> Color(0xFFF59E0B)
-    }
-
-    val bodyGradient = when (skin) {
-        WalkmanSkin.WM1ZM2 -> Brush.verticalGradient(listOf(Color(0xFF261D07), Color(0xFF17130A), Color(0xFF0B0904)))
-        WalkmanSkin.TPSL2 -> Brush.verticalGradient(listOf(Color(0xFF1E3A6D), Color(0xFF122444), Color(0xFF0B162C)))
-        WalkmanSkin.W995I -> Brush.verticalGradient(listOf(Color(0xFF1F161B), Color(0xFF12131A), Color(0xFF090A0F)))
-        WalkmanSkin.W850I -> Brush.verticalGradient(listOf(Color(0xFF231810), Color(0xFF121318), Color(0xFF08090C)))
-        WalkmanSkin.A306 -> Brush.verticalGradient(listOf(Color(0xFF221D15), Color(0xFF14151C), Color(0xFF0A0B0E)))
-    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(8.dp)
-            .background(bodyGradient, RoundedCornerShape(24.dp))
-            .border(
-                width = 3.dp,
-                color = if (skin == WalkmanSkin.WM1ZM2) Color(0xFFEAB308) else accentColor.copy(alpha = 0.85f),
-                shape = RoundedCornerShape(24.dp)
-            )
-            .padding(14.dp),
+            .padding(horizontal = 28.dp, vertical = 20.dp),
         verticalArrangement = Arrangement.SpaceBetween,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(if (skin == WalkmanSkin.TPSL2) Color(0xFFD0D7E2) else Color(0xFF1E2433), RoundedCornerShape(10.dp))
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column {
-                Text(
-                    text = skin.fullName,
-                    fontWeight = FontWeight.Black,
-                    fontSize = 12.sp,
-                    color = if (skin == WalkmanSkin.TPSL2) Color(0xFF0F172A) else Color.White
-                )
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        text = "📁 ${track?.folderInfo ?: "SIGNATURE SERIES"}",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = accentColor
-                    )
-                    if (sleepTimerRemainingSec > 0) {
-                        Text(
-                            text = "🌙 ${sleepTimerRemainingSec / 60}m${sleepTimerRemainingSec % 60}s",
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Black,
-                            color = Color(0xFF22C55E),
-                            fontFamily = FontFamily.Monospace
-                        )
-                    }
-                    if (tapeSpeed != 1.0f) {
-                        Text(
-                            text = "⚡ ${"%.2f".format(tapeSpeed)}x",
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Black,
-                            color = Color(0xFF38BDF8),
-                            fontFamily = FontFamily.Monospace
-                        )
-                    }
-                }
-            }
-
-            Button(
-                onClick = onToggleDeskMode,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (keepScreenOn) Color(0xFF22C55E) else Color(0xFF0F172A),
-                    contentColor = if (keepScreenOn) Color.Black else Color.White
-                ),
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                modifier = Modifier.height(28.dp)
-            ) {
-                Text(if (keepScreenOn) "☀ GIỮ SÁNG: BẬT" else "☀ GIỮ SÁNG", fontSize = 9.sp, fontWeight = FontWeight.Black)
-            }
-        }
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(Color(0xFF090D17), RoundedCornerShape(8.dp))
-                .border(1.dp, Color(0xFF26334D), RoundedCornerShape(8.dp))
-                .padding(horizontal = 10.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = if (audioOutput.isBluetooth) Icons.Default.BluetoothAudio else Icons.Default.Headphones,
-                    contentDescription = null,
-                    tint = if (audioOutput.isBluetooth) Color(0xFF38BDF8) else accentColor,
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Column {
-                    Text(audioOutput.deviceName, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                    Text(audioOutput.codecEstimate, color = Color(0xFF38BDF8), fontSize = 9.sp, fontFamily = FontFamily.Monospace)
-                }
-            }
-
-            Column(horizontalAlignment = Alignment.End) {
-                Text("$format • $bitrate kbps", color = accentColor, fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, fontFamily = FontFamily.Monospace)
-                Text(sampleRate, color = Color.LightGray, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
-            }
-        }
-
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .background(Color(0xFF080B12), RoundedCornerShape(16.dp))
-                .border(2.dp, Color(0xFF334155), RoundedCornerShape(16.dp))
-                .padding(14.dp)
-        ) {
-            Column(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.SpaceBetween,
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                when (skin) {
-                    WalkmanSkin.WM1ZM2 -> {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(Color(0xFF1D1709), RoundedCornerShape(12.dp))
-                                .border(2.dp, Color(0xFFEAB308), RoundedCornerShape(12.dp))
-                                .padding(14.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text("FIIO/SONY DIRECT DSD • S-MASTER HX™ AMP", color = Color(0xFFEAB308), fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Text("CH-L", color = Color.Gray, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
-                                    Canvas(modifier = Modifier.size(width = 125.dp, height = 82.dp)) {
-                                        drawArc(color = Color(0xFFEAB308).copy(alpha = 0.35f), startAngle = 190f, sweepAngle = 160f, useCenter = false, style = Stroke(width = 5f))
-                                        val swingL = if (isPlaying) (sin(angle * 0.12f) * 36f) else -38f
-                                        rotate(swingL, pivot = Offset(size.width / 2, size.height)) {
-                                            drawLine(color = Color(0xFFEF4444), start = Offset(size.width / 2, size.height), end = Offset(size.width / 2, 6f), strokeWidth = 5f)
-                                        }
-                                    }
-                                }
-                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Text("CH-R", color = Color.Gray, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
-                                    Canvas(modifier = Modifier.size(width = 125.dp, height = 82.dp)) {
-                                        drawArc(color = Color(0xFFEAB308).copy(alpha = 0.35f), startAngle = 190f, sweepAngle = 160f, useCenter = false, style = Stroke(width = 5f))
-                                        val swingR = if (isPlaying) (sin((angle * 0.12f) + 1.2f) * 36f) else -38f
-                                        rotate(swingR, pivot = Offset(size.width / 2, size.height)) {
-                                            drawLine(color = Color(0xFFEF4444), start = Offset(size.width / 2, size.height), end = Offset(size.width / 2, 6f), strokeWidth = 5f)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    WalkmanSkin.TPSL2 -> {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(Color(0xFFFDE68A), RoundedCornerShape(8.dp))
-                                .border(2.dp, Color(0xFFD97706), RoundedCornerShape(8.dp))
-                                .padding(horizontal = 12.dp, vertical = 6.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text("SONY CHF-60 • NORMAL POSITION", fontSize = 10.sp, fontWeight = FontWeight.Black, color = Color(0xFF92400E), fontFamily = FontFamily.Monospace)
-                        }
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(Color(0xFF162032), RoundedCornerShape(14.dp))
-                                .border(2.dp, Color(0xFF475569), RoundedCornerShape(14.dp))
-                                .padding(vertical = 22.dp, horizontal = 12.dp),
-                            horizontalArrangement = Arrangement.SpaceEvenly,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            LargeCassetteReel(if (isPlaying) angle else 0f)
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text("TAPE COUNTER", fontSize = 8.sp, color = Color.LightGray, fontFamily = FontFamily.Monospace)
-                                Box(
-                                    modifier = Modifier
-                                        .background(Color.Black, RoundedCornerShape(4.dp))
-                                        .border(1.dp, Color.Gray, RoundedCornerShape(4.dp))
-                                        .padding(horizontal = 10.dp, vertical = 4.dp)
-                                ) {
-                                    Text("%03d".format((posMs / 1000) % 999), color = Color(0xFFF8FAFC), fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Black, fontSize = 18.sp)
-                                }
-                            }
-                            LargeCassetteReel(if (isPlaying) angle else 0f)
-                        }
-                    }
-
-                    else -> {
-                        Box(contentAlignment = Alignment.Center, modifier = Modifier.size(145.dp)) {
-                            Canvas(modifier = Modifier.fillMaxSize()) {
-                                rotate(if (isPlaying) angle else 0f) {
-                                    drawCircle(color = accentColor.copy(alpha = 0.2f), style = Stroke(width = 22f))
-                                    drawCircle(color = accentColor, radius = size.minDimension / 2.3f, style = Stroke(width = 6f))
-                                    drawLine(color = Color.White, start = Offset(size.width / 2, 10f), end = Offset(size.width / 2, 32f), strokeWidth = 5f)
-                                }
-                                drawCircle(color = Color.White, radius = 15f)
-                            }
-                        }
-
-                        Canvas(modifier = Modifier.fillMaxWidth().height(32.dp)) {
-                            val barCount = 20
-                            val barWidth = size.width / (barCount * 1.4f)
-                            for (i in 0 until barCount) {
-                                val ratio = if (isPlaying) ((sin((angle * 0.08f) + i) + 1f) / 2f).coerceIn(0.15f, 1f) else 0.12f
-                                val barH = size.height * ratio
-                                drawRoundRect(
-                                    color = accentColor,
-                                    topLeft = Offset(i * (size.width / barCount), size.height - barH),
-                                    size = Size(barWidth, barH),
-                                    cornerRadius = CornerRadius(4f, 4f)
-                                )
-                            }
-                        }
-                    }
-                }
-
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(trackTitle, color = Color.White, fontWeight = FontWeight.Black, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(trackArtist, color = accentColor, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                }
-
-                // KHÓA AN TOÀN 100% CHO SLIDER SEEKBAR (Tránh lỗi IllegalArgumentException khi mở file DSD có duration = 0)
-                val safeMaxDur = durMs.toFloat().coerceAtLeast(1f)
-                val safeCurrPos = posMs.toFloat().coerceIn(0f, safeMaxDur)
-
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    Slider(
-                        value = safeCurrPos,
-                        onValueChange = { onSeek(it.toInt()) },
-                        valueRange = 0f..safeMaxDur,
-                        modifier = Modifier.fillMaxWidth().height(24.dp),
-                        colors = SliderDefaults.colors(thumbColor = accentColor, activeTrackColor = accentColor)
-                    )
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text(formatTimeMs(posMs), fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White, fontFamily = FontFamily.Monospace)
-                        Text(formatTimeMs(durMs), fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.LightGray, fontFamily = FontFamily.Monospace)
-                    }
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(Color(0xFF111726), RoundedCornerShape(12.dp))
-                .padding(horizontal = 12.dp, vertical = 2.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(Icons.Default.VolumeDown, null, tint = accentColor, modifier = Modifier.size(18.dp))
-            Slider(
-                value = masterVol.coerceIn(0f, 1f),
-                onValueChange = onVolumeChange,
-                modifier = Modifier.weight(1f).height(22.dp),
-                colors = SliderDefaults.colors(thumbColor = accentColor, activeTrackColor = accentColor)
-            )
-            Text("${(masterVol * 100).toInt()}%", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace, modifier = Modifier.width(38.dp), textAlign = TextAlign.End)
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
+        // Thanh điều hướng trên cùng tối giản: Thư viện (Trái) & Audio Lab / Settings (Phải)
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                IconButton(
-                    onClick = onCyclePlayMode,
-                    modifier = Modifier.background(Color(0xFF1E293B), CircleShape)
-                ) {
-                    val icon = when (playMode) {
-                        PlayMode.SEQUENTIAL -> Icons.Default.Repeat
-                        PlayMode.REPEAT_ONE -> Icons.Default.RepeatOne
-                        PlayMode.SHUFFLE -> Icons.Default.Shuffle
-                    }
-                    Icon(icon, null, tint = accentColor)
-                }
-                Text(playMode.label, fontSize = 9.sp, color = Color.LightGray, fontWeight = FontWeight.Bold)
-            }
-
-            Box(
+            IconButton(
+                onClick = onOpenLibrary,
                 modifier = Modifier
-                    .size(134.dp)
+                    .size(42.dp)
                     .clip(CircleShape)
-                    .background(Brush.radialGradient(listOf(Color(0xFF3A4152), Color(0xFF1B202B))))
-                    .border(
-                        width = 4.dp,
-                        color = if (isPlaying && skin == WalkmanSkin.W850I) accentColor.copy(alpha = pulse) else accentColor.copy(alpha = 0.7f),
-                        shape = CircleShape
-                    ),
-                contentAlignment = Alignment.Center
+                    .background(SurfaceDark)
             ) {
-                IconButton(onClick = onPrev, modifier = Modifier.align(Alignment.CenterStart).padding(start = 4.dp)) {
-                    Icon(Icons.Default.SkipPrevious, null, tint = Color.White, modifier = Modifier.size(28.dp))
-                }
-                IconButton(onClick = onNext, modifier = Modifier.align(Alignment.CenterEnd).padding(end = 4.dp)) {
-                    Icon(Icons.Default.SkipNext, null, tint = Color.White, modifier = Modifier.size(28.dp))
-                }
-                Button(
-                    onClick = onPlayPause,
-                    shape = CircleShape,
-                    colors = ButtonDefaults.buttonColors(containerColor = accentColor),
-                    modifier = Modifier.size(58.dp),
-                    contentPadding = PaddingValues(0.dp)
-                ) {
-                    Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null, tint = if (skin == WalkmanSkin.WM1ZM2) Color.Black else Color.White, modifier = Modifier.size(30.dp))
-                }
+                Icon(Icons.Default.QueueMusic, contentDescription = "Library", tint = BrushedSilver, modifier = Modifier.size(20.dp))
             }
 
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                IconButton(
-                    onClick = onToggleFavorite,
-                    modifier = Modifier.background(Color(0xFF1E293B), CircleShape)
+            // Nút mở Audio Lab / Settings
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(SurfaceDark)
+                    .border(1.dp, BorderSubtle, RoundedCornerShape(20.dp))
+                    .clickable { onOpenAudioLab() }
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Icon(Icons.Default.Tune, contentDescription = "Audio Lab", tint = SignatureGold, modifier = Modifier.size(16.dp))
+                Text(
+                    text = "Audio Lab",
+                    color = TextPrimary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    letterSpacing = 0.5.sp
+                )
+            }
+        }
+
+        // Trung tâm: Ảnh bìa Album lớn / VU Meter tinh tế (Chạm để chuyển đổi)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .padding(vertical = 8.dp)
+                .clip(RoundedCornerShape(28.dp))
+                .background(
+                    Brush.radialGradient(
+                        colors = listOf(Color(0xFF1C1F2B), SurfaceDark, BgDeepBlack)
+                    )
+                )
+                .border(1.dp, SignatureGold.copy(alpha = 0.28f), RoundedCornerShape(28.dp))
+                .clickable { showAnalogVu = !showAnalogVu },
+            contentAlignment = Alignment.Center
+        ) {
+            if (showAnalogVu) {
+                // Chế độ VU Meter đôi tối giản chuẩn Signature
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(28.dp),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Icon(
-                        imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                        contentDescription = null,
-                        tint = if (isFavorite) Color(0xFFEF4444) else Color.White
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        MinimalistVuMeter(
+                            channelLabel = "L",
+                            needleAngle = if (isPlaying) (sin(vuPhase) * 28f) else -34f
+                        )
+                        MinimalistVuMeter(
+                            channelLabel = "R",
+                            needleAngle = if (isPlaying) (sin(vuPhase + 0.9f) * 28f) else -34f
+                        )
+                    }
+                }
+            } else {
+                // Chế độ Artwork Đĩa Vinyl Vàng Kim tinh tế
+                Canvas(modifier = Modifier.fillMaxSize(0.76f)) {
+                    val radius = size.minDimension / 2f
+                    // Vành đĩa ngoài
+                    drawCircle(
+                        color = Color(0xFF0D0F14),
+                        radius = radius
+                    )
+                    drawCircle(
+                        color = SignatureGold.copy(alpha = 0.35f),
+                        radius = radius,
+                        style = Stroke(width = 2.dp.toPx())
+                    )
+                    // Các rãnh đĩa đồng tâm mảnh
+                    drawCircle(
+                        color = Color(0xFF1E2330),
+                        radius = radius * 0.82f,
+                        style = Stroke(width = 1.dp.toPx())
+                    )
+                    drawCircle(
+                        color = Color(0xFF1E2330),
+                        radius = radius * 0.64f,
+                        style = Stroke(width = 1.dp.toPx())
+                    )
+
+                    rotate(if (isPlaying) discAngle else 0f) {
+                        // Ánh kim quay nhẹ trên bề mặt đĩa
+                        drawLine(
+                            color = SignatureGold.copy(alpha = 0.18f),
+                            start = Offset(center.x, center.y - radius * 0.88f),
+                            end = Offset(center.x, center.y + radius * 0.88f),
+                            strokeWidth = 3.dp.toPx(),
+                            cap = StrokeCap.Round
+                        )
+                    }
+
+                    // Nhãn tâm đĩa màu Vàng Kim Signature
+                    drawCircle(
+                        color = SignatureGold,
+                        radius = radius * 0.26f
+                    )
+                    drawCircle(
+                        color = BgDeepBlack,
+                        radius = radius * 0.06f
                     )
                 }
-                Text(if (isFavorite) "Đã thích" else "Yêu thích", fontSize = 9.sp, color = if (isFavorite) Color(0xFFEF4444) else Color.LightGray, fontWeight = FontWeight.Bold)
+            }
+        }
+
+        // Thông tin bài hát: Tên bài hát, Nghệ sĩ • Album & Dòng Format nhỏ gọn
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                text = track?.title ?: "Chưa chọn bài hát",
+                color = TextPrimary,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center
+            )
+
+            val artistText = track?.artist?.takeIf { !it.contains("<unknown>", true) } ?: "Unknown Artist"
+            val albumText = track?.folderInfo ?: "Album"
+            Text(
+                text = "$artistText • $albumText",
+                color = BrushedSilver,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(modifier = Modifier.height(2.dp))
+
+            // Dòng thông tin format nhỏ gọn duy nhất (ví dụ: DSD128 • 5.6 MHz)
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(SurfaceDark)
+                    .border(1.dp, SignatureGold.copy(alpha = 0.35f), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 10.dp, vertical = 3.dp)
+            ) {
+                Text(
+                    text = formatSummary,
+                    color = SignatureGoldLight,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    fontFamily = FontFamily.Monospace,
+                    letterSpacing = 0.6.sp
+                )
+            }
+        }
+
+        // Thanh tiến trình (Seekbar) + Thời gian hiện tại / Tổng
+        val safeMaxDur = durMs.toFloat().coerceAtLeast(1f)
+        val safeCurrPos = posMs.toFloat().coerceIn(0f, safeMaxDur)
+
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Slider(
+                value = safeCurrPos,
+                onValueChange = { onSeek(it.toInt()) },
+                valueRange = 0f..safeMaxDur,
+                modifier = Modifier.fillMaxWidth(),
+                colors = SliderDefaults.colors(
+                    thumbColor = SignatureGold,
+                    activeTrackColor = SignatureGold,
+                    inactiveTrackColor = BorderSubtle
+                )
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = formatTimeMs(posMs),
+                    color = BrushedSilver,
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+                Text(
+                    text = formatTimeMs(durMs),
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+        }
+
+        // Cụm nút điều khiển chính: Shuffle – Previous – Play/Pause – Next – Repeat
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            val isShuffleActive = playMode == PlayMode.SHUFFLE
+            val isRepeatActive = playMode == PlayMode.REPEAT_ONE
+
+            IconButton(onClick = onToggleShuffle) {
+                Icon(
+                    imageVector = Icons.Default.Shuffle,
+                    contentDescription = "Shuffle",
+                    tint = if (isShuffleActive) SignatureGold else TextSecondary,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+
+            IconButton(
+                onClick = onPrev,
+                modifier = Modifier.size(52.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.SkipPrevious,
+                    contentDescription = "Previous",
+                    tint = TextPrimary,
+                    modifier = Modifier.size(32.dp)
+                )
+            }
+
+            // Nút Play / Pause trung tâm mạ vàng Signature
+            Box(
+                modifier = Modifier
+                    .size(72.dp)
+                    .clip(CircleShape)
+                    .background(
+                        Brush.linearGradient(
+                            colors = listOf(SignatureGoldLight, SignatureGold, Color(0xFFB38728))
+                        )
+                    )
+                    .clickable { onPlayPause() },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    contentDescription = "Play/Pause",
+                    tint = BgDeepBlack,
+                    modifier = Modifier.size(36.dp)
+                )
+            }
+
+            IconButton(
+                onClick = onNext,
+                modifier = Modifier.size(52.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.SkipNext,
+                    contentDescription = "Next",
+                    tint = TextPrimary,
+                    modifier = Modifier.size(32.dp)
+                )
+            }
+
+            IconButton(onClick = onToggleRepeat) {
+                Icon(
+                    imageVector = if (isRepeatActive) Icons.Default.RepeatOne else Icons.Default.Repeat,
+                    contentDescription = "Repeat",
+                    tint = if (isRepeatActive) SignatureGold else TextSecondary,
+                    modifier = Modifier.size(22.dp)
+                )
             }
         }
     }
 }
 
 @Composable
-fun LargeCassetteReel(rotation: Float) {
-    Canvas(modifier = Modifier.size(72.dp)) {
-        drawCircle(color = Color(0xFF271C19), radius = size.minDimension / 2)
-        drawCircle(color = Color(0xFFE2E8F0), radius = size.minDimension / 2.8f, style = Stroke(width = 6f))
-        rotate(rotation) {
-            for (i in 0 until 6) {
-                rotate(i * 60f) {
-                    drawLine(color = Color(0xFFE2E8F0), start = Offset(size.width / 2, size.height / 2 - 8f), end = Offset(size.width / 2, 10f), strokeWidth = 5f)
+fun MinimalistVuMeter(channelLabel: String, needleAngle: Float) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Canvas(modifier = Modifier.size(width = 115.dp, height = 74.dp)) {
+            drawArc(
+                color = SignatureGold.copy(alpha = 0.28f),
+                startAngle = 200f,
+                sweepAngle = 140f,
+                useCenter = false,
+                style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
+            )
+            rotate(needleAngle, pivot = Offset(size.width / 2f, size.height * 0.92f)) {
+                drawLine(
+                    color = SignatureGold,
+                    start = Offset(size.width / 2f, size.height * 0.92f),
+                    end = Offset(size.width / 2f, 8.dp.toPx()),
+                    strokeWidth = 2.dp.toPx(),
+                    cap = StrokeCap.Round
+                )
+            }
+            drawCircle(
+                color = BrushedSilver,
+                radius = 3.dp.toPx(),
+                center = Offset(size.width / 2f, size.height * 0.92f)
+            )
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = "CH $channelLabel",
+            color = TextSecondary,
+            fontSize = 10.sp,
+            fontFamily = FontFamily.Monospace,
+            letterSpacing = 1.sp
+        )
+    }
+}
+
+/**
+ * 2. MÀN HÌNH SETTINGS / AUDIO LAB (4 SECTION RÕ RÀNG, KẾT NỐI TRỰC TIẾP BIẾN DSP & PURE DSD MODE)
+ */
+@Composable
+fun SignatureAudioLabScreen(
+    pureDsdMode: Boolean,
+    masterVol: Float,
+    megaBass: Float,
+    clearAudio: Boolean,
+    dsee: Boolean,
+    vinyl: Boolean,
+    phaseInvert: Boolean,
+    channelBalance: Float,
+    crossfade: Boolean,
+    tapeSpeed: Float,
+    keepScreenOn: Boolean,
+    sleepTimerRemainingSec: Int,
+    eq10Bands: List<Float>,
+    currentTrack: AudioTrack?,
+    currentBitrate: Int,
+    currentSampleRate: String,
+    audioOutput: AudioOutputState,
+    onBack: () -> Unit,
+    onPureDsdToggle: (Boolean) -> Unit,
+    onMasterVolChange: (Float) -> Unit,
+    onBassChange: (Float) -> Unit,
+    onClearAudioToggle: (Boolean) -> Unit,
+    onDseeToggle: (Boolean) -> Unit,
+    onVinylToggle: (Boolean) -> Unit,
+    onPhaseInvertToggle: (Boolean) -> Unit,
+    onBalanceChange: (Float) -> Unit,
+    onBand10Change: (Int, Float) -> Unit,
+    onResetEq: () -> Unit,
+    onCrossfadeToggle: (Boolean) -> Unit,
+    onTapeSpeedChange: (Float) -> Unit,
+    onKeepScreenOnToggle: (Boolean) -> Unit,
+    onSetSleepMinutes: (Int) -> Unit
+) {
+    val freqLabels = listOf("31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k")
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(BgDeepBlack)
+    ) {
+        // Header cố định
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                IconButton(
+                    onClick = onBack,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .background(SurfaceDark)
+                ) {
+                    Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = TextPrimary, modifier = Modifier.size(18.dp))
+                }
+                Column {
+                    Text(
+                        text = "Audio Lab",
+                        color = TextPrimary,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Signature Acoustic Engine",
+                        color = TextSecondary,
+                        fontSize = 11.sp
+                    )
                 }
             }
+
+            // Badge trạng thái Pure / Processed
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (pureDsdMode) SignatureGold.copy(alpha = 0.16f) else SurfaceDark)
+                    .border(
+                        width = 1.dp,
+                        color = if (pureDsdMode) SignatureGold else BorderSubtle,
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
+            ) {
+                Text(
+                    text = if (pureDsdMode) "PURE DIRECT" else "PROCESSED",
+                    color = if (pureDsdMode) SignatureGold else BrushedSilver,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
         }
-        drawCircle(color = Color(0xFF0F172A), radius = 10f)
+
+        // Nội dung cuộn 4 Section
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp)
+        ) {
+            // =========================================================================
+            // SECTION 1: SOUND MODE
+            // =========================================================================
+            AudioLabSectionCard(title = "SOUND MODE") {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                        Text(
+                            text = "Pure DSD Mode",
+                            color = TextPrimary,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "Bỏ qua toàn bộ DSP, nghe trung tính",
+                            color = TextSecondary,
+                            fontSize = 12.sp
+                        )
+                    }
+                    Switch(
+                        checked = pureDsdMode,
+                        onCheckedChange = onPureDsdToggle,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = BgDeepBlack,
+                            checkedTrackColor = SignatureGold,
+                            uncheckedThumbColor = BrushedSilver,
+                            uncheckedTrackColor = SurfaceDark
+                        )
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+                HorizontalDivider(color = BorderSubtle)
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Trạng thái đường truyền",
+                        color = BrushedSilver,
+                        fontSize = 12.sp
+                    )
+                    Text(
+                        text = if (pureDsdMode) "Pure (Bit-Perfect Bypass)" else "Processed (Sony DSP Active)",
+                        color = if (pureDsdMode) SignatureGoldLight else TextPrimary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+
+            // =========================================================================
+            // SECTION 2: PROCESSING
+            // =========================================================================
+            AudioLabSectionCard(title = "PROCESSING") {
+                // Master Pre-Amp & Channel Balance luôn hoạt động kể cả trong Pure DSD Mode
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Master Output Level", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Text("${(masterVol * 100).roundToInt()}%", color = SignatureGold, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                    }
+                    Slider(
+                        value = masterVol.coerceIn(0f, 1f),
+                        onValueChange = onMasterVolChange,
+                        colors = SliderDefaults.colors(
+                            thumbColor = SignatureGold,
+                            activeTrackColor = SignatureGold,
+                            inactiveTrackColor = BorderSubtle
+                        )
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // Channel Balance (L - R)
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Channel Balance", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        val balLabel = when {
+                            channelBalance < -0.02f -> "L +${(-channelBalance * 100).roundToInt()}%"
+                            channelBalance > 0.02f -> "R +${(channelBalance * 100).roundToInt()}%"
+                            else -> "Center"
+                        }
+                        Text(
+                            text = balLabel,
+                            color = BrushedSilver,
+                            fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.clickable { onBalanceChange(0f) }
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("L", color = TextSecondary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        Slider(
+                            value = channelBalance.coerceIn(-0.5f, 0.5f),
+                            onValueChange = onBalanceChange,
+                            valueRange = -0.5f..0.5f,
+                            modifier = Modifier.weight(1f),
+                            colors = SliderDefaults.colors(
+                                thumbColor = BrushedSilver,
+                                activeTrackColor = SignatureGold,
+                                inactiveTrackColor = BorderSubtle
+                            )
+                        )
+                        Text("R", color = TextSecondary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                    }
+                }
+
+                // Các thành phần DSP bị bỏ qua khi bật Pure DSD Mode
+                Column(
+                    modifier = Modifier.alpha(if (pureDsdMode) 0.40f else 1.0f),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    HorizontalDivider(color = BorderSubtle)
+
+                    // Mega Bass Slider
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Mega Bass", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                            Text("+${(megaBass * 10).roundToInt()} dB", color = SignatureGold, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        }
+                        Slider(
+                            value = megaBass.coerceIn(0f, 1f),
+                            onValueChange = { if (!pureDsdMode) onBassChange(it) },
+                            enabled = !pureDsdMode,
+                            colors = SliderDefaults.colors(
+                                thumbColor = SignatureGold,
+                                activeTrackColor = SignatureGold,
+                                inactiveTrackColor = BorderSubtle
+                            )
+                        )
+                    }
+
+                    AudioLabSwitchRow(
+                        title = "ClearAudio+",
+                        subtitle = "Mở rộng không gian âm trường 3D Stereo",
+                        checked = clearAudio,
+                        enabled = !pureDsdMode,
+                        onCheckedChange = onClearAudioToggle
+                    )
+
+                    AudioLabSwitchRow(
+                        title = "DSEE HX",
+                        subtitle = "Tái tạo hài âm dải tần số cao",
+                        checked = dsee,
+                        enabled = !pureDsdMode,
+                        onCheckedChange = onDseeToggle
+                    )
+
+                    AudioLabSwitchRow(
+                        title = "Vinyl Processor",
+                        subtitle = "Mô phỏng cộng hưởng ấm áp của kim đĩa than",
+                        checked = vinyl,
+                        enabled = !pureDsdMode,
+                        onCheckedChange = onVinylToggle
+                    )
+
+                    AudioLabSwitchRow(
+                        title = "Phase Invert (180°)",
+                        subtitle = "Đảo cực pha tín hiệu đầu ra cho DAC rời",
+                        checked = phaseInvert,
+                        enabled = !pureDsdMode,
+                        onCheckedChange = onPhaseInvertToggle
+                    )
+                }
+            }
+
+            // =========================================================================
+            // SECTION 3: EQUALIZER (10-BAND & RESET)
+            // =========================================================================
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .alpha(if (pureDsdMode) 0.40f else 1.0f)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(SurfaceCard)
+                    .border(1.dp, BorderSubtle, RoundedCornerShape(18.dp))
+                    .padding(18.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "EQUALIZER (10-BAND)",
+                        color = SignatureGold,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.2.sp
+                    )
+                    TextButton(
+                        onClick = { if (!pureDsdMode) onResetEq() },
+                        enabled = !pureDsdMode,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                        modifier = Modifier.height(28.dp)
+                    ) {
+                        Text("Reset EQ", color = BrushedSilver, fontSize = 12.sp)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                freqLabels.forEachIndexed { idx, freq ->
+                    val gainVal = eq10Bands.getOrElse(idx) { 0f }.coerceIn(-8f, 8f)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(34.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "${freq}Hz",
+                            color = BrushedSilver,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.width(46.dp)
+                        )
+                        Slider(
+                            value = gainVal,
+                            onValueChange = { if (!pureDsdMode) onBand10Change(idx, it) },
+                            valueRange = -8f..8f,
+                            enabled = !pureDsdMode,
+                            modifier = Modifier.weight(1f),
+                            colors = SliderDefaults.colors(
+                                thumbColor = SignatureGold,
+                                activeTrackColor = SignatureGold,
+                                inactiveTrackColor = BorderSubtle
+                            )
+                        )
+                        Text(
+                            text = "%+.1f".format(gainVal),
+                            color = if (gainVal != 0f) SignatureGoldLight else TextSecondary,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            textAlign = TextAlign.End,
+                            modifier = Modifier.width(40.dp)
+                        )
+                    }
+                }
+            }
+
+            // =========================================================================
+            // SECTION 4: OTHER (PLAYBACK TOOLS, FILE SPECS & VERSION INFO)
+            // =========================================================================
+            AudioLabSectionCard(title = "OTHER") {
+                // Hẹn giờ ngủ (Sleep Timer)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Sleep Timer (Fade-Out)", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Text(
+                        text = if (sleepTimerRemainingSec > 0) "${sleepTimerRemainingSec / 60}m ${sleepTimerRemainingSec % 60}s" else "Off",
+                        color = if (sleepTimerRemainingSec > 0) SignatureGold else TextSecondary,
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(0 to "Off", 15 to "15m", 30 to "30m", 45 to "45m", 60 to "60m").forEach { (mins, label) ->
+                        val active = (mins == 0 && sleepTimerRemainingSec == 0) ||
+                                (mins > 0 && sleepTimerRemainingSec in ((mins - 14) * 60)..(mins * 60))
+                        OutlinedButton(
+                            onClick = { onSetSleepMinutes(mins) },
+                            modifier = Modifier.weight(1f).height(32.dp),
+                            border = BorderStroke(1.dp, if (active) SignatureGold else BorderSubtle),
+                            contentPadding = PaddingValues(0.dp)
+                        ) {
+                            Text(label, fontSize = 11.sp, color = if (active) SignatureGold else BrushedSilver)
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+                HorizontalDivider(color = BorderSubtle)
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Tốc độ phát (Playback Speed)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Playback Speed", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Text("${"%.2f".format(tapeSpeed)}x", color = BrushedSilver, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(0.85f, 0.95f, 1.0f, 1.10f, 1.20f).forEach { spd ->
+                        val selected = tapeSpeed == spd
+                        OutlinedButton(
+                            onClick = { onTapeSpeedChange(spd) },
+                            modifier = Modifier.weight(1f).height(32.dp),
+                            border = BorderStroke(1.dp, if (selected) SignatureGold else BorderSubtle),
+                            contentPadding = PaddingValues(0.dp)
+                        ) {
+                            Text("${spd}x", fontSize = 11.sp, color = if (selected) SignatureGold else BrushedSilver)
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                AudioLabSwitchRow(
+                    title = "Smooth Crossfade",
+                    subtitle = "Chuyển bài mượt không ngắt quãng",
+                    checked = crossfade,
+                    enabled = true,
+                    onCheckedChange = onCrossfadeToggle
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                AudioLabSwitchRow(
+                    title = "Keep Screen On",
+                    subtitle = "Giữ sáng màn hình khi đặt trên bàn làm việc",
+                    checked = keepScreenOn,
+                    enabled = true,
+                    onCheckedChange = onKeepScreenOnToggle
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+                HorizontalDivider(color = BorderSubtle)
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Thông tin thiết bị đầu ra & File đang phát
+                AudioLabInfoRow("Output Device", audioOutput.deviceName)
+                AudioLabInfoRow("Audio Codec", audioOutput.codecEstimate)
+                AudioLabInfoRow("Current Track", currentTrack?.title ?: "None")
+                AudioLabInfoRow("Stream Specs", "${currentTrack?.formatName ?: "PCM"} • $currentSampleRate • $currentBitrate kbps")
+                AudioLabInfoRow("App Version", "Walkman Signature Edition • v10.0 (128-Tap FIR)")
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+        }
     }
 }
 
 @Composable
-fun FiioStyleCategorizedLibraryView(
+fun AudioLabSectionCard(
+    title: String,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(SurfaceCard)
+            .border(1.dp, BorderSubtle, RoundedCornerShape(18.dp))
+            .padding(18.dp)
+    ) {
+        Text(
+            text = title,
+            color = SignatureGold,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.2.sp
+        )
+        Spacer(modifier = Modifier.height(14.dp))
+        content()
+    }
+}
+
+@Composable
+fun AudioLabSwitchRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    enabled: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(text = title, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+            Text(text = subtitle, color = TextSecondary, fontSize = 11.sp)
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            enabled = enabled,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = BgDeepBlack,
+                checkedTrackColor = SignatureGold,
+                uncheckedThumbColor = BrushedSilver,
+                uncheckedTrackColor = SurfaceDark
+            )
+        )
+    }
+}
+
+@Composable
+fun AudioLabInfoRow(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(text = label, color = TextSecondary, fontSize = 12.sp)
+        Text(
+            text = value,
+            color = BrushedSilver,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(start = 16.dp)
+        )
+    }
+}
+
+/**
+ * 3. MÀN HÌNH THƯ VIỆN NHẠC (ĐỒNG BỘ PHONG CÁCH TỐI GIẢN SIGNATURE)
+ */
+@Composable
+fun SignatureLibraryScreen(
     context: Context,
     tracks: List<AudioTrack>,
     favoriteTitles: Set<String>,
-    isScanning: Boolean,
     currentIndex: Int,
+    onBackToPlayer: () -> Unit,
     onAutoScan: () -> Unit,
     onPickFiles: () -> Unit,
     onPickFolder: () -> Unit,
@@ -1863,117 +2329,149 @@ fun FiioStyleCategorizedLibraryView(
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
-        Card(
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF141C2B)),
-            modifier = Modifier.fillMaxWidth()
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(BgDeepBlack)
+            .padding(horizontal = 20.dp, vertical = 16.dp)
+    ) {
+        // Header Thư viện
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                IconButton(
+                    onClick = onBackToPlayer,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .background(SurfaceDark)
                 ) {
-                    Text("QUẢN LÝ THƯ VIỆN NHẠC WALKMAN", fontWeight = FontWeight.Black, color = Color(0xFFEAB308), fontSize = 13.sp)
-                    if (tracks.isNotEmpty()) {
-                        TextButton(onClick = onClearSaved, contentPadding = PaddingValues(0.dp)) {
-                            Text("Xóa DS", color = Color(0xFFEF4444), fontSize = 11.sp)
-                        }
-                    }
+                    Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = TextPrimary, modifier = Modifier.size(18.dp))
                 }
-
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Button(
-                        onClick = onAutoScan,
-                        modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5500), contentColor = Color.White),
-                        contentPadding = PaddingValues(vertical = 8.dp, horizontal = 4.dp)
-                    ) {
-                        Text("QUÉT TỰ ĐỘNG", fontSize = 10.sp, fontWeight = FontWeight.Black)
-                    }
-                    Button(
-                        onClick = onPickFolder,
-                        modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7), contentColor = Color.White),
-                        contentPadding = PaddingValues(vertical = 8.dp, horizontal = 4.dp)
-                    ) {
-                        Text("LƯU THƯ MỤC", fontSize = 10.sp, fontWeight = FontWeight.Black)
-                    }
-                    Button(
-                        onClick = onPickFiles,
-                        modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF16A34A), contentColor = Color.White),
-                        contentPadding = PaddingValues(vertical = 8.dp, horizontal = 4.dp)
-                    ) {
-                        Text("+ CHỌN FILE", fontSize = 10.sp, fontWeight = FontWeight.Black)
-                    }
+                Column {
+                    Text("Music Library", color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                    Text("${tracks.size} tracks available", color = TextSecondary, fontSize = 11.sp)
                 }
+            }
 
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    val tabs = listOf(
-                        "Tất cả (${tracks.size})",
-                        "♥ Yêu thích (${tracks.count { favoriteTitles.contains(it.title) }})",
-                        "📁 Thư mục (${foldersMap.size})"
-                    )
-                    tabs.forEachIndexed { idx, label ->
-                        val active = subTab == idx
-                        OutlinedButton(
-                            onClick = {
-                                subTab = idx
-                                selectedFolderFilter = null
-                            },
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                containerColor = if (active) Color(0xFFEAB308) else Color(0xFF0F172A),
-                                contentColor = if (active) Color.Black else Color.White
-                            ),
-                            contentPadding = PaddingValues(vertical = 6.dp, horizontal = 2.dp)
-                        ) {
-                            Text(label, fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1)
-                        }
-                    }
+            if (tracks.isNotEmpty()) {
+                TextButton(onClick = onClearSaved) {
+                    Text("Clear", color = TextSecondary, fontSize = 12.sp)
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(14.dp))
+
+        // Các nút nạp nhạc gọn gàng
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = onAutoScan,
+                modifier = Modifier.weight(1f).height(36.dp),
+                border = BorderStroke(1.dp, SignatureGold.copy(alpha = 0.5f)),
+                contentPadding = PaddingValues(0.dp)
+            ) {
+                Text("Auto Scan", fontSize = 11.sp, color = SignatureGoldLight)
+            }
+            OutlinedButton(
+                onClick = onPickFolder,
+                modifier = Modifier.weight(1f).height(36.dp),
+                border = BorderStroke(1.dp, BorderSubtle),
+                contentPadding = PaddingValues(0.dp)
+            ) {
+                Text("Add Folder", fontSize = 11.sp, color = TextPrimary)
+            }
+            OutlinedButton(
+                onClick = onPickFiles,
+                modifier = Modifier.weight(1f).height(36.dp),
+                border = BorderStroke(1.dp, BorderSubtle),
+                contentPadding = PaddingValues(0.dp)
+            ) {
+                Text("+ Files", fontSize = 11.sp, color = TextPrimary)
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // Phân loại: All | Favorites | Folders
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            val tabs = listOf(
+                "All (${tracks.size})",
+                "Favorites (${tracks.count { favoriteTitles.contains(it.title) }})",
+                "Folders (${foldersMap.size})"
+            )
+            tabs.forEachIndexed { idx, label ->
+                val active = subTab == idx
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(34.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (active) SignatureGold else SurfaceCard)
+                        .clickable {
+                            subTab = idx
+                            selectedFolderFilter = null
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = label,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = if (active) BgDeepBlack else BrushedSilver
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
 
         if (subTab == 2 && selectedFolderFilter == null) {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 val folderEntries = foldersMap.entries.toList()
                 itemsIndexed(folderEntries) { _, entry ->
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(Color(0xFF111622), RoundedCornerShape(10.dp))
-                            .border(1.dp, Color(0xFF334155), RoundedCornerShape(10.dp))
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(SurfaceCard)
+                            .border(1.dp, BorderSubtle, RoundedCornerShape(12.dp))
                             .clickable { selectedFolderFilter = entry.key }
                             .padding(14.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Folder, null, tint = Color(0xFFEAB308), modifier = Modifier.size(28.dp))
+                            Icon(Icons.Default.Folder, null, tint = SignatureGold, modifier = Modifier.size(24.dp))
                             Spacer(modifier = Modifier.width(12.dp))
                             Column {
-                                Text(entry.key, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                Text("${entry.value.size} bài hát lưu trong thư mục này", color = Color.Gray, fontSize = 11.sp)
+                                Text(entry.key, color = TextPrimary, fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                                Text("${entry.value.size} tracks", color = TextSecondary, fontSize = 11.sp)
                             }
                         }
-                        Icon(Icons.Default.ChevronRight, null, tint = Color.LightGray)
+                        Icon(Icons.Default.ChevronRight, null, tint = TextSecondary)
                     }
                 }
             }
         } else {
             if (subTab == 2 && selectedFolderFilter != null) {
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    TextButton(onClick = { selectedFolderFilter = null }) {
-                        Text("← Quay lại danh sách Thư mục", color = Color(0xFFEAB308), fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                    }
-                    Text("• [$selectedFolderFilter]", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    Text(
+                        text = "← Folders / $selectedFolderFilter",
+                        color = SignatureGold,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.clickable { selectedFolderFilter = null }
+                    )
                 }
             }
 
@@ -1981,40 +2479,50 @@ fun FiioStyleCategorizedLibraryView(
                 itemsIndexed(displayedTracks) { index, track ->
                     val isFav = favoriteTitles.contains(track.title)
                     val isPlayingTrack = tracks.getOrNull(currentIndex)?.id == track.id
-                    val savedResumePos = PlaylistStorage.getSavedTrackPosition(context, track.title)
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(if (isPlayingTrack) Color(0xFF2B1B12) else Color(0xFF111622), RoundedCornerShape(10.dp))
-                            .border(1.dp, if (isPlayingTrack) Color(0xFFEAB308) else Color.Transparent, RoundedCornerShape(10.dp))
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (isPlayingTrack) Color(0xFF1E1B12) else SurfaceCard)
+                            .border(
+                                width = 1.dp,
+                                color = if (isPlayingTrack) SignatureGold.copy(alpha = 0.6f) else Color.Transparent,
+                                shape = RoundedCornerShape(12.dp)
+                            )
                             .clickable { onSelectTrack(track) }
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("${index + 1}. ${track.title}", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            val resumeText = if (savedResumePos > 10000) " • ⏱ Đang nghe: ${formatTimeMs(savedResumePos)}" else ""
-                            Text("${track.artist} • 📁 ${track.folderInfo} • [${track.formatName}]$resumeText", color = Color(0xFF94A3B8), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                            Text(
+                                text = track.title,
+                                fontWeight = if (isPlayingTrack) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (isPlayingTrack) SignatureGoldLight else TextPrimary,
+                                fontSize = 14.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            val cleanArtist = track.artist.takeIf { !it.contains("<unknown>", true) } ?: track.folderInfo
+                            Text(
+                                text = "$cleanArtist • ${track.formatName}",
+                                color = TextSecondary,
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (track.duration > 0) {
-                                Text(
-                                    formatTimeMs(track.duration.toInt()),
-                                    color = Color(0xFFEAB308),
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    fontFamily = FontFamily.Monospace
-                                )
-                            }
-                            IconButton(onClick = { onToggleFavorite(track.title) }) {
-                                Icon(
-                                    imageVector = if (isFav) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                                    contentDescription = null,
-                                    tint = if (isFav) Color(0xFFEF4444) else Color.Gray,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
+                        IconButton(
+                            onClick = { onToggleFavorite(track.title) },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (isFav) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                contentDescription = "Favorite",
+                                tint = if (isFav) SignatureGold else TextSecondary,
+                                modifier = Modifier.size(18.dp)
+                            )
                         }
                     }
                 }
@@ -2022,261 +2530,3 @@ fun FiioStyleCategorizedLibraryView(
         }
     }
 }
-
-@Composable
-fun FullSonyDspAndAudiophileToolsView(
-    masterVol: Float,
-    megaBass: Float,
-    vinylProcessor: Boolean,
-    clearAudio: Boolean,
-    dseeUltimate: Boolean,
-    channelBalance: Float,
-    phaseInvert: Boolean,
-    crossfade: Boolean,
-    tapeSpeed: Float,
-    sleepTimerRemainingSec: Int,
-    eq10Bands: List<Float>,
-    audioOutput: AudioOutputState,
-    onMasterVolChange: (Float) -> Unit,
-    onSetSleepMinutes: (Int) -> Unit,
-    onTapeSpeedChange: (Float) -> Unit,
-    onCrossfadeToggle: (Boolean) -> Unit,
-    onBalanceChange: (Float) -> Unit,
-    onPhaseInvertToggle: (Boolean) -> Unit,
-    onVinylToggle: (Boolean) -> Unit,
-    onClearAudioToggle: (Boolean) -> Unit,
-    onDseeToggle: (Boolean) -> Unit,
-    onBassChange: (Float) -> Unit,
-    onBand10Change: (Int, Float) -> Unit,
-    onApplyPreset10: (List<Float>) -> Unit
-) {
-    val labels10 = listOf("31Hz", "62Hz", "125Hz", "250Hz", "500Hz", "1kHz", "2kHz", "4kHz", "8kHz", "16kHz")
-
-    val presets10 = listOf(
-        "Heavy" to listOf(6f, 5f, 3f, 1f, 0f, 1f, 2f, 4f, 5f, 6f),
-        "Pop" to listOf(2f, 3f, 4f, 3f, 1f, 1f, 2f, 3f, 4f, 4f),
-        "Jazz" to listOf(4f, 3f, 2f, 1f, -1f, 0f, 1f, 2f, 3f, 4f),
-        "Vinyl Warm" to listOf(4f, 4f, 2f, 1f, 0f, 0f, 1f, 2f, 3f, 3f),
-        "Flat" to listOf(0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
-    )
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("SONY PURE AUDIO 7.0 + FIIO DSD ENGINE", fontWeight = FontWeight.Black, fontSize = 14.sp, color = Color(0xFFEAB308))
-            Text("✓ V9.6 CLEAN DSD", color = Color(0xFF22C55E), fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
-        }
-
-        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF141C2B))) {
-            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("🌙 HẸN GIỜ NGỦ (GIẢM ÂM TỪ TỪ 60S CUỐI)", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 12.sp)
-                    Text(
-                        text = if (sleepTimerRemainingSec > 0) "Còn ${sleepTimerRemainingSec / 60}p ${sleepTimerRemainingSec % 60}s" else "Đang tắt",
-                        color = Color(0xFF22C55E),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Black
-                    )
-                }
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf(0 to "TẮT", 15 to "15p", 30 to "30p", 45 to "45p", 60 to "60p").forEach { (mins, label) ->
-                        OutlinedButton(
-                            onClick = { onSetSleepMinutes(mins) },
-                            modifier = Modifier.weight(1f),
-                            contentPadding = PaddingValues(vertical = 4.dp, horizontal = 2.dp)
-                        ) {
-                            Text(label, fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-            }
-        }
-
-        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF121826))) {
-            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("⚡ TỐC ĐỘ BĂNG & CAO ĐỘ (TAPE SPEED)", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 12.sp)
-                    Text("${"%.2f".format(tapeSpeed)}x", color = Color(0xFF38BDF8), fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
-                }
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf(0.85f to "0.85x Slow", 0.95f to "0.95x Tape", 1.0f to "1.0x Chuẩn", 1.10f to "1.10x Fast", 1.20f to "1.20x Night").forEach { (spd, title) ->
-                        OutlinedButton(
-                            onClick = { onTapeSpeedChange(spd) },
-                            modifier = Modifier.weight(1f),
-                            contentPadding = PaddingValues(vertical = 4.dp, horizontal = 1.dp)
-                        ) {
-                            Text(title, fontSize = 9.sp, color = if (tapeSpeed == spd) Color(0xFFEAB308) else Color.White, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-                HorizontalDivider(color = Color(0xFF1E293B))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Smooth Crossfade Transition", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
-                        Text("Vuốt mượt âm lượng khi chuyển qua bài hát mới", color = Color.Gray, fontSize = 11.sp)
-                    }
-                    Switch(checked = crossfade, onCheckedChange = onCrossfadeToggle)
-                }
-            }
-        }
-
-        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF121826))) {
-            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("🎧 CÂN BẰNG KÊNH TRÁI / PHẢI (L/R BALANCE)", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 12.sp)
-                    val balText = when {
-                        channelBalance < -0.05f -> "L +${(-channelBalance * 100).roundToInt()}%"
-                        channelBalance > 0.05f -> "R +${(channelBalance * 100).roundToInt()}%"
-                        else -> "CENTER (0)"
-                    }
-                    Text(balText, color = Color(0xFFEAB308), fontWeight = FontWeight.Black, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                }
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("L", color = Color.LightGray, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                    Slider(
-                        value = channelBalance.coerceIn(-0.5f, 0.5f),
-                        onValueChange = onBalanceChange,
-                        valueRange = -0.5f..0.5f,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Text("R", color = Color.LightGray, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                    TextButton(onClick = { onBalanceChange(0f) }) {
-                        Text("Giữa", color = Color(0xFF38BDF8), fontSize = 11.sp)
-                    }
-                }
-                HorizontalDivider(color = Color(0xFF1E293B))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Phase Inverter (Đảo pha âm thanh 180°)", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
-                        Text("Đảo cực tín hiệu PCM cho USB-DAC & tai nghe cao cấp", color = Color.Gray, fontSize = 11.sp)
-                    }
-                    Switch(checked = phaseInvert, onCheckedChange = onPhaseInvertToggle)
-                }
-            }
-        }
-
-        Card(
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF241C0C)),
-            border = BorderStroke(1.dp, Color(0xFFEAB308))
-        ) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Vinyl Processor™ (7.0 Pure Warmth)", fontWeight = FontWeight.Black, color = Color(0xFFEAB308), fontSize = 14.sp)
-                        Text("Chất âm ấm chuẩn 7.0 kèm mạch Clean Headroom chống rè loa ngoài điện thoại", color = Color.LightGray, fontSize = 11.sp)
-                    }
-                    Switch(
-                        checked = vinylProcessor,
-                        onCheckedChange = onVinylToggle,
-                        colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFFEAB308), checkedTrackColor = Color(0xFF854D0E))
-                    )
-                }
-            }
-        }
-
-        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF121826))) {
-            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("ClearAudio+™ (Mid-Side 3D Stereo)", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
-                        Text("Mở rộng sân khấu âm thanh trong trẻo không méo tiếng", color = Color.Gray, fontSize = 11.sp)
-                    }
-                    Switch(checked = clearAudio, onCheckedChange = onClearAudioToggle)
-                }
-                HorizontalDivider(color = Color(0xFF1E293B))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("DSEE HX™ (Harmonic Exciter)", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
-                        Text("Tái tạo dải cao mượt mà chuẩn Walkman 7.0", color = Color.Gray, fontSize = 11.sp)
-                    }
-                    Switch(checked = dseeUltimate, onCheckedChange = onDseeToggle)
-                }
-            }
-        }
-
-        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF121826))) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("CLEARBASS / SUB-BASS RESONANCE", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
-                    Text("+${(megaBass * 10).toInt()} dB", color = Color(0xFFFF6600), fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
-                }
-                Slider(
-                    value = megaBass.coerceIn(0f, 1f),
-                    onValueChange = onBassChange,
-                    colors = SliderDefaults.colors(thumbColor = Color(0xFFFF5500), activeTrackColor = Color(0xFFFF5500))
-                )
-            }
-        }
-
-        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF121826))) {
-            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("SONY 10-BAND GRAPHIC EQUALIZER", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
-
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    presets10.forEach { (name, vals) ->
-                        OutlinedButton(
-                            onClick = { onApplyPreset10(vals) },
-                            modifier = Modifier.weight(1f),
-                            contentPadding = PaddingValues(vertical = 4.dp, horizontal = 1.dp)
-                        ) {
-                            Text(name, fontSize = 9.sp, color = Color.White, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-
-                labels10.forEachIndexed { idx, label ->
-                    val currentVal = eq10Bands.getOrElse(idx) { 0f }.coerceIn(-8f, 8f)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(label, modifier = Modifier.width(48.dp), fontSize = 10.sp, color = Color.LightGray, fontFamily = FontFamily.Monospace)
-                        Slider(
-                            value = currentVal,
-                            onValueChange = { onBand10Change(idx, it) },
-                            valueRange = -8f..8f,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Text(
-                            text = "%+.0f dB".format(currentVal),
-                            modifier = Modifier.width(42.dp),
-                            fontSize = 10.sp,
-                            color = Color(0xFFFF8800),
-                            fontFamily = FontFamily.Monospace,
-                            textAlign = TextAlign.End
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-
-

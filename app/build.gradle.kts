@@ -15,21 +15,6 @@ android {
         versionName = "9.8-TrueAptX-CrystalDSD"
     }
 
-    signingConfigs {
-        getByName("debug") {
-            storeFile = file("walkman-fixed.keystore")
-            storePassword = "walkman123"
-            keyAlias = "walkman_key"
-            keyPassword = "walkman123"
-        }
-    }
-
-    buildTypes {
-        getByName("debug") {
-            signingConfig = signingConfigs.getByName("debug")
-        }
-    }
-
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

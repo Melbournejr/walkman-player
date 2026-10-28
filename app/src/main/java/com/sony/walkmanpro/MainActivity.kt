@@ -33,6 +33,8 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -40,9 +42,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
@@ -73,18 +78,20 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.roundToInt
-import kotlin.math.sin
 
-// Bảng màu Sony Walkman Signature Series (Black + Gold + Brushed Silver)
-private val BgDeepBlack = Color(0xFF090A0D)
-private val SurfaceDark = Color(0xFF12141A)
-private val SurfaceCard = Color(0xFF171A22)
-private val BorderSubtle = Color(0xFF262A36)
-private val SignatureGold = Color(0xFFD4AF37)
-private val SignatureGoldLight = Color(0xFFF3E5AB)
-private val BrushedSilver = Color(0xFF94A3B8)
-private val TextPrimary = Color(0xFFF8FAFC)
-private val TextSecondary = Color(0xFF64748B)
+// =========================================================================================
+// BẢNG MÀU VẬT LIỆU SONY WALKMAN SIGNATURE SERIES (WM1ZM2 CHAMPAGNE GOLD & WM1AM2 COLD SILVER)
+// =========================================================================================
+private val WalkmanBlack = Color(0xFF0A0B0E)
+private val ChassisDark = Color(0xFF121419)
+private val PanelSurface = Color(0xFF171A21)
+private val ElevatedMetallic = Color(0xFF1F232D)
+private val BezelBorder = Color(0xFF2B303C)
+private val ChampagneGold = Color(0xFFC5B386)      // Vàng Champagne nhạt chuẩn WM1ZM2 (không chói)
+private val ChampagneGoldDim = Color(0xFF8A7B56)   // Vàng đồng trầm cho viền khắc CNC
+private val ColdSilver = Color(0xFFA3ACB9)         // Bạc lạnh chuẩn nhôm nguyên khối WM1AM2
+private val TextPure = Color(0xFFF1F5F9)
+private val TextMuted = Color(0xFF64748B)
 
 data class AudioTrack(
     val id: Long,
@@ -110,10 +117,10 @@ enum class AppScreen {
 }
 
 data class AudioOutputState(
-    val deviceType: String = "Loa thiết bị",
+    val deviceType: String = "Speaker",
     val isBluetooth: Boolean = false,
-    val deviceName: String = "Built-in Speaker",
-    val codecEstimate: String = "Stereo"
+    val deviceName: String = "Internal Speaker",
+    val codecEstimate: String = "PCM"
 )
 
 @UnstableApi
@@ -173,12 +180,12 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme(
                 colorScheme = darkColorScheme(
-                    background = BgDeepBlack,
-                    surface = SurfaceDark,
-                    primary = SignatureGold,
-                    onPrimary = Color.Black,
-                    onBackground = TextPrimary,
-                    onSurface = TextPrimary
+                    background = WalkmanBlack,
+                    surface = ChassisDark,
+                    primary = ChampagneGold,
+                    onPrimary = WalkmanBlack,
+                    onBackground = TextPure,
+                    onSurface = TextPure
                 )
             ) {
                 SignatureWalkmanApp(
@@ -528,7 +535,8 @@ class MainActivity : ComponentActivity() {
     private fun ensureBluetoothA2dpProxy(context: Context) {
         if (bluetoothA2dpProxy != null) return
         try {
-            val adapter = android.bluetooth.BluetoothAdapter.getDefaultAdapter() ?: return
+            val bm = context.getSystemService(Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager
+            val adapter = bm?.adapter ?: return
             adapter.getProfileProxy(context.applicationContext, object : android.bluetooth.BluetoothProfile.ServiceListener {
                 override fun onServiceConnected(profile: Int, proxy: android.bluetooth.BluetoothProfile?) {
                     if (profile == android.bluetooth.BluetoothProfile.A2DP) {
@@ -550,11 +558,12 @@ class MainActivity : ComponentActivity() {
         try {
             ensureBluetoothA2dpProxy(this)
             val proxy = bluetoothA2dpProxy
+            val bm = getSystemService(Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager
             val devices = proxy?.connectedDevices
             val activeDevice = if (!devices.isNullOrEmpty()) {
                 devices.firstOrNull { it.name?.equals(deviceNameHint, ignoreCase = true) == true } ?: devices[0]
             } else {
-                android.bluetooth.BluetoothAdapter.getDefaultAdapter()?.bondedDevices?.firstOrNull {
+                bm?.adapter?.bondedDevices?.firstOrNull {
                     it.name?.equals(deviceNameHint, ignoreCase = true) == true
                 }
             }
@@ -581,7 +590,7 @@ class MainActivity : ComponentActivity() {
                                     1 -> "Bluetooth AAC"
                                     2 -> "Qualcomm® aptX™"
                                     3 -> "Qualcomm® aptX™ HD"
-                                    4 -> "Sony LDAC™ Hi-Res"
+                                    4 -> "Sony LDAC™"
                                     5, 6, 7, 8, 9 -> "Qualcomm® aptX™ Adaptive"
                                     else -> "Qualcomm® aptX™ Adaptive"
                                 }
@@ -605,7 +614,7 @@ class MainActivity : ComponentActivity() {
                         val rawName = dev.productName?.toString() ?: "Bluetooth Audio"
                         val (realCodec, batteryLevel) = queryRealBluetoothCodecAndBattery(rawName)
                         val displayWithBattery = if (batteryLevel in 0..100) {
-                            "$rawName ($batteryLevel%)"
+                            "$rawName • $batteryLevel%"
                         } else {
                             rawName
                         }
@@ -617,7 +626,7 @@ class MainActivity : ComponentActivity() {
                         return AudioOutputState("Bluetooth", true, displayWithBattery, codecLabel)
                     }
                     AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> {
-                        return AudioOutputState("Wired 3.5mm/4.4mm", false, "Balanced / Single-Ended", "Direct PCM/DSD")
+                        return AudioOutputState("4.4mm / 3.5mm", false, "Balanced / Headphones", "Direct Output")
                     }
                     AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_USB_DEVICE -> {
                         return AudioOutputState("USB-DAC", false, dev.productName?.toString() ?: "USB HiFi DAC", "Bit-Perfect Output")
@@ -636,7 +645,7 @@ class MainActivity : ComponentActivity() {
         val lowerTitle = track.title.lowercase()
         val lowerFmt = track.formatName.lowercase()
         var bitrate = 320
-        var sampleRate = "44.1 kHz • 16-bit"
+        var sampleRate = "44.1 kHz / 16-bit"
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(context, track.uri)
@@ -647,11 +656,11 @@ class MainActivity : ComponentActivity() {
             }
             val mime = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE) ?: ""
             sampleRate = when {
-                lowerTitle.contains("384k") || mime.contains("x-flac") -> "384.0 kHz • 32-bit"
-                lowerTitle.endsWith(".flac") || lowerFmt == "flac" -> "96.0 kHz • 24-bit"
-                lowerTitle.endsWith(".mqa") || lowerFmt == "mqa" -> "352.8 kHz • MQA"
-                lowerTitle.endsWith(".wav") -> "96.0 kHz • 24-bit"
-                else -> "44.1 kHz • 16-bit"
+                lowerTitle.contains("384k") || mime.contains("x-flac") -> "384.0 kHz / 32-bit"
+                lowerTitle.endsWith(".flac") || lowerFmt == "flac" -> "96.0 kHz / 24-bit"
+                lowerTitle.endsWith(".mqa") || lowerFmt == "mqa" -> "352.8 kHz / MQA"
+                lowerTitle.endsWith(".wav") -> "96.0 kHz / 24-bit"
+                else -> "44.1 kHz / 16-bit"
             }
         } catch (_: Throwable) {
         } finally {
@@ -951,7 +960,6 @@ fun SignatureWalkmanApp(
     var posMs by remember { mutableStateOf(PlaylistStorage.loadLastPos(context)) }
     var durMs by remember { mutableStateOf(1) }
 
-    // Trạng thái DSP & Audio Lab
     val dspPrefs = context.getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
     var masterVol by remember { mutableStateOf(dspPrefs.getFloat("dsp_master_vol", 0.75f)) }
     var pureDsdMode by remember { mutableStateOf(dspPrefs.getBoolean("dsp_pure_dsd_mode", false)) }
@@ -983,7 +991,7 @@ fun SignatureWalkmanApp(
 
     var audioOutput by remember { mutableStateOf(getAudioOutputState()) }
     var currentBitrate by remember { mutableStateOf(320) }
-    var currentSampleRate by remember { mutableStateOf("44.1 kHz • 16-bit") }
+    var currentSampleRate by remember { mutableStateOf("44.1 kHz / 16-bit") }
 
     val notifPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
@@ -993,7 +1001,6 @@ fun SignatureWalkmanApp(
         Manifest.permission.READ_EXTERNAL_STORAGE
     }
 
-    // Xử lý nút Back vật lý của điện thoại để quay về Now Playing
     BackHandler(enabled = currentScreen != AppScreen.NOW_PLAYING) {
         currentScreen = AppScreen.NOW_PLAYING
     }
@@ -1213,24 +1220,23 @@ fun SignatureWalkmanApp(
 
     val currentTrack = playlist.getOrNull(currentIndex)
 
-    // Chuyển màn hình mượt mà (AnimatedContent)
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(BgDeepBlack)
+            .background(WalkmanBlack)
             .systemBarsPadding()
     ) {
         AnimatedContent(
             targetState = currentScreen,
             transitionSpec = {
-                fadeIn(animationSpec = tween(260)) togetherWith fadeOut(animationSpec = tween(220))
+                fadeIn(animationSpec = tween(260)) togetherWith fadeOut(animationSpec = tween(200))
             },
-            label = "screen_transition"
+            label = "walkman_screen_transition"
         ) { screen ->
             when (screen) {
-                AppScreen.NOW_PLAYING -> SignatureNowPlayingScreen(
+                AppScreen.NOW_PLAYING -> WalkmanSignatureNowPlayingScreen(
                     track = currentTrack,
-                    formatSummary = if (currentSampleRate.contains("DSD", true)) {
+                    formatBadgeText = if (currentSampleRate.contains("DSD", true)) {
                         currentSampleRate
                     } else {
                         "${currentTrack?.formatName ?: "PCM"} • $currentSampleRate"
@@ -1282,7 +1288,6 @@ fun SignatureWalkmanApp(
                 )
 
                 AppScreen.LIBRARY -> SignatureLibraryScreen(
-                    context = context,
                     tracks = playlist,
                     favoriteTitles = favoriteTitles,
                     currentIndex = currentIndex,
@@ -1394,12 +1399,14 @@ fun SignatureWalkmanApp(
 }
 
 /**
- * 1. MÀN HÌNH NOW PLAYING (TỐI GIẢN, CAO CẤP, TẬP TRUNG VÀO TRẢI NGHIỆM NGHE)
+ * =============================================================================================
+ * 1. MÀN HÌNH NOW PLAYING (CHẤT LIỆU SONY WALKMAN WM1ZM2 / WM1AM2 & CASSETTE TAPE UI THẬT)
+ * =============================================================================================
  */
 @Composable
-fun SignatureNowPlayingScreen(
+fun WalkmanSignatureNowPlayingScreen(
     track: AudioTrack?,
-    formatSummary: String,
+    formatBadgeText: String,
     isPlaying: Boolean,
     playMode: PlayMode,
     posMs: Int,
@@ -1413,30 +1420,34 @@ fun SignatureNowPlayingScreen(
     onOpenLibrary: () -> Unit,
     onOpenAudioLab: () -> Unit
 ) {
-    var showAnalogVu by remember { mutableStateOf(false) }
+    // Mặc định hiển thị giao diện Băng Cassette đặc trưng của Sony Walkman
+    var isCassetteView by remember { mutableStateOf(true) }
 
-    val infiniteTransition = rememberInfiniteTransition(label = "signature_motion")
-    val discAngle by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(tween(12000, easing = LinearEasing)),
-        label = "disc_rotation"
-    )
-    val vuPhase by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 6.283f,
-        animationSpec = infiniteRepeatable(tween(1600, easing = LinearEasing)),
-        label = "vu_motion"
-    )
+    // Bộ đếm góc quay vật lý: Chỉ tăng góc khi isPlaying == true, dừng ngay lập tức tại vị trí hiện tại khi Pause
+    var reelRotationAngle by remember { mutableStateOf(0f) }
+    LaunchedEffect(isPlaying) {
+        var lastTime = withFrameNanos { it }
+        while (isPlaying) {
+            val now = withFrameNanos { it }
+            val deltaSec = (now - lastTime) / 1_000_000_000f
+            lastTime = now
+            // Tốc độ quay chuẩn băng Cassette (khoảng 55 độ / giây)
+            reelRotationAngle = (reelRotationAngle + deltaSec * 58f) % 360f
+        }
+    }
+
+    val safeMaxDur = durMs.toFloat().coerceAtLeast(1f)
+    val safeCurrPos = posMs.toFloat().coerceIn(0f, safeMaxDur)
+    val progressFraction = (safeCurrPos / safeMaxDur).coerceIn(0f, 1f)
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 28.dp, vertical = 20.dp),
+            .padding(horizontal = 24.dp, vertical = 18.dp),
         verticalArrangement = Arrangement.SpaceBetween,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Thanh điều hướng trên cùng tối giản: Thư viện (Trái) & Audio Lab / Settings (Phải)
+        // 1. Thanh công cụ phía trên: Nút Thư viện | Chuyển đổi Cassette / Cover Art | Nút Audio Lab
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -1445,187 +1456,177 @@ fun SignatureNowPlayingScreen(
             IconButton(
                 onClick = onOpenLibrary,
                 modifier = Modifier
-                    .size(42.dp)
-                    .clip(CircleShape)
-                    .background(SurfaceDark)
+                    .size(40.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(PanelSurface)
+                    .border(1.dp, BezelBorder, RoundedCornerShape(12.dp))
             ) {
-                Icon(Icons.Default.QueueMusic, contentDescription = "Library", tint = BrushedSilver, modifier = Modifier.size(20.dp))
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.QueueMusic,
+                    contentDescription = "Library",
+                    tint = ColdSilver,
+                    modifier = Modifier.size(19.dp)
+                )
             }
 
-            // Nút mở Audio Lab / Settings
+            // Công tắc chuyển đổi chế độ: CASSETTE | COVER ART
             Row(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(SurfaceDark)
-                    .border(1.dp, BorderSubtle, RoundedCornerShape(20.dp))
-                    .clickable { onOpenAudioLab() }
-                    .padding(horizontal = 14.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(ChassisDark)
+                    .border(1.dp, BezelBorder, RoundedCornerShape(10.dp))
+                    .padding(3.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Default.Tune, contentDescription = "Audio Lab", tint = SignatureGold, modifier = Modifier.size(16.dp))
-                Text(
-                    text = "Audio Lab",
-                    color = TextPrimary,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    letterSpacing = 0.5.sp
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(7.dp))
+                        .background(if (isCassetteView) ElevatedMetallic else Color.Transparent)
+                        .clickable { isCassetteView = true }
+                        .padding(horizontal = 12.dp, vertical = 5.dp)
+                ) {
+                    Text(
+                        text = "CASSETTE",
+                        color = if (isCassetteView) ChampagneGold else TextMuted,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 1.sp
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(7.dp))
+                        .background(if (!isCassetteView) ElevatedMetallic else Color.Transparent)
+                        .clickable { isCassetteView = false }
+                        .padding(horizontal = 12.dp, vertical = 5.dp)
+                ) {
+                    Text(
+                        text = "COVER ART",
+                        color = if (!isCassetteView) ChampagneGold else TextMuted,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 1.sp
+                    )
+                }
+            }
+
+            IconButton(
+                onClick = onOpenAudioLab,
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(PanelSurface)
+                    .border(1.dp, BezelBorder, RoundedCornerShape(12.dp))
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Settings,
+                    contentDescription = "Audio Lab",
+                    tint = ChampagneGold,
+                    modifier = Modifier.size(19.dp)
                 )
             }
         }
 
-        // Trung tâm: Ảnh bìa Album lớn / VU Meter tinh tế (Chạm để chuyển đổi)
+        // 2. Điểm nhấn trung tâm: Giao diện Băng Cassette Sony hoặc Cover Art
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(1f)
-                .padding(vertical = 8.dp)
-                .clip(RoundedCornerShape(28.dp))
-                .background(
-                    Brush.radialGradient(
-                        colors = listOf(Color(0xFF1C1F2B), SurfaceDark, BgDeepBlack)
-                    )
-                )
-                .border(1.dp, SignatureGold.copy(alpha = 0.28f), RoundedCornerShape(28.dp))
-                .clickable { showAnalogVu = !showAnalogVu },
+                .weight(1f)
+                .padding(vertical = 14.dp),
             contentAlignment = Alignment.Center
         ) {
-            if (showAnalogVu) {
-                // Chế độ VU Meter đôi tối giản chuẩn Signature
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(28.dp),
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly
-                    ) {
-                        MinimalistVuMeter(
-                            channelLabel = "L",
-                            needleAngle = if (isPlaying) (sin(vuPhase) * 28f) else -34f
-                        )
-                        MinimalistVuMeter(
-                            channelLabel = "R",
-                            needleAngle = if (isPlaying) (sin(vuPhase + 0.9f) * 28f) else -34f
-                        )
-                    }
-                }
-            } else {
-                // Chế độ Artwork Đĩa Vinyl Vàng Kim tinh tế
-                Canvas(modifier = Modifier.fillMaxSize(0.76f)) {
-                    val radius = size.minDimension / 2f
-                    // Vành đĩa ngoài
-                    drawCircle(
-                        color = Color(0xFF0D0F14),
-                        radius = radius
+            Crossfade(targetState = isCassetteView, animationSpec = tween(300), label = "center_view_mode") { showCassette ->
+                if (showCassette) {
+                    SonyWalkmanCassetteDeck(
+                        trackTitle = track?.title ?: "WALKMAN SIGNATURE",
+                        trackArtist = track?.artist?.takeIf { !it.contains("<unknown>", true) } ?: "SONY CORPORATION",
+                        formatBadge = formatBadgeText,
+                        reelAngle = reelRotationAngle,
+                        progressFraction = progressFraction,
+                        onClickSwitchMode = { isCassetteView = false }
                     )
-                    drawCircle(
-                        color = SignatureGold.copy(alpha = 0.35f),
-                        radius = radius,
-                        style = Stroke(width = 2.dp.toPx())
-                    )
-                    // Các rãnh đĩa đồng tâm mảnh
-                    drawCircle(
-                        color = Color(0xFF1E2330),
-                        radius = radius * 0.82f,
-                        style = Stroke(width = 1.dp.toPx())
-                    )
-                    drawCircle(
-                        color = Color(0xFF1E2330),
-                        radius = radius * 0.64f,
-                        style = Stroke(width = 1.dp.toPx())
-                    )
-
-                    rotate(if (isPlaying) discAngle else 0f) {
-                        // Ánh kim quay nhẹ trên bề mặt đĩa
-                        drawLine(
-                            color = SignatureGold.copy(alpha = 0.18f),
-                            start = Offset(center.x, center.y - radius * 0.88f),
-                            end = Offset(center.x, center.y + radius * 0.88f),
-                            strokeWidth = 3.dp.toPx(),
-                            cap = StrokeCap.Round
-                        )
-                    }
-
-                    // Nhãn tâm đĩa màu Vàng Kim Signature
-                    drawCircle(
-                        color = SignatureGold,
-                        radius = radius * 0.26f
-                    )
-                    drawCircle(
-                        color = BgDeepBlack,
-                        radius = radius * 0.06f
+                } else {
+                    SonySignatureCoverArtView(
+                        trackTitle = track?.title ?: "WALKMAN",
+                        reelAngle = reelRotationAngle,
+                        onClickSwitchMode = { isCassetteView = true }
                     )
                 }
             }
         }
 
-        // Thông tin bài hát: Tên bài hát, Nghệ sĩ • Album & Dòng Format nhỏ gọn
+        // 3. Khu vực thông tin bài hát & Định dạng (Gọn gàng, tinh tế)
         Column(
             modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+            verticalArrangement = Arrangement.spacedBy(5.dp)
         ) {
+            // Dòng hiển thị Format (DSD128 • 5.6 MHz / PCM) nhỏ gọn chuẩn máy thật
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(PanelSurface)
+                    .border(0.8.dp, ChampagneGoldDim.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 8.dp, vertical = 2.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(5.dp)
+                        .clip(CircleShape)
+                        .background(ChampagneGold)
+                )
+                Text(
+                    text = formatBadgeText,
+                    color = ChampagneGold,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Medium,
+                    fontFamily = FontFamily.Monospace,
+                    letterSpacing = 0.8.sp
+                )
+            }
+
+            Spacer(modifier = Modifier.height(2.dp))
+
             Text(
-                text = track?.title ?: "Chưa chọn bài hát",
-                color = TextPrimary,
-                fontSize = 22.sp,
+                text = track?.title ?: "No Track Selected",
+                color = TextPure,
+                fontSize = 20.sp,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.Center
             )
 
-            val artistText = track?.artist?.takeIf { !it.contains("<unknown>", true) } ?: "Unknown Artist"
-            val albumText = track?.folderInfo ?: "Album"
+            val cleanArtist = track?.artist?.takeIf { !it.contains("<unknown>", true) } ?: "Unknown Artist"
+            val cleanAlbum = track?.folderInfo ?: "Album"
             Text(
-                text = "$artistText • $albumText",
-                color = BrushedSilver,
-                fontSize = 14.sp,
+                text = "$cleanArtist — $cleanAlbum",
+                color = ColdSilver,
+                fontSize = 13.sp,
                 fontWeight = FontWeight.Normal,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.Center
             )
-
-            Spacer(modifier = Modifier.height(2.dp))
-
-            // Dòng thông tin format nhỏ gọn duy nhất (ví dụ: DSD128 • 5.6 MHz)
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(SurfaceDark)
-                    .border(1.dp, SignatureGold.copy(alpha = 0.35f), RoundedCornerShape(6.dp))
-                    .padding(horizontal = 10.dp, vertical = 3.dp)
-            ) {
-                Text(
-                    text = formatSummary,
-                    color = SignatureGoldLight,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Medium,
-                    fontFamily = FontFamily.Monospace,
-                    letterSpacing = 0.6.sp
-                )
-            }
         }
 
-        // Thanh tiến trình (Seekbar) + Thời gian hiện tại / Tổng
-        val safeMaxDur = durMs.toFloat().coerceAtLeast(1f)
-        val safeCurrPos = posMs.toFloat().coerceIn(0f, safeMaxDur)
+        Spacer(modifier = Modifier.height(10.dp))
 
+        // 4. Thanh tiến trình + Thời gian hiện tại / tổng
         Column(modifier = Modifier.fillMaxWidth()) {
             Slider(
                 value = safeCurrPos,
                 onValueChange = { onSeek(it.toInt()) },
                 valueRange = 0f..safeMaxDur,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(26.dp),
                 colors = SliderDefaults.colors(
-                    thumbColor = SignatureGold,
-                    activeTrackColor = SignatureGold,
-                    inactiveTrackColor = BorderSubtle
+                    thumbColor = ChampagneGold,
+                    activeTrackColor = ChampagneGold,
+                    inactiveTrackColor = BezelBorder
                 )
             )
             Row(
@@ -1636,135 +1637,479 @@ fun SignatureNowPlayingScreen(
             ) {
                 Text(
                     text = formatTimeMs(posMs),
-                    color = BrushedSilver,
-                    fontSize = 12.sp,
+                    color = ColdSilver,
+                    fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace
                 )
                 Text(
                     text = formatTimeMs(durMs),
-                    color = TextSecondary,
-                    fontSize = 12.sp,
+                    color = TextMuted,
+                    fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace
                 )
             }
         }
 
-        // Cụm nút điều khiển chính: Shuffle – Previous – Play/Pause – Next – Repeat
-        Row(
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // 5. Cụm nút điều khiển vật lý (Hardware Tactile Control Deck của Walkman thật)
+        WalkmanHardwareTransportDeck(
+            isPlaying = isPlaying,
+            playMode = playMode,
+            onToggleShuffle = onToggleShuffle,
+            onPrev = onPrev,
+            onPlayPause = onPlayPause,
+            onNext = onNext,
+            onToggleRepeat = onToggleRepeat
+        )
+    }
+}
+
+/**
+ * GIAO DIỆN BĂNG CASSETTE SONY WALKMAN CHÍNH HÃNG (METAL MASTER / CERAMIC SHELL)
+ * - Cuộn băng (Reels) quay mượt khi phát, dừng ngay khi Pause.
+ * - Đường kính cuộn băng từ thay đổi thực tế theo thời gian bài hát.
+ * - Cửa sổ nhựa trong suốt có hiệu ứng phản chiếu ánh sáng + khung kim loại.
+ */
+@Composable
+fun SonyWalkmanCassetteDeck(
+    trackTitle: String,
+    trackArtist: String,
+    formatBadge: String,
+    reelAngle: Float,
+    progressFraction: Float,
+    onClickSwitchMode: () -> Unit
+) {
+    val isHiResOrDsd = formatBadge.contains("DSD", true) || formatBadge.contains("96.", true) ||
+            formatBadge.contains("192.", true) || formatBadge.contains("384.", true) || formatBadge.contains("FLAC", true)
+
+    val tapeModelName = if (isHiResOrDsd) "METAL MASTER 90" else "CHF 60"
+    val tapePositionType = if (isHiResOrDsd) "TYPE IV • METAL POSITION" else "TYPE I • NORMAL POSITION"
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(256.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(Color(0xFF232730), Color(0xFF161920), Color(0xFF101217))
+                )
+            )
+            .border(1.5.dp, Color(0xFF353B49), RoundedCornerShape(18.dp))
+            .clickable { onClickSwitchMode() }
+            .padding(14.dp)
+    ) {
+        // 4 Ốc vít kim loại ở 4 góc cuốn băng Cassette
+        CassetteCornerScrew(Modifier.align(Alignment.TopStart))
+        CassetteCornerScrew(Modifier.align(Alignment.TopEnd))
+        CassetteCornerScrew(Modifier.align(Alignment.BottomStart))
+        CassetteCornerScrew(Modifier.align(Alignment.BottomEnd))
+
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+                .fillMaxSize()
+                .padding(horizontal = 6.dp, vertical = 2.dp),
+            verticalArrangement = Arrangement.SpaceBetween,
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            val isShuffleActive = playMode == PlayMode.SHUFFLE
-            val isRepeatActive = playMode == PlayMode.REPEAT_ONE
-
-            IconButton(onClick = onToggleShuffle) {
-                Icon(
-                    imageVector = Icons.Default.Shuffle,
-                    contentDescription = "Shuffle",
-                    tint = if (isShuffleActive) SignatureGold else TextSecondary,
-                    modifier = Modifier.size(22.dp)
-                )
-            }
-
-            IconButton(
-                onClick = onPrev,
-                modifier = Modifier.size(52.dp)
+            // Phần Nhãn Băng trên (Top Cassette Label)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp, bottomStart = 3.dp, bottomEnd = 3.dp))
+                    .background(
+                        if (isHiResOrDsd) {
+                            Brush.horizontalGradient(listOf(Color(0xFF1A1D24), Color(0xFF262A34), Color(0xFF1A1D24)))
+                        } else {
+                            Brush.horizontalGradient(listOf(Color(0xFFEAE6DF), Color(0xFFF5F2EB), Color(0xFFEAE6DF)))
+                        }
+                    )
+                    .border(
+                        width = 0.8.dp,
+                        color = if (isHiResOrDsd) ChampagneGoldDim else Color(0xFFC0B8A8),
+                        shape = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp, bottomStart = 3.dp, bottomEnd = 3.dp)
+                    )
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Default.SkipPrevious,
-                    contentDescription = "Previous",
-                    tint = TextPrimary,
-                    modifier = Modifier.size(32.dp)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "SONY",
+                        color = if (isHiResOrDsd) ChampagneGold else Color(0xFF1E293B),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 2.sp
+                    )
+                    Text(
+                        text = tapeModelName,
+                        color = if (isHiResOrDsd) ColdSilver else Color(0xFF0F172A),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(2.dp))
+
+                Text(
+                    text = trackTitle,
+                    color = if (isHiResOrDsd) TextPure else Color(0xFF0F172A),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
 
-            // Nút Play / Pause trung tâm mạ vàng Signature
+            // Cửa sổ Cassette (Acrylic Transparent Window + 2 Cuộn băng từ + Thước đo)
             Box(
                 modifier = Modifier
-                    .size(72.dp)
-                    .clip(CircleShape)
-                    .background(
-                        Brush.linearGradient(
-                            colors = listOf(SignatureGoldLight, SignatureGold, Color(0xFFB38728))
+                    .fillMaxWidth()
+                    .height(118.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color(0xFF0B0D11))
+                    .border(1.5.dp, Color(0xFF2E3442), RoundedCornerShape(10.dp))
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val w = size.width
+                    val h = size.height
+                    val centerY = h / 2f
+                    val leftReelX = w * 0.27f
+                    val rightReelX = w * 0.73f
+
+                    // Bán kính cuộn dây băng từ (Co giãn thực tế theo tiến trình bài hát)
+                    val maxSpoolRadius = h * 0.44f
+                    val minSpoolRadius = h * 0.22f
+                    val leftSpoolRadius = maxSpoolRadius - (maxSpoolRadius - minSpoolRadius) * progressFraction
+                    val rightSpoolRadius = minSpoolRadius + (maxSpoolRadius - minSpoolRadius) * progressFraction
+
+                    // 1. Vẽ cuộn dây từ màu nâu đen (Magnetic Tape Pack)
+                    drawCircle(
+                        color = Color(0xFF1C1614),
+                        radius = leftSpoolRadius,
+                        center = Offset(leftReelX, centerY)
+                    )
+                    drawCircle(
+                        color = Color(0xFF2B221F),
+                        radius = leftSpoolRadius,
+                        center = Offset(leftReelX, centerY),
+                        style = Stroke(width = 1.5.dp.toPx())
+                    )
+
+                    drawCircle(
+                        color = Color(0xFF1C1614),
+                        radius = rightSpoolRadius,
+                        center = Offset(rightReelX, centerY)
+                    )
+                    drawCircle(
+                        color = Color(0xFF2B221F),
+                        radius = rightSpoolRadius,
+                        center = Offset(rightReelX, centerY),
+                        style = Stroke(width = 1.5.dp.toPx())
+                    )
+
+                    // 2. Vạch thước đo lượng băng ở giữa cửa sổ
+                    val scaleStartX = w * 0.40f
+                    val scaleEndX = w * 0.60f
+                    drawLine(
+                        color = ColdSilver.copy(alpha = 0.35f),
+                        start = Offset(scaleStartX, centerY),
+                        end = Offset(scaleEndX, centerY),
+                        strokeWidth = 1.dp.toPx()
+                    )
+                    for (tick in 0..4) {
+                        val tx = scaleStartX + (scaleEndX - scaleStartX) * (tick / 4f)
+                        val tickH = if (tick == 2) 5.dp.toPx() else 3.dp.toPx()
+                        drawLine(
+                            color = ChampagneGold.copy(alpha = 0.55f),
+                            start = Offset(tx, centerY - tickH),
+                            end = Offset(tx, centerY + tickH),
+                            strokeWidth = 1.2.dp.toPx()
+                        )
+                    }
+
+                    // 3. Vẽ 2 trục bánh răng quay (Precision Cassette Reels)
+                    val hubRadius = h * 0.20f
+                    listOf(leftReelX, rightReelX).forEach { cx ->
+                        // Vành kim loại của trục
+                        drawCircle(
+                            color = Color(0xFF12151C),
+                            radius = hubRadius,
+                            center = Offset(cx, centerY)
+                        )
+                        drawCircle(
+                            color = ColdSilver.copy(alpha = 0.85f),
+                            radius = hubRadius,
+                            center = Offset(cx, centerY),
+                            style = Stroke(width = 2.2.dp.toPx())
+                        )
+
+                        // 6 chấu bánh răng bên trong quay theo góc reelAngle
+                        rotate(reelAngle, pivot = Offset(cx, centerY)) {
+                            for (spoke in 0 until 6) {
+                                rotate(spoke * 60f, pivot = Offset(cx, centerY)) {
+                                    drawLine(
+                                        color = ChampagneGold,
+                                        start = Offset(cx, centerY - hubRadius * 0.38f),
+                                        end = Offset(cx, centerY - hubRadius * 0.92f),
+                                        strokeWidth = 2.6.dp.toPx(),
+                                        cap = StrokeCap.Round
+                                    )
+                                }
+                            }
+                        }
+
+                        // Lỗ trục tâm
+                        drawCircle(
+                            color = Color(0xFF07080A),
+                            radius = hubRadius * 0.34f,
+                            center = Offset(cx, centerY)
+                        )
+                    }
+
+                    // 4. Hiệu ứng lớp kính nhựa Acrylic phản quang chéo (Realistic Glass Reflection)
+                    val glassPath = Path().apply {
+                        moveTo(w * 0.32f, 0f)
+                        lineTo(w * 0.46f, 0f)
+                        lineTo(w * 0.28f, h)
+                        lineTo(w * 0.14f, h)
+                        close()
+                    }
+                    drawPath(
+                        path = glassPath,
+                        brush = Brush.linearGradient(
+                            colors = listOf(
+                                Color.White.copy(alpha = 0.05f),
+                                Color.White.copy(alpha = 0.02f)
+                            )
                         )
                     )
-                    .clickable { onPlayPause() },
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                    contentDescription = "Play/Pause",
-                    tint = BgDeepBlack,
-                    modifier = Modifier.size(36.dp)
-                )
+                }
             }
 
-            IconButton(
-                onClick = onNext,
-                modifier = Modifier.size(52.dp)
+            // Phần Đế cơ khí phía dưới cuốn băng (Head Shield / Trapezoid Bridge)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth(0.86f)
+                    .height(28.dp)
+                    .clip(RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp, bottomStart = 3.dp, bottomEnd = 3.dp))
+                    .background(Color(0xFF1B1F28))
+                    .border(1.dp, Color(0xFF2D3342), RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp, bottomStart = 3.dp, bottomEnd = 3.dp))
+                    .padding(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    imageVector = Icons.Default.SkipNext,
-                    contentDescription = "Next",
-                    tint = TextPrimary,
-                    modifier = Modifier.size(32.dp)
+                Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(Color(0xFF090A0D)))
+                Text(
+                    text = tapePositionType,
+                    color = ChampagneGold.copy(alpha = 0.85f),
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Medium,
+                    fontFamily = FontFamily.Monospace,
+                    letterSpacing = 1.sp
                 )
-            }
-
-            IconButton(onClick = onToggleRepeat) {
-                Icon(
-                    imageVector = if (isRepeatActive) Icons.Default.RepeatOne else Icons.Default.Repeat,
-                    contentDescription = "Repeat",
-                    tint = if (isRepeatActive) SignatureGold else TextSecondary,
-                    modifier = Modifier.size(22.dp)
-                )
+                Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(Color(0xFF090A0D)))
             }
         }
     }
 }
 
 @Composable
-fun MinimalistVuMeter(channelLabel: String, needleAngle: Float) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Canvas(modifier = Modifier.size(width = 115.dp, height = 74.dp)) {
-            drawArc(
-                color = SignatureGold.copy(alpha = 0.28f),
-                startAngle = 200f,
-                sweepAngle = 140f,
-                useCenter = false,
-                style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
-            )
-            rotate(needleAngle, pivot = Offset(size.width / 2f, size.height * 0.92f)) {
-                drawLine(
-                    color = SignatureGold,
-                    start = Offset(size.width / 2f, size.height * 0.92f),
-                    end = Offset(size.width / 2f, 8.dp.toPx()),
-                    strokeWidth = 2.dp.toPx(),
-                    cap = StrokeCap.Round
-                )
-            }
-            drawCircle(
-                color = BrushedSilver,
-                radius = 3.dp.toPx(),
-                center = Offset(size.width / 2f, size.height * 0.92f)
-            )
-        }
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            text = "CH $channelLabel",
-            color = TextSecondary,
-            fontSize = 10.sp,
-            fontFamily = FontFamily.Monospace,
-            letterSpacing = 1.sp
+fun CassetteCornerScrew(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .size(8.dp)
+            .clip(CircleShape)
+            .background(Color(0xFF2D3340))
+            .border(0.8.dp, Color(0xFF101217), CircleShape),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .width(5.dp)
+                .height(1.dp)
+                .background(Color(0xFF14171E))
         )
     }
 }
 
 /**
- * 2. MÀN HÌNH SETTINGS / AUDIO LAB (4 SECTION RÕ RÀNG, KẾT NỐI TRỰC TIẾP BIẾN DSP & PURE DSD MODE)
+ * CHẾ ĐỘ COVER ART / ĐĨA VINYL KIM LOẠI TỐI GIẢN
+ */
+@Composable
+fun SonySignatureCoverArtView(
+    trackTitle: String,
+    reelAngle: Float,
+    onClickSwitchMode: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .size(256.dp)
+            .clip(RoundedCornerShape(22.dp))
+            .background(
+                Brush.radialGradient(
+                    colors = listOf(Color(0xFF1B1F29), ChassisDark, WalkmanBlack)
+                )
+            )
+            .border(1.2.dp, BezelBorder, RoundedCornerShape(22.dp))
+            .clickable { onClickSwitchMode() },
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize(0.80f)) {
+            val r = size.minDimension / 2f
+            drawCircle(color = Color(0xFF0E1015), radius = r)
+            drawCircle(color = ChampagneGoldDim.copy(alpha = 0.45f), radius = r, style = Stroke(width = 1.5.dp.toPx()))
+            drawCircle(color = Color(0xFF1D212B), radius = r * 0.78f, style = Stroke(width = 1.dp.toPx()))
+            drawCircle(color = Color(0xFF1D212B), radius = r * 0.56f, style = Stroke(width = 1.dp.toPx()))
+
+            rotate(reelAngle) {
+                drawLine(
+                    color = ChampagneGold.copy(alpha = 0.22f),
+                    start = Offset(center.x, center.y - r * 0.90f),
+                    end = Offset(center.x, center.y + r * 0.90f),
+                    strokeWidth = 2.5.dp.toPx(),
+                    cap = StrokeCap.Round
+                )
+            }
+
+            drawCircle(color = ChampagneGold, radius = r * 0.24f)
+            drawCircle(color = WalkmanBlack, radius = r * 0.06f)
+        }
+    }
+}
+
+/**
+ * CỤM NÚT ĐIỀU KHIỂN VẬT LÝ (HARDWARE TACTILE BUTTONS CỦA MÁY WALKMAN THẬT)
+ */
+@Composable
+fun WalkmanHardwareTransportDeck(
+    isPlaying: Boolean,
+    playMode: PlayMode,
+    onToggleShuffle: () -> Unit,
+    onPrev: () -> Unit,
+    onPlayPause: () -> Unit,
+    onNext: () -> Unit,
+    onToggleRepeat: () -> Unit
+) {
+    val isShuffle = playMode == PlayMode.SHUFFLE
+    val isRepeatOne = playMode == PlayMode.REPEAT_ONE
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(20.dp))
+            .background(ChassisDark)
+            .border(1.dp, BezelBorder, RoundedCornerShape(20.dp))
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // Nút Shuffle
+        IconButton(
+            onClick = onToggleShuffle,
+            modifier = Modifier.size(40.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Shuffle,
+                contentDescription = "Shuffle",
+                tint = if (isShuffle) ChampagneGold else TextMuted,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+
+        // Nút Previous vật lý
+        Box(
+            modifier = Modifier
+                .size(54.dp)
+                .clip(CircleShape)
+                .background(
+                    Brush.verticalGradient(listOf(ElevatedMetallic, PanelSurface))
+                )
+                .border(1.dp, BezelBorder, CircleShape)
+                .clickable { onPrev() },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.SkipPrevious,
+                contentDescription = "Previous",
+                tint = TextPure,
+                modifier = Modifier.size(26.dp)
+            )
+        }
+
+        // Nút Play / Pause lớn ở trung tâm (Có chấm nổi tactile và viền Champagne Gold chuẩn Walkman)
+        Box(
+            modifier = Modifier
+                .size(70.dp)
+                .clip(CircleShape)
+                .background(
+                    Brush.verticalGradient(
+                        colors = if (isPlaying) {
+                            listOf(ChampagneGold, Color(0xFF9E8C5E))
+                        } else {
+                            listOf(ElevatedMetallic, Color(0xFF14171E))
+                        }
+                    )
+                )
+                .border(
+                    width = 1.8.dp,
+                    color = ChampagneGold,
+                    shape = CircleShape
+                )
+                .clickable { onPlayPause() },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                contentDescription = "Play/Pause",
+                tint = if (isPlaying) WalkmanBlack else ChampagneGold,
+                modifier = Modifier.size(34.dp)
+            )
+        }
+
+        // Nút Next vật lý
+        Box(
+            modifier = Modifier
+                .size(54.dp)
+                .clip(CircleShape)
+                .background(
+                    Brush.verticalGradient(listOf(ElevatedMetallic, PanelSurface))
+                )
+                .border(1.dp, BezelBorder, CircleShape)
+                .clickable { onNext() },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.SkipNext,
+                contentDescription = "Next",
+                tint = TextPure,
+                modifier = Modifier.size(26.dp)
+            )
+        }
+
+        // Nút Repeat
+        IconButton(
+            onClick = onToggleRepeat,
+            modifier = Modifier.size(40.dp)
+        ) {
+            Icon(
+                imageVector = if (isRepeatOne) Icons.Default.RepeatOne else Icons.Default.Repeat,
+                contentDescription = "Repeat",
+                tint = if (isRepeatOne) ChampagneGold else TextMuted,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+    }
+}
+
+/**
+ * =============================================================================================
+ * 2. MÀN HÌNH SETTINGS / AUDIO LAB (4 SECTION RÕ RÀNG, CHUẨN SONY SOUND ADJUST)
+ * =============================================================================================
  */
 @Composable
 fun SignatureAudioLabScreen(
@@ -1806,7 +2151,7 @@ fun SignatureAudioLabScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(BgDeepBlack)
+            .background(WalkmanBlack)
     ) {
         // Header cố định
         Row(
@@ -1824,59 +2169,62 @@ fun SignatureAudioLabScreen(
                     onClick = onBack,
                     modifier = Modifier
                         .size(38.dp)
-                        .clip(CircleShape)
-                        .background(SurfaceDark)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(PanelSurface)
+                        .border(1.dp, BezelBorder, RoundedCornerShape(10.dp))
                 ) {
-                    Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = TextPrimary, modifier = Modifier.size(18.dp))
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back",
+                        tint = TextPure,
+                        modifier = Modifier.size(18.dp)
+                    )
                 }
                 Column {
                     Text(
                         text = "Audio Lab",
-                        color = TextPrimary,
+                        color = TextPure,
                         fontSize = 18.sp,
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = "Signature Acoustic Engine",
-                        color = TextSecondary,
+                        text = "Sound Settings & DSP",
+                        color = TextMuted,
                         fontSize = 11.sp
                     )
                 }
             }
 
-            // Badge trạng thái Pure / Processed
+            // Trạng thái Pure / Processed
             Box(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(if (pureDsdMode) SignatureGold.copy(alpha = 0.16f) else SurfaceDark)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(if (pureDsdMode) ChampagneGold.copy(alpha = 0.15f) else PanelSurface)
                     .border(
                         width = 1.dp,
-                        color = if (pureDsdMode) SignatureGold else BorderSubtle,
-                        shape = RoundedCornerShape(8.dp)
+                        color = if (pureDsdMode) ChampagneGold else BezelBorder,
+                        shape = RoundedCornerShape(6.dp)
                     )
-                    .padding(horizontal = 10.dp, vertical = 5.dp)
+                    .padding(horizontal = 10.dp, vertical = 4.dp)
             ) {
                 Text(
-                    text = if (pureDsdMode) "PURE DIRECT" else "PROCESSED",
-                    color = if (pureDsdMode) SignatureGold else BrushedSilver,
+                    text = if (pureDsdMode) "PURE" else "PROCESSED",
+                    color = if (pureDsdMode) ChampagneGold else ColdSilver,
                     fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
+                    fontWeight = FontWeight.SemiBold,
                     fontFamily = FontFamily.Monospace
                 )
             }
         }
 
-        // Nội dung cuộn 4 Section
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(20.dp)
+                .padding(horizontal = 20.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp)
         ) {
-            // =========================================================================
-            // SECTION 1: SOUND MODE
-            // =========================================================================
+            // 1. SOUND MODE
             AudioLabSectionCard(title = "SOUND MODE") {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1886,14 +2234,14 @@ fun SignatureAudioLabScreen(
                     Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
                         Text(
                             text = "Pure DSD Mode",
-                            color = TextPrimary,
+                            color = TextPure,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Medium
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
                             text = "Bỏ qua toàn bộ DSP, nghe trung tính",
-                            color = TextSecondary,
+                            color = TextMuted,
                             fontSize = 12.sp
                         )
                     }
@@ -1901,130 +2249,119 @@ fun SignatureAudioLabScreen(
                         checked = pureDsdMode,
                         onCheckedChange = onPureDsdToggle,
                         colors = SwitchDefaults.colors(
-                            checkedThumbColor = BgDeepBlack,
-                            checkedTrackColor = SignatureGold,
-                            uncheckedThumbColor = BrushedSilver,
-                            uncheckedTrackColor = SurfaceDark
+                            checkedThumbColor = WalkmanBlack,
+                            checkedTrackColor = ChampagneGold,
+                            uncheckedThumbColor = ColdSilver,
+                            uncheckedTrackColor = ChassisDark
                         )
                     )
                 }
 
                 Spacer(modifier = Modifier.height(10.dp))
-                HorizontalDivider(color = BorderSubtle)
+                HorizontalDivider(color = BezelBorder)
                 Spacer(modifier = Modifier.height(10.dp))
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
+                    Text("Signal Path Status", color = ColdSilver, fontSize = 12.sp)
                     Text(
-                        text = "Trạng thái đường truyền",
-                        color = BrushedSilver,
-                        fontSize = 12.sp
-                    )
-                    Text(
-                        text = if (pureDsdMode) "Pure (Bit-Perfect Bypass)" else "Processed (Sony DSP Active)",
-                        color = if (pureDsdMode) SignatureGoldLight else TextPrimary,
+                        text = if (pureDsdMode) "Pure Direct" else "DSP Processed",
+                        color = if (pureDsdMode) ChampagneGold else TextPure,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium
                     )
                 }
             }
 
-            // =========================================================================
-            // SECTION 2: PROCESSING
-            // =========================================================================
+            // 2. PROCESSING
             AudioLabSectionCard(title = "PROCESSING") {
-                // Master Pre-Amp & Channel Balance luôn hoạt động kể cả trong Pure DSD Mode
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("Master Output Level", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                        Text("${(masterVol * 100).roundToInt()}%", color = SignatureGold, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        Text("Master Output Gain", color = TextPure, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Text("${(masterVol * 100).roundToInt()}%", color = ChampagneGold, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
                     }
                     Slider(
                         value = masterVol.coerceIn(0f, 1f),
                         onValueChange = onMasterVolChange,
                         colors = SliderDefaults.colors(
-                            thumbColor = SignatureGold,
-                            activeTrackColor = SignatureGold,
-                            inactiveTrackColor = BorderSubtle
+                            thumbColor = ChampagneGold,
+                            activeTrackColor = ChampagneGold,
+                            inactiveTrackColor = BezelBorder
                         )
                     )
                 }
 
-                Spacer(modifier = Modifier.height(6.dp))
+                Spacer(modifier = Modifier.height(4.dp))
 
-                // Channel Balance (L - R)
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("Channel Balance", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                        val balLabel = when {
+                        Text("Channel Balance (L - R)", color = TextPure, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        val balText = when {
                             channelBalance < -0.02f -> "L +${(-channelBalance * 100).roundToInt()}%"
                             channelBalance > 0.02f -> "R +${(channelBalance * 100).roundToInt()}%"
                             else -> "Center"
                         }
                         Text(
-                            text = balLabel,
-                            color = BrushedSilver,
+                            text = balText,
+                            color = ColdSilver,
                             fontSize = 12.sp,
                             fontFamily = FontFamily.Monospace,
                             modifier = Modifier.clickable { onBalanceChange(0f) }
                         )
                     }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text("L", color = TextSecondary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        Text("L", color = TextMuted, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
                         Slider(
                             value = channelBalance.coerceIn(-0.5f, 0.5f),
                             onValueChange = onBalanceChange,
                             valueRange = -0.5f..0.5f,
                             modifier = Modifier.weight(1f),
                             colors = SliderDefaults.colors(
-                                thumbColor = BrushedSilver,
-                                activeTrackColor = SignatureGold,
-                                inactiveTrackColor = BorderSubtle
+                                thumbColor = ColdSilver,
+                                activeTrackColor = ChampagneGold,
+                                inactiveTrackColor = BezelBorder
                             )
                         )
-                        Text("R", color = TextSecondary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        Text("R", color = TextMuted, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
                     }
                 }
 
-                // Các thành phần DSP bị bỏ qua khi bật Pure DSD Mode
                 Column(
-                    modifier = Modifier.alpha(if (pureDsdMode) 0.40f else 1.0f),
+                    modifier = Modifier.alpha(if (pureDsdMode) 0.38f else 1.0f),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    HorizontalDivider(color = BorderSubtle)
+                    HorizontalDivider(color = BezelBorder)
 
-                    // Mega Bass Slider
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("Mega Bass", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                            Text("+${(megaBass * 10).roundToInt()} dB", color = SignatureGold, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                            Text("Mega Bass", color = TextPure, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                            Text("+${(megaBass * 10).roundToInt()} dB", color = ChampagneGold, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
                         }
                         Slider(
                             value = megaBass.coerceIn(0f, 1f),
                             onValueChange = { if (!pureDsdMode) onBassChange(it) },
                             enabled = !pureDsdMode,
                             colors = SliderDefaults.colors(
-                                thumbColor = SignatureGold,
-                                activeTrackColor = SignatureGold,
-                                inactiveTrackColor = BorderSubtle
+                                thumbColor = ChampagneGold,
+                                activeTrackColor = ChampagneGold,
+                                inactiveTrackColor = BezelBorder
                             )
                         )
                     }
 
                     AudioLabSwitchRow(
-                        title = "ClearAudio+",
-                        subtitle = "Mở rộng không gian âm trường 3D Stereo",
+                        title = "Clear Audio",
+                        subtitle = "Tối ưu độ tách bạch và không gian Stereo",
                         checked = clearAudio,
                         enabled = !pureDsdMode,
                         onCheckedChange = onClearAudioToggle
                     )
 
                     AudioLabSwitchRow(
-                        title = "DSEE HX",
-                        subtitle = "Tái tạo hài âm dải tần số cao",
+                        title = "DSEE",
+                        subtitle = "Khôi phục dải âm tần số cao",
                         checked = dsee,
                         enabled = !pureDsdMode,
                         onCheckedChange = onDseeToggle
@@ -2032,15 +2369,15 @@ fun SignatureAudioLabScreen(
 
                     AudioLabSwitchRow(
                         title = "Vinyl Processor",
-                        subtitle = "Mô phỏng cộng hưởng ấm áp của kim đĩa than",
+                        subtitle = "Tái tạo chất âm ấm mộc của đĩa than",
                         checked = vinyl,
                         enabled = !pureDsdMode,
                         onCheckedChange = onVinylToggle
                     )
 
                     AudioLabSwitchRow(
-                        title = "Phase Invert (180°)",
-                        subtitle = "Đảo cực pha tín hiệu đầu ra cho DAC rời",
+                        title = "Phase Invert",
+                        subtitle = "Đảo cực pha âm thanh 180°",
                         checked = phaseInvert,
                         enabled = !pureDsdMode,
                         onCheckedChange = onPhaseInvertToggle
@@ -2048,16 +2385,14 @@ fun SignatureAudioLabScreen(
                 }
             }
 
-            // =========================================================================
-            // SECTION 3: EQUALIZER (10-BAND & RESET)
-            // =========================================================================
+            // 3. EQUALIZER (10-BAND)
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .alpha(if (pureDsdMode) 0.40f else 1.0f)
-                    .clip(RoundedCornerShape(18.dp))
-                    .background(SurfaceCard)
-                    .border(1.dp, BorderSubtle, RoundedCornerShape(18.dp))
+                    .alpha(if (pureDsdMode) 0.38f else 1.0f)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(PanelSurface)
+                    .border(1.dp, BezelBorder, RoundedCornerShape(16.dp))
                     .padding(18.dp)
             ) {
                 Row(
@@ -2067,9 +2402,9 @@ fun SignatureAudioLabScreen(
                 ) {
                     Text(
                         text = "EQUALIZER (10-BAND)",
-                        color = SignatureGold,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
+                        color = ChampagneGold,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
                         letterSpacing = 1.2.sp
                     )
                     TextButton(
@@ -2078,11 +2413,11 @@ fun SignatureAudioLabScreen(
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                         modifier = Modifier.height(28.dp)
                     ) {
-                        Text("Reset EQ", color = BrushedSilver, fontSize = 12.sp)
+                        Text("Reset EQ", color = ColdSilver, fontSize = 12.sp)
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
 
                 freqLabels.forEachIndexed { idx, freq ->
                     val gainVal = eq10Bands.getOrElse(idx) { 0f }.coerceIn(-8f, 8f)
@@ -2094,7 +2429,7 @@ fun SignatureAudioLabScreen(
                     ) {
                         Text(
                             text = "${freq}Hz",
-                            color = BrushedSilver,
+                            color = ColdSilver,
                             fontSize = 11.sp,
                             fontFamily = FontFamily.Monospace,
                             modifier = Modifier.width(46.dp)
@@ -2106,14 +2441,14 @@ fun SignatureAudioLabScreen(
                             enabled = !pureDsdMode,
                             modifier = Modifier.weight(1f),
                             colors = SliderDefaults.colors(
-                                thumbColor = SignatureGold,
-                                activeTrackColor = SignatureGold,
-                                inactiveTrackColor = BorderSubtle
+                                thumbColor = ChampagneGold,
+                                activeTrackColor = ChampagneGold,
+                                inactiveTrackColor = BezelBorder
                             )
                         )
                         Text(
                             text = "%+.1f".format(gainVal),
-                            color = if (gainVal != 0f) SignatureGoldLight else TextSecondary,
+                            color = if (gainVal != 0f) ChampagneGold else TextMuted,
                             fontSize = 11.sp,
                             fontFamily = FontFamily.Monospace,
                             textAlign = TextAlign.End,
@@ -2123,20 +2458,17 @@ fun SignatureAudioLabScreen(
                 }
             }
 
-            // =========================================================================
-            // SECTION 4: OTHER (PLAYBACK TOOLS, FILE SPECS & VERSION INFO)
-            // =========================================================================
+            // 4. OTHER
             AudioLabSectionCard(title = "OTHER") {
-                // Hẹn giờ ngủ (Sleep Timer)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Sleep Timer (Fade-Out)", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Text("Sleep Timer", color = TextPure, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                     Text(
                         text = if (sleepTimerRemainingSec > 0) "${sleepTimerRemainingSec / 60}m ${sleepTimerRemainingSec % 60}s" else "Off",
-                        color = if (sleepTimerRemainingSec > 0) SignatureGold else TextSecondary,
+                        color = if (sleepTimerRemainingSec > 0) ChampagneGold else TextMuted,
                         fontSize = 12.sp,
                         fontFamily = FontFamily.Monospace
                     )
@@ -2149,26 +2481,25 @@ fun SignatureAudioLabScreen(
                         OutlinedButton(
                             onClick = { onSetSleepMinutes(mins) },
                             modifier = Modifier.weight(1f).height(32.dp),
-                            border = BorderStroke(1.dp, if (active) SignatureGold else BorderSubtle),
+                            border = BorderStroke(1.dp, if (active) ChampagneGold else BezelBorder),
                             contentPadding = PaddingValues(0.dp)
                         ) {
-                            Text(label, fontSize = 11.sp, color = if (active) SignatureGold else BrushedSilver)
+                            Text(label, fontSize = 11.sp, color = if (active) ChampagneGold else ColdSilver)
                         }
                     }
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
-                HorizontalDivider(color = BorderSubtle)
+                HorizontalDivider(color = BezelBorder)
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // Tốc độ phát (Playback Speed)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Playback Speed", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                    Text("${"%.2f".format(tapeSpeed)}x", color = BrushedSilver, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                    Text("Playback Speed", color = TextPure, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Text("${"%.2f".format(tapeSpeed)}x", color = ColdSilver, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
                 }
                 Spacer(modifier = Modifier.height(6.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -2177,10 +2508,10 @@ fun SignatureAudioLabScreen(
                         OutlinedButton(
                             onClick = { onTapeSpeedChange(spd) },
                             modifier = Modifier.weight(1f).height(32.dp),
-                            border = BorderStroke(1.dp, if (selected) SignatureGold else BorderSubtle),
+                            border = BorderStroke(1.dp, if (selected) ChampagneGold else BezelBorder),
                             contentPadding = PaddingValues(0.dp)
                         ) {
-                            Text("${spd}x", fontSize = 11.sp, color = if (selected) SignatureGold else BrushedSilver)
+                            Text("${spd}x", fontSize = 11.sp, color = if (selected) ChampagneGold else ColdSilver)
                         }
                     }
                 }
@@ -2199,22 +2530,21 @@ fun SignatureAudioLabScreen(
 
                 AudioLabSwitchRow(
                     title = "Keep Screen On",
-                    subtitle = "Giữ sáng màn hình khi đặt trên bàn làm việc",
+                    subtitle = "Giữ sáng màn hình khi đang mở ứng dụng",
                     checked = keepScreenOn,
                     enabled = true,
                     onCheckedChange = onKeepScreenOnToggle
                 )
 
                 Spacer(modifier = Modifier.height(12.dp))
-                HorizontalDivider(color = BorderSubtle)
+                HorizontalDivider(color = BezelBorder)
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // Thông tin thiết bị đầu ra & File đang phát
                 AudioLabInfoRow("Output Device", audioOutput.deviceName)
                 AudioLabInfoRow("Audio Codec", audioOutput.codecEstimate)
-                AudioLabInfoRow("Current Track", currentTrack?.title ?: "None")
-                AudioLabInfoRow("Stream Specs", "${currentTrack?.formatName ?: "PCM"} • $currentSampleRate • $currentBitrate kbps")
-                AudioLabInfoRow("App Version", "Walkman Signature Edition • v10.0 (128-Tap FIR)")
+                AudioLabInfoRow("Playing File", currentTrack?.title ?: "None")
+                AudioLabInfoRow("Stream Format", "${currentTrack?.formatName ?: "PCM"} • $currentSampleRate • $currentBitrate kbps")
+                AudioLabInfoRow("App Version", "Walkman Signature Edition • v10.2")
             }
 
             Spacer(modifier = Modifier.height(24.dp))
@@ -2230,16 +2560,16 @@ fun AudioLabSectionCard(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
-            .background(SurfaceCard)
-            .border(1.dp, BorderSubtle, RoundedCornerShape(18.dp))
+            .clip(RoundedCornerShape(16.dp))
+            .background(PanelSurface)
+            .border(1.dp, BezelBorder, RoundedCornerShape(16.dp))
             .padding(18.dp)
     ) {
         Text(
             text = title,
-            color = SignatureGold,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Bold,
+            color = ChampagneGold,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
             letterSpacing = 1.2.sp
         )
         Spacer(modifier = Modifier.height(14.dp))
@@ -2261,18 +2591,18 @@ fun AudioLabSwitchRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-            Text(text = title, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-            Text(text = subtitle, color = TextSecondary, fontSize = 11.sp)
+            Text(text = title, color = TextPure, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+            Text(text = subtitle, color = TextMuted, fontSize = 11.sp)
         }
         Switch(
             checked = checked,
             onCheckedChange = onCheckedChange,
             enabled = enabled,
             colors = SwitchDefaults.colors(
-                checkedThumbColor = BgDeepBlack,
-                checkedTrackColor = SignatureGold,
-                uncheckedThumbColor = BrushedSilver,
-                uncheckedTrackColor = SurfaceDark
+                checkedThumbColor = WalkmanBlack,
+                checkedTrackColor = ChampagneGold,
+                uncheckedThumbColor = ColdSilver,
+                uncheckedTrackColor = ChassisDark
             )
         )
     }
@@ -2286,10 +2616,10 @@ fun AudioLabInfoRow(label: String, value: String) {
             .padding(vertical = 4.dp),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Text(text = label, color = TextSecondary, fontSize = 12.sp)
+        Text(text = label, color = TextMuted, fontSize = 12.sp)
         Text(
             text = value,
-            color = BrushedSilver,
+            color = ColdSilver,
             fontSize = 12.sp,
             fontWeight = FontWeight.Medium,
             maxLines = 1,
@@ -2300,11 +2630,12 @@ fun AudioLabInfoRow(label: String, value: String) {
 }
 
 /**
- * 3. MÀN HÌNH THƯ VIỆN NHẠC (ĐỒNG BỘ PHONG CÁCH TỐI GIẢN SIGNATURE)
+ * =============================================================================================
+ * 3. MÀN HÌNH THƯ VIỆN NHẠC (MUSIC LIBRARY)
+ * =============================================================================================
  */
 @Composable
 fun SignatureLibraryScreen(
-    context: Context,
     tracks: List<AudioTrack>,
     favoriteTitles: Set<String>,
     currentIndex: Int,
@@ -2332,10 +2663,9 @@ fun SignatureLibraryScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(BgDeepBlack)
+            .background(WalkmanBlack)
             .padding(horizontal = 20.dp, vertical = 16.dp)
     ) {
-        // Header Thư viện
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -2349,57 +2679,61 @@ fun SignatureLibraryScreen(
                     onClick = onBackToPlayer,
                     modifier = Modifier
                         .size(38.dp)
-                        .clip(CircleShape)
-                        .background(SurfaceDark)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(PanelSurface)
+                        .border(1.dp, BezelBorder, RoundedCornerShape(10.dp))
                 ) {
-                    Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = TextPrimary, modifier = Modifier.size(18.dp))
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back",
+                        tint = TextPure,
+                        modifier = Modifier.size(18.dp)
+                    )
                 }
                 Column {
-                    Text("Music Library", color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                    Text("${tracks.size} tracks available", color = TextSecondary, fontSize = 11.sp)
+                    Text("Music Library", color = TextPure, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                    Text("${tracks.size} tracks", color = TextMuted, fontSize = 11.sp)
                 }
             }
 
             if (tracks.isNotEmpty()) {
                 TextButton(onClick = onClearSaved) {
-                    Text("Clear", color = TextSecondary, fontSize = 12.sp)
+                    Text("Clear", color = TextMuted, fontSize = 12.sp)
                 }
             }
         }
 
         Spacer(modifier = Modifier.height(14.dp))
 
-        // Các nút nạp nhạc gọn gàng
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(
                 onClick = onAutoScan,
                 modifier = Modifier.weight(1f).height(36.dp),
-                border = BorderStroke(1.dp, SignatureGold.copy(alpha = 0.5f)),
+                border = BorderStroke(1.dp, ChampagneGoldDim),
                 contentPadding = PaddingValues(0.dp)
             ) {
-                Text("Auto Scan", fontSize = 11.sp, color = SignatureGoldLight)
+                Text("Auto Scan", fontSize = 11.sp, color = ChampagneGold)
             }
             OutlinedButton(
                 onClick = onPickFolder,
                 modifier = Modifier.weight(1f).height(36.dp),
-                border = BorderStroke(1.dp, BorderSubtle),
+                border = BorderStroke(1.dp, BezelBorder),
                 contentPadding = PaddingValues(0.dp)
             ) {
-                Text("Add Folder", fontSize = 11.sp, color = TextPrimary)
+                Text("Add Folder", fontSize = 11.sp, color = TextPure)
             }
             OutlinedButton(
                 onClick = onPickFiles,
                 modifier = Modifier.weight(1f).height(36.dp),
-                border = BorderStroke(1.dp, BorderSubtle),
+                border = BorderStroke(1.dp, BezelBorder),
                 contentPadding = PaddingValues(0.dp)
             ) {
-                Text("+ Files", fontSize = 11.sp, color = TextPrimary)
+                Text("+ Files", fontSize = 11.sp, color = TextPure)
             }
         }
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // Phân loại: All | Favorites | Folders
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             val tabs = listOf(
                 "All (${tracks.size})",
@@ -2413,7 +2747,7 @@ fun SignatureLibraryScreen(
                         .weight(1f)
                         .height(34.dp)
                         .clip(RoundedCornerShape(8.dp))
-                        .background(if (active) SignatureGold else SurfaceCard)
+                        .background(if (active) ChampagneGold else PanelSurface)
                         .clickable {
                             subTab = idx
                             selectedFolderFilter = null
@@ -2424,7 +2758,7 @@ fun SignatureLibraryScreen(
                         text = label,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Medium,
-                        color = if (active) BgDeepBlack else BrushedSilver
+                        color = if (active) WalkmanBlack else ColdSilver
                     )
                 }
             }
@@ -2440,22 +2774,22 @@ fun SignatureLibraryScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(12.dp))
-                            .background(SurfaceCard)
-                            .border(1.dp, BorderSubtle, RoundedCornerShape(12.dp))
+                            .background(PanelSurface)
+                            .border(1.dp, BezelBorder, RoundedCornerShape(12.dp))
                             .clickable { selectedFolderFilter = entry.key }
                             .padding(14.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Folder, null, tint = SignatureGold, modifier = Modifier.size(24.dp))
+                            Icon(Icons.Default.Folder, null, tint = ChampagneGold, modifier = Modifier.size(22.dp))
                             Spacer(modifier = Modifier.width(12.dp))
                             Column {
-                                Text(entry.key, color = TextPrimary, fontWeight = FontWeight.Medium, fontSize = 14.sp)
-                                Text("${entry.value.size} tracks", color = TextSecondary, fontSize = 11.sp)
+                                Text(entry.key, color = TextPure, fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                                Text("${entry.value.size} tracks", color = TextMuted, fontSize = 11.sp)
                             }
                         }
-                        Icon(Icons.Default.ChevronRight, null, tint = TextSecondary)
+                        Icon(Icons.Default.ChevronRight, null, tint = TextMuted)
                     }
                 }
             }
@@ -2467,7 +2801,7 @@ fun SignatureLibraryScreen(
                 ) {
                     Text(
                         text = "← Folders / $selectedFolderFilter",
-                        color = SignatureGold,
+                        color = ChampagneGold,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium,
                         modifier = Modifier.clickable { selectedFolderFilter = null }
@@ -2476,17 +2810,17 @@ fun SignatureLibraryScreen(
             }
 
             LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                itemsIndexed(displayedTracks) { index, track ->
+                itemsIndexed(displayedTracks) { _, track ->
                     val isFav = favoriteTitles.contains(track.title)
                     val isPlayingTrack = tracks.getOrNull(currentIndex)?.id == track.id
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(12.dp))
-                            .background(if (isPlayingTrack) Color(0xFF1E1B12) else SurfaceCard)
+                            .background(if (isPlayingTrack) ElevatedMetallic else PanelSurface)
                             .border(
                                 width = 1.dp,
-                                color = if (isPlayingTrack) SignatureGold.copy(alpha = 0.6f) else Color.Transparent,
+                                color = if (isPlayingTrack) ChampagneGoldDim else Color.Transparent,
                                 shape = RoundedCornerShape(12.dp)
                             )
                             .clickable { onSelectTrack(track) }
@@ -2498,7 +2832,7 @@ fun SignatureLibraryScreen(
                             Text(
                                 text = track.title,
                                 fontWeight = if (isPlayingTrack) FontWeight.SemiBold else FontWeight.Normal,
-                                color = if (isPlayingTrack) SignatureGoldLight else TextPrimary,
+                                color = if (isPlayingTrack) ChampagneGold else TextPure,
                                 fontSize = 14.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
@@ -2507,7 +2841,7 @@ fun SignatureLibraryScreen(
                             val cleanArtist = track.artist.takeIf { !it.contains("<unknown>", true) } ?: track.folderInfo
                             Text(
                                 text = "$cleanArtist • ${track.formatName}",
-                                color = TextSecondary,
+                                color = TextMuted,
                                 fontSize = 11.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
@@ -2520,7 +2854,7 @@ fun SignatureLibraryScreen(
                             Icon(
                                 imageVector = if (isFav) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                                 contentDescription = "Favorite",
-                                tint = if (isFav) SignatureGold else TextSecondary,
+                                tint = if (isFav) ChampagneGold else TextMuted,
                                 modifier = Modifier.size(18.dp)
                             )
                         }

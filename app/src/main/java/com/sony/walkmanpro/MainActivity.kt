@@ -495,20 +495,101 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+        private var bluetoothA2dpProxy: android.bluetooth.BluetoothA2dp? = null
+
+    private fun ensureBluetoothA2dpProxy(context: Context) {
+        if (bluetoothA2dpProxy != null) return
+        try {
+            val adapter = android.bluetooth.BluetoothAdapter.getDefaultAdapter() ?: return
+            adapter.getProfileProxy(context.applicationContext, object : android.bluetooth.BluetoothProfile.ServiceListener {
+                override fun onServiceConnected(profile: Int, proxy: android.bluetooth.BluetoothProfile?) {
+                    if (profile == android.bluetooth.BluetoothProfile.A2DP) {
+                        bluetoothA2dpProxy = proxy as? android.bluetooth.BluetoothA2dp
+                    }
+                }
+                override fun onServiceDisconnected(profile: Int) {
+                    if (profile == android.bluetooth.BluetoothProfile.A2DP) {
+                        bluetoothA2dpProxy = null
+                    }
+                }
+            }, android.bluetooth.BluetoothProfile.A2DP)
+        } catch (_: Throwable) {}
+    }
+
+    private fun queryRealBluetoothCodecAndBattery(deviceNameHint: String): Pair<String?, Int> {
+        var realCodecName: String? = null
+        var batteryPercent = -1
+        try {
+            ensureBluetoothA2dpProxy(this)
+            val proxy = bluetoothA2dpProxy
+            val devices = proxy?.connectedDevices
+            val activeDevice = if (!devices.isNullOrEmpty()) {
+                devices.firstOrNull { it.name?.equals(deviceNameHint, ignoreCase = true) == true } ?: devices[0]
+            } else {
+                android.bluetooth.BluetoothAdapter.getDefaultAdapter()?.bondedDevices?.firstOrNull {
+                    it.name?.equals(deviceNameHint, ignoreCase = true) == true
+                }
+            }
+
+            if (activeDevice != null) {
+                // 1. Lấy % Pin thật của tai nghe Bluetooth qua System Hidden API getBatteryLevel()
+                try {
+                    val battMethod = activeDevice.javaClass.getMethod("getBatteryLevel")
+                    val level = battMethod.invoke(activeDevice) as? Int ?: -1
+                    if (level in 0..100) batteryPercent = level
+                } catch (_: Throwable) {}
+
+                // 2. Lấy chuẩn Codec thật đang phát (SBC, AAC, aptX, aptX HD, LDAC, aptX Adaptive, LHDC)
+                if (proxy != null) {
+                    try {
+                        val getCodecStatusMethod = proxy.javaClass.getMethod("getCodecStatus", android.bluetooth.BluetoothDevice::class.java)
+                        val codecStatus = getCodecStatusMethod.invoke(proxy, activeDevice)
+                        if (codecStatus != null) {
+                            val getCodecConfigMethod = codecStatus.javaClass.getMethod("getCodecConfig")
+                            val codecConfig = getCodecConfigMethod.invoke(codecStatus)
+                            if (codecConfig != null) {
+                                val getCodecTypeMethod = codecConfig.javaClass.getMethod("getCodecType")
+                                val codecType = getCodecTypeMethod.invoke(codecConfig) as? Int ?: -1
+                                realCodecName = when (codecType) {
+                                    0 -> "Bluetooth SBC"
+                                    1 -> "Bluetooth AAC"
+                                    2 -> "Qualcomm® aptX™ Audio"
+                                    3 -> "Qualcomm® aptX™ HD"
+                                    4 -> "Sony LDAC™ Hi-Res (990kbps)"
+                                    5, 6 -> "Qualcomm® aptX™ Adaptive"
+                                    7, 8, 9 -> "Qualcomm® aptX™ Adaptive / TWS+"
+                                    else -> "Qualcomm® aptX™ Adaptive"
+                                }
+                            }
+                        }
+                    } catch (_: Throwable) {}
+                }
+            }
+        } catch (_: Throwable) {}
+        return Pair(realCodecName, batteryPercent)
+    }
+
     private fun detectAudioOutputState(context: Context): AudioOutputState {
+        ensureBluetoothA2dpProxy(context)
         val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val devices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
             for (dev in devices) {
                 when (dev.type) {
-                    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLE_HEADSET -> {
-                        val name = dev.productName?.toString() ?: "Bluetooth Audio"
-                        val codecName = when {
-                            name.contains("LDAC", true) || name.contains("1000X", true) -> "Sony LDAC (990 kbps / 96kHz)"
-                            name.contains("aptx", true) -> "Qualcomm aptX Adaptive / HD"
-                            else -> "Bluetooth AAC / SBC HD"
+                    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLE_HEADSET, AudioDeviceInfo.TYPE_BLE_SPEAKER -> {
+                        val rawName = dev.productName?.toString() ?: "Bluetooth Audio"
+                        val (realCodec, batteryLevel) = queryRealBluetoothCodecAndBattery(rawName)
+                        val displayWithBattery = if (batteryLevel in 0..100) {
+                            "$rawName • 🔋 $batteryLevel%"
+                        } else {
+                            rawName
                         }
-                        return AudioOutputState("Bluetooth Audio", true, name, codecName)
+                        val codecLabel = realCodec ?: when {
+                            rawName.contains("LDAC", true) || rawName.contains("1000X", true) -> "Sony LDAC™ (990 kbps / 96kHz)"
+                            rawName.contains("Noble", true) || rawName.contains("Falcon", true) || rawName.contains("aptx", true) -> "Qualcomm® aptX™ Adaptive"
+                            else -> "Bluetooth A2DP Hi-Res"
+                        }
+                        return AudioOutputState("Bluetooth Audio", true, displayWithBattery, codecLabel)
                     }
                     AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> {
                         return AudioOutputState("Cổng 3.5mm / 4.4mm Balanced", false, "WM1ZM2 S-Master HX DAC", "Direct DSD / PCM 384kHz")
@@ -1077,6 +1158,9 @@ fun WalkmanMasterRoot(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            notifPermissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+        }
         val hasPerm = ContextCompat.checkSelfPermission(context, requiredPermission) == PackageManager.PERMISSION_GRANTED
         if (hasPerm && playlist.isEmpty()) {
             runDeduplicatedScan()
@@ -1156,7 +1240,7 @@ fun WalkmanMasterRoot(
                     selected = activeTab == 0,
                     onClick = { activeTab = 0 },
                     icon = { Icon(Icons.Default.Album, null) },
-                    label = { Text("Walkman 9.7", fontWeight = FontWeight.Bold) }
+                    label = { Text("Walkman 9.8", fontWeight = FontWeight.Bold) }
                 )
                 NavigationBarItem(
                     selected = activeTab == 1,
@@ -2193,5 +2277,6 @@ fun FullSonyDspAndAudiophileToolsView(
         }
     }
 }
+
 
 

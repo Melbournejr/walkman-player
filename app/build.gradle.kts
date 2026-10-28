@@ -11,8 +11,8 @@ android {
         applicationId = "com.sony.walkmanpro"
         minSdk = 26
         targetSdk = 34
-        versionCode = 97
-        versionName = "9.7-StudioDSD2PCM-256Tap"
+        versionCode = 98
+        versionName = "9.8-TrueAptX-CrystalDSD"
     }
 
     signingConfigs {

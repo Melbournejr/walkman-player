@@ -25,7 +25,7 @@ import kotlin.math.tanh
  * - Xử lý chính xác thứ tự bit MSB-first (chuẩn Philips .DFF) và LSB-first (chuẩn Sony .DSF).
  * - Hoàn toàn không cấp phát bộ nhớ (Zero-Allocation) trong quá trình lọc thời gian thực.
  */
-class DsdFirFilter(isLsbFirst: Boolean, cutoffHz: Double = 24000.0, dsdSampleRate: Int = 2822400) {
+class DsdFirFilter(isLsbFirst: Boolean, cutoffHz: Double = 28000.0, dsdSampleRate: Int = 2822400) {
 
     companion object {
         const val NUM_TAPS = 128
@@ -233,6 +233,7 @@ class FiioDirectDsdEngine(
     @Volatile var durationMs: Int = 180000
         private set
     @Volatile var masterVolume: Float = 0.75f
+    @Volatile var pureDsdMode: Boolean = false
 
     private var workerThread: Thread? = null
     @Volatile private var stopRequested: Boolean = false
@@ -577,7 +578,7 @@ class FiioDirectDsdEngine(
             // 2. Khởi tạo bộ lọc FIR 128-Taps với tần số cắt 24kHz chuẩn SACD Book
             val firFilter = DsdFirFilter(
                 isLsbFirst = info.isLsbFirst,
-                cutoffHz = 24000.0,
+                cutoffHz = 28000.0,
                 dsdSampleRate = dsdFs
             )
 
@@ -740,43 +741,49 @@ class FiioDirectDsdEngine(
                         }
                     }
 
-                    // Lấy mẫu PCM 32-bit Float nguyên bản sau bộ lọc FIR 128-taps
-                    var left = stereoSampleScratch[0] * preGain
-                    var right = stereoSampleScratch[1] * preGain
+                    // Lấy mẫu PCM 32-bit Float nguyên bản sau bộ lọc FIR 128-taps và tăng gain +1.5dB (~1.19x)
+                    var left = stereoSampleScratch[0] * 1.19f * preGain
+                    var right = stereoSampleScratch[1] * 1.19f * preGain
 
-                    // Áp dụng chuỗi DSP 32-bit Float (MegaBass, EQ, ClearAudio+, DSEE HX, Vinyl)
-                    dspSubL += 0.025f * (left - dspSubL)
-                    dspSubR += 0.025f * (right - dspSubR)
-                    val highL = left - dspPrevL
-                    val highR = right - dspPrevR
-                    dspPrevL = left
-                    dspPrevR = right
-
-                    left += dspSubL * bassBoost + left * eqMid + highL * eqHigh
-                    right += dspSubR * bassBoost + right * eqMid + highR * eqHigh
-
-                    if (clearAudio) {
-                        val mid = (left + right) * 0.5f
-                        val side = (left - right) * 0.5f * 1.25f
-                        left = (mid + side) + dspSubL * 0.08f + highL * 0.06f
-                        right = (mid - side) + dspSubR * 0.08f + highR * 0.06f
-                    }
-                    if (dsee) {
-                        left += highL * 0.12f
-                        right += highR * 0.12f
-                    }
-                    if (vinyl) {
-                        dspVinylL += 0.35f * (left - dspVinylL)
-                        dspVinylR += 0.35f * (right - dspVinylR)
-                        left = tanh((dspVinylL * 0.65f + left * 0.35f + dspSubL * 0.10f) * 1.05f) * 0.92f
-                        right = tanh((dspVinylR * 0.65f + right * 0.35f + dspSubR * 0.10f) * 1.05f) * 0.92f
+                    if (pureDsdMode) {
+                        // Chế độ Pure DSD: Bỏ qua toàn bộ DSP (MegaBass, ClearAudio, DSEE, Vinyl, EQ, Phase), chỉ giữ Volume + Balance
+                        left = (left * leftPan).coerceIn(-1.0f, 1.0f)
+                        right = (right * rightPan).coerceIn(-1.0f, 1.0f)
                     } else {
-                        left = tanh(left) * 0.96f
-                        right = tanh(right) * 0.96f
-                    }
+                        // Áp dụng chuỗi DSP 32-bit Float (MegaBass, EQ, ClearAudio+, DSEE HX, Vinyl)
+                        dspSubL += 0.025f * (left - dspSubL)
+                        dspSubR += 0.025f * (right - dspSubR)
+                        val highL = left - dspPrevL
+                        val highR = right - dspPrevR
+                        dspPrevL = left
+                        dspPrevR = right
 
-                    left = (left * leftPan * phase).coerceIn(-1.0f, 1.0f)
-                    right = (right * rightPan * phase).coerceIn(-1.0f, 1.0f)
+                        left += dspSubL * bassBoost + left * eqMid + highL * eqHigh
+                        right += dspSubR * bassBoost + right * eqMid + highR * eqHigh
+
+                        if (clearAudio) {
+                            val mid = (left + right) * 0.5f
+                            val side = (left - right) * 0.5f * 1.25f
+                            left = (mid + side) + dspSubL * 0.08f + highL * 0.06f
+                            right = (mid - side) + dspSubR * 0.08f + highR * 0.06f
+                        }
+                        if (dsee) {
+                            left += highL * 0.12f
+                            right += highR * 0.12f
+                        }
+                        if (vinyl) {
+                            dspVinylL += 0.35f * (left - dspVinylL)
+                            dspVinylR += 0.35f * (right - dspVinylR)
+                            left = tanh((dspVinylL * 0.65f + left * 0.35f + dspSubL * 0.10f) * 1.05f) * 0.92f
+                            right = tanh((dspVinylR * 0.65f + right * 0.35f + dspSubR * 0.10f) * 1.05f) * 0.92f
+                        } else {
+                            left = tanh(left) * 0.96f
+                            right = tanh(right) * 0.96f
+                        }
+
+                        left = (left * leftPan * phase).coerceIn(-1.0f, 1.0f)
+                        right = (right * rightPan * phase).coerceIn(-1.0f, 1.0f)
+                    }
 
                     pcmFloatOutputBuffer[frame * 2] = left
                     pcmFloatOutputBuffer[frame * 2 + 1] = right
@@ -811,3 +818,4 @@ class FiioDirectDsdEngine(
         }
     }
 }
+

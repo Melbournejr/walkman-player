@@ -317,10 +317,10 @@ class FiioDirectDsdEngine(
         var skippedTotal = 0L
         while (rem > 0L && !stopRequested) {
             val step = rem.coerceAtMost(16384L).toInt()
-            val r = ins.read(scratch, 0, step)
-            if (r <= 0) break
-            rem -= r
-            skippedTotal += r
+            val got = readExact(ins, scratch, step)
+            if (got <= 0) break
+            rem -= got
+            skippedTotal += got
         }
         return skippedTotal
     }
@@ -654,7 +654,9 @@ class FiioDirectDsdEngine(
                 val clearAudio = dspProcessor.clearAudioEnabled
                 val dsee = dspProcessor.dseeEnabled
                 val vinyl = dspProcessor.vinylEnabled
-                val bal = dspProcessor.channelBalance
+                // Đảm bảo L/R cân bằng tuyệt đối 1.0f == 1.0f khi ở vị trí Center (Dead-zone +/- 0.03f)
+                val rawBal = dspProcessor.channelBalance
+                val bal = if (kotlin.math.abs(rawBal) < 0.03f) 0f else rawBal.coerceIn(-0.5f, 0.5f)
                 val leftPan = if (bal > 0f) (1f - bal).coerceIn(0f, 1f) else 1f
                 val rightPan = if (bal < 0f) (1f + bal).coerceIn(0f, 1f) else 1f
                 val phase = if (dspProcessor.phaseInvert) -1f else 1f
@@ -818,4 +820,5 @@ class FiioDirectDsdEngine(
         }
     }
 }
+
 

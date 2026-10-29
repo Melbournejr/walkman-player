@@ -70,8 +70,10 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
         val eqHighGain = ((eq10Gains[7] + eq10Gains[8] + eq10Gains[9]) / 3f) * 0.05f
         val totalBassBoost = (megaBassLevel * 0.55f) + eqLowGain
 
-        val leftPanGain = if (channelBalance > 0f) (1f - channelBalance).coerceIn(0f, 1f) else 1f
-        val rightPanGain = if (channelBalance < 0f) (1f + channelBalance).coerceIn(0f, 1f) else 1f
+        // Khóa tâm cân bằng tuyệt đối (Dead-zone +/- 0.03f) chống lệch âm lượng trái/phải
+        val cleanBal = if (kotlin.math.abs(channelBalance) < 0.03f) 0f else channelBalance.coerceIn(-0.5f, 0.5f)
+        val leftPanGain = if (cleanBal > 0f) (1f - cleanBal).coerceIn(0f, 1f) else 1f
+        val rightPanGain = if (cleanBal < 0f) (1f + cleanBal).coerceIn(0f, 1f) else 1f
         val phaseSign = if (phaseInvert) -1f else 1f
 
         while (inputBuffer.remaining() >= 4) {
@@ -370,3 +372,4 @@ class WalkmanMediaSessionService : MediaSessionService() {
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = null
 }
+

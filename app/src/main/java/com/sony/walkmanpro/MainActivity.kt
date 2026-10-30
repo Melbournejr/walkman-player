@@ -1773,8 +1773,7 @@ fun WalkmanSignatureNowPlayingScreen(
                     modifier = Modifier
                         .weight(0.34f)
                         .fillMaxHeight(),
-                    verticalArrangement = Arrangement.SpaceBetween,
-                    horizontalAlignment = Alignment.CenterHorizontally
+                    verticalArrangement = Arrangement.SpaceBetween
                 ) {
                     // Hàng nút công cụ: Library, Xoay dọc, Audio Lab
                     Row(
@@ -1823,8 +1822,7 @@ fun WalkmanSignatureNowPlayingScreen(
                             .clip(RoundedCornerShape(10.dp))
                             .background(Color(0xFF12151C))
                             .border(1.dp, Color(0xFF232834), RoundedCornerShape(10.dp))
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
+                            .padding(horizontal = 10.dp, vertical = 8.dp)
                     ) {
                         Text(
                             text = "WALKMAN SIGNATURE",
@@ -1879,8 +1877,7 @@ fun WalkmanSignatureNowPlayingScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 18.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.SpaceBetween,
-            horizontalAlignment = Alignment.CenterHorizontally
+            verticalArrangement = Arrangement.SpaceBetween
         ) {
             // 1. Thanh đỉnh máy: Nút Library | CASSETTE - COVER - MINIMAL | Nút Xoay Ngang | Nút Audio Lab
             Row(
@@ -2222,8 +2219,7 @@ fun EchoStyleCassetteDeckView(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalArrangement = Arrangement.SpaceBetween,
-            horizontalAlignment = Alignment.CenterHorizontally
+            verticalArrangement = Arrangement.SpaceBetween
         ) {
             // 1. THANH TRẠNG THÁI HUD PHÍA TRÊN (Giống hệt ảnh mẫu: 🔊 56 | 🎧 | 001/035 | FAST-PC | 🔀 | [NOR] | SD | 🔋)
             Row(
@@ -2520,8 +2516,7 @@ fun EchoStyleCassetteDeckView(
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(3.dp),
-                        modifier = Modifier.weight(1f),
-                        horizontalAlignment = Alignment.CenterHorizontally
+                        modifier = Modifier.weight(1f)
                     ) {
                         Icon(Icons.Default.Album, contentDescription = null, tint = Color.White, modifier = Modifier.size(12.dp))
                         Text(
@@ -2537,8 +2532,7 @@ fun EchoStyleCassetteDeckView(
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(3.dp),
-                        modifier = Modifier.weight(1f),
-                        horizontalAlignment = Alignment.End
+                        modifier = Modifier.weight(1f)
                     ) {
                         Icon(Icons.Default.Equalizer, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
                         Text(
@@ -2772,7 +2766,6 @@ fun SonySignatureMinimalFocusView(
             .background(ChassisDark)
             .border(1.dp, BezelBorder, RoundedCornerShape(20.dp))
             .padding(24.dp),
-        horizontalAlignment = Alignment.Start,
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         Row(
@@ -3079,8 +3072,7 @@ fun CassetteMechanicalKey(
 
         Column(
             modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.SpaceBetween,
-            horizontalAlignment = Alignment.CenterHorizontally
+            verticalArrangement = Arrangement.SpaceBetween
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -3575,7 +3567,7 @@ fun SignatureAudioLabScreen(
                 AudioLabInfoRow("Audio Codec", audioOutput.codecEstimate)
                 AudioLabInfoRow("Playing File", currentTrack?.title ?: "None")
                 AudioLabInfoRow("Stream Format", "${currentTrack?.formatName ?: "PCM"} • $currentSampleRate • $currentBitrate kbps")
-                AudioLabInfoRow("App Version", "Walkman 11.0.1")
+                AudioLabInfoRow("App Version", "Walkman 11.0.2")
             }
 
             Spacer(modifier = Modifier.height(24.dp))

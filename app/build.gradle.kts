@@ -8,8 +8,8 @@ plugins {
 // =========================================================================
 // PHIÊN BẢN 11.0.1 (Cải tiến sau, chỉ cần đổi hậu tố ở dòng này)
 // =========================================================================
-val walkmanVersion = "11.0.1"
-val walkmanVersionCode = 1101
+val walkmanVersion = "11.0.2"
+val walkmanVersionCode = 1102
 
 val fixedKeystoreFile = file("walkman-permanent.jks")
 if (!fixedKeystoreFile.exists()) {
@@ -92,3 +92,4 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
 }
+

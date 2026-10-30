@@ -88,10 +88,14 @@ import org.json.JSONObject
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
-private val DapChassisBlack = Color(0xFF0F1115)
-private val DapPanelDark = Color(0xFF161A22)
+private val DapChassisBlack = Color(0xFF0A0B0E)
+private val DapPanelDark = Color(0xFF151820)
 private val DapGlassScreen = Color(0xFF040507)
+private val PanelSurface = Color(0xFF171A22)
+private val ElevatedMetallic = Color(0xFF222733)
+private val BezelBorder = Color(0xFF2D3342)
 private val ChampagneGold = Color(0xFFC8B588)
+private val ChampagneGoldDim = Color(0xFF827350)
 private val EchoCrimsonRed = Color(0xFFE11D48)
 private val EchoCyanSpec = Color(0xFF38BDF8)
 private val ColdSilver = Color(0xFFA6B0BE)
@@ -947,9 +951,14 @@ object PlaylistStorage {
 
 fun formatTimeMs(ms: Int): String {
     val totalSec = (ms / 1000).coerceAtLeast(0)
-    val min = totalSec / 60
+    val hrs = totalSec / 3600
+    val min = (totalSec % 3600) / 60
     val sec = totalSec % 60
-    return "%d:%02d".format(min, sec)
+    return if (hrs > 0) {
+        "%d:%02d:%02d".format(hrs, min, sec)
+    } else {
+        "0:%02d:%02d".format(min, sec)
+    }
 }
 
 @Composable
@@ -1478,14 +1487,10 @@ fun SnowskyEchoNowPlayingScreen(
     onOpenLibrary: () -> Unit,
     onOpenAudioLab: () -> Unit
 ) {
-    val configuration = LocalConfiguration.current
-    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-
     val safeMaxDur = durMs.toFloat().coerceAtLeast(1f)
     val safeCurrPos = posMs.toFloat().coerceIn(0f, safeMaxDur)
     val progressFraction = (safeCurrPos / safeMaxDur).coerceIn(0f, 1f)
 
-    // Quán tính cuộn băng
     val targetAngularVelocity = if (isPlaying) 70f else 0f
     val smoothVelocity by animateFloatAsState(
         targetValue = targetAngularVelocity,
@@ -1533,19 +1538,19 @@ fun SnowskyEchoNowPlayingScreen(
         verticalArrangement = Arrangement.SpaceBetween,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Gờ đỉnh máy dap phần cứng (1 nút đỏ power + 3 gờ phím đen)
+        // Gờ đỉnh máy DAP phần cứng (1 nút đỏ power + các gờ phím đen + 3 nút chức năng nhỏ gọn)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 2.dp),
+                .padding(horizontal = 12.dp, vertical = 2.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.Bottom
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.Bottom) {
                 Box(
                     modifier = Modifier
-                        .width(36.dp)
-                        .height(6.dp)
+                        .width(38.dp)
+                        .height(7.dp)
                         .clip(RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp))
                         .background(EchoCrimsonRed)
                         .clickable { onPlayPause() }
@@ -1553,14 +1558,14 @@ fun SnowskyEchoNowPlayingScreen(
                 Box(
                     modifier = Modifier
                         .width(48.dp)
-                        .height(4.dp)
+                        .height(5.dp)
                         .clip(RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp))
                         .background(Color(0xFF282D38))
                 )
                 Box(
                     modifier = Modifier
-                        .width(32.dp)
-                        .height(4.dp)
+                        .width(34.dp)
+                        .height(5.dp)
                         .clip(RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp))
                         .background(Color(0xFF282D38))
                 )
@@ -1568,29 +1573,39 @@ fun SnowskyEchoNowPlayingScreen(
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(
-                    onClick = onToggleOrientation,
+                    onClick = onOpenLibrary,
                     modifier = Modifier
-                        .size(32.dp)
+                        .size(34.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .background(DapPanelDark)
                         .border(1.dp, Color(0xFF2E3442), RoundedCornerShape(8.dp))
                 ) {
-                    Icon(Icons.Default.ScreenRotation, contentDescription = "Rotate", tint = ChampagneGold, modifier = Modifier.size(15.dp))
+                    Icon(Icons.AutoMirrored.Filled.QueueMusic, contentDescription = "Library", tint = ColdSilver, modifier = Modifier.size(16.dp))
+                }
+                IconButton(
+                    onClick = onToggleOrientation,
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(DapPanelDark)
+                        .border(1.dp, Color(0xFF2E3442), RoundedCornerShape(8.dp))
+                ) {
+                    Icon(Icons.Default.ScreenRotation, contentDescription = "Rotate", tint = ColdSilver, modifier = Modifier.size(15.dp))
                 }
                 IconButton(
                     onClick = onOpenAudioLab,
                     modifier = Modifier
-                        .size(32.dp)
+                        .size(34.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .background(DapPanelDark)
                         .border(1.dp, Color(0xFF2E3442), RoundedCornerShape(8.dp))
                 ) {
-                    Icon(Icons.Default.Tune, contentDescription = "Audio Lab", tint = ChampagneGold, modifier = Modifier.size(15.dp))
+                    Icon(Icons.Default.Tune, contentDescription = "Audio Lab", tint = ChampagneGold, modifier = Modifier.size(16.dp))
                 }
             }
         }
 
-        // THÂN MÁY DAP TRUNG TÂM (MÀN HÌNH KÍNH ĐEN + CASSETTE 3D CHUẨN ẢNH MẪU)
+        // THÂN MÁY DAP TRUNG TÂM (MÀN HÌNH KÍNH ĐEN + CASSETTE 3D CHUẨN ẢNH MẪU SNOWSKY ECHO)
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1600,11 +1615,11 @@ fun SnowskyEchoNowPlayingScreen(
                 .clip(RoundedCornerShape(16.dp))
                 .background(
                     Brush.verticalGradient(
-                        listOf(Color(0xFF1D222D), Color(0xFF12151C), Color(0xFF090A0E))
+                        listOf(Color(0xFF222732), Color(0xFF161920), Color(0xFF0E1015))
                     )
                 )
-                .border(2.dp, Color(0xFF323846), RoundedCornerShape(16.dp))
-                .padding(10.dp),
+                .border(2.dp, Color(0xFF343B4A), RoundedCornerShape(16.dp))
+                .padding(12.dp),
             verticalArrangement = Arrangement.SpaceBetween,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
@@ -1615,228 +1630,334 @@ fun SnowskyEchoNowPlayingScreen(
                     .weight(1f)
                     .clip(RoundedCornerShape(10.dp))
                     .background(DapGlassScreen)
-                    .border(1.5.dp, Color(0xFF262B36), RoundedCornerShape(10.dp))
-                    .padding(8.dp)
+                    .border(2.dp, Color(0xFF252A34), RoundedCornerShape(10.dp))
+                    .padding(10.dp)
             ) {
-                // 4 ốc vít nhỏ ở 4 góc màn hình LCD
-                CassetteCornerScrew(Modifier.align(Alignment.TopStart).padding(3.dp))
-                CassetteCornerScrew(Modifier.align(Alignment.TopEnd).padding(3.dp))
-                CassetteCornerScrew(Modifier.align(Alignment.BottomStart).padding(3.dp))
-                CassetteCornerScrew(Modifier.align(Alignment.BottomEnd).padding(3.dp))
-
-                Column(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.SpaceBetween,
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    // 1. THANH TRẠNG THÁI HUD TRÊN MÀN HÌNH
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Icon(Icons.AutoMirrored.Filled.VolumeUp, null, tint = Color.White, modifier = Modifier.size(12.dp))
-                                Text("$masterVolumePercent", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-                            }
-                            Icon(Icons.Default.Headphones, null, tint = Color.White, modifier = Modifier.size(12.dp))
-                            Text(trackOrderStr, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace)
-                        }
-
-                        Text("FAST-PC", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                            Icon(Icons.Default.Shuffle, null, tint = Color.White.copy(alpha = 0.85f), modifier = Modifier.size(11.dp))
-                            Box(modifier = Modifier.border(1.dp, Color.White, RoundedCornerShape(2.dp)).padding(horizontal = 2.dp)) {
-                                Text(playMode.badgeCode, color = Color.White, fontSize = 7.5.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-                            }
-                            Text("${audioOutput.batteryPercent}%", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-                        }
-                    }
-
-                    // 2. TIÊU ĐỀ BĂNG TRÊN (BORN FOR MUSIC)
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth(0.88f)
-                            .clip(RoundedCornerShape(3.dp))
-                            .background(Color(0xFF1E222B))
-                            .padding(vertical = 1.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = trackTitle.uppercase(),
-                            color = Color(0xFFF1F5F9),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            letterSpacing = 1.2.sp
+                // Khung vỏ băng Cassette 3D bên trong màn hình kính
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color(0xFF2B303A), Color(0xFF1E222A), Color(0xFF15181E))
+                            )
                         )
-                    }
+                        .border(1.2.dp, Color(0xFF3D4454), RoundedCornerShape(8.dp))
+                ) {
+                    // 4 ốc vít nhỏ ở 4 góc mặt băng
+                    CassetteCornerScrew(Modifier.align(Alignment.TopStart).padding(5.dp))
+                    CassetteCornerScrew(Modifier.align(Alignment.TopEnd).padding(5.dp))
+                    CassetteCornerScrew(Modifier.align(Alignment.BottomStart).padding(5.dp))
+                    CassetteCornerScrew(Modifier.align(Alignment.BottomEnd).padding(5.dp))
 
-                    // 3. CỬA SỔ CASSETTE TRUNG TÂM VỚI 2 CUỘN BẢNG MÀU ĐỎ SÂU 3D CHUẨN ẢNH MẪU
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth(0.80f)
-                            .height(76.dp)
-                            .clip(RoundedCornerShape(38.dp))
-                            .background(Color(0xFF14171E))
-                            .border(1.8.dp, Color(0xFF333947), RoundedCornerShape(38.dp))
-                    ) {
-                        Canvas(modifier = Modifier.fillMaxSize()) {
-                            val w = size.width
-                            val h = size.height
-                            val centerY = h / 2f
-                            val leftX = w * 0.23f
-                            val rightX = w * 0.77f
-
-                            val maxSpool = h * 0.46f
-                            val minSpool = h * 0.22f
-                            val leftSpoolR = maxSpool - (maxSpool - minSpool) * progressFraction
-                            val rightSpoolR = minSpool + (maxSpool - minSpool) * progressFraction
-
-                            drawCircle(Color(0xFF0C0E12), leftSpoolR, Offset(leftX, centerY))
-                            drawCircle(Color(0xFF0C0E12), rightSpoolR, Offset(rightX, centerY))
-
-                            // Thước đo trung tâm với vạch đỏ chỉ báo
-                            val winL = w * 0.38f
-                            val winR = w * 0.62f
-                            val winT = h * 0.25f
-                            val winB = h * 0.75f
-
-                            drawRoundRect(Color(0xFF222630), Offset(winL, winT), Size(winR - winL, winB - winT), CornerRadius(3.dp.toPx()))
-                            drawRoundRect(Color(0xFF3E4656), Offset(winL, winT), Size(winR - winL, winB - winT), CornerRadius(3.dp.toPx()), style = Stroke(1.dp.toPx()))
-
-                            for (t in 0..10) {
-                                val tx = winL + 5.dp.toPx() + (winR - winL - 10.dp.toPx()) * (t.toFloat() / 10f)
-                                drawLine(Color.White.copy(alpha = 0.6f), Offset(tx, centerY - 4.dp.toPx()), Offset(tx, centerY + 4.dp.toPx()), 1.dp.toPx())
-                            }
-                            drawLine(EchoCrimsonRed, Offset((winL + winR) / 2f, winT + 2.dp.toPx()), Offset((winL + winR) / 2f, winB - 2.dp.toPx()), 1.6.dp.toPx())
-
-                            // 2 bánh răng màu Đỏ Crimson chuẩn ảnh mẫu
-                            val outerWheelR = h * 0.38f
-                            val redCoreR = outerWheelR * 0.60f
-                            val innerHoleR = outerWheelR * 0.22f
-
-                            listOf(leftX to leftReelAngle, rightX to rightReelAngle).forEach { (cx, angle) ->
-                                drawCircle(Color(0xFFD1D5DB), outerWheelR, Offset(cx, centerY))
-                                drawCircle(Color(0xFF161A22), outerWheelR * 0.84f, Offset(cx, centerY))
-                                drawCircle(EchoCrimsonRed, redCoreR, Offset(cx, centerY))
-
-                                rotate(angle, pivot = Offset(cx, centerY)) {
-                                    for (spoke in 0 until 6) {
-                                        rotate(spoke * 60f, pivot = Offset(cx, centerY)) {
-                                            drawLine(Color.White, Offset(cx, centerY - innerHoleR), Offset(cx, centerY - outerWheelR * 0.94f), 2.4.dp.toPx(), StrokeCap.Round)
-                                        }
-                                    }
-                                }
-
-                                drawCircle(Color(0xFF0A0C10), innerHoleR, Offset(cx, centerY))
-                                drawCircle(Color.White, innerHoleR, Offset(cx, centerY), style = Stroke(1.1.dp.toPx()))
-                            }
-                        }
-                    }
-
-                    // 4. HÀNG THÔNG TIN NGHỆ SĨ, ALBUM, THỜI GIAN & THANH TIẾN TRÌNH ĐỎ
                     Column(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
-                        verticalArrangement = Arrangement.spacedBy(1.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                                Icon(Icons.Default.PersonOutline, null, tint = Color.White, modifier = Modifier.size(11.dp))
-                                Text(trackArtistStr, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                            }
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                                Icon(Icons.Default.Album, null, tint = Color.White, modifier = Modifier.size(11.dp))
-                                Text(albumNameStr, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                            }
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                                Icon(Icons.Default.Equalizer, null, tint = Color.White, modifier = Modifier.size(11.dp))
-                                Text("HiFi", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                            }
-                        }
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text((if (isPlaying) "▶ " else "⏸ ") + formatTimeMs(posMs), color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-                            Text(formatTimeMs(durMs), color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-                        }
-
-                        Box(modifier = Modifier.fillMaxWidth().height(2.dp).background(Color.White.copy(alpha = 0.2f))) {
-                            Box(modifier = Modifier.fillMaxWidth(progressFraction).fillMaxHeight().background(EchoCrimsonRed))
-                        }
-                    }
-
-                    // 5. ĐẾ HÌNH THANG PHÍA DƯỚI (SPEC LINE + [SQ] + ❤️)
-                    Box(
                         modifier = Modifier
-                            .fillMaxWidth(0.86f)
-                            .height(26.dp)
-                            .clip(RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp))
-                            .background(Color(0xFF1B1E26))
-                            .border(1.dp, Color(0xFF313846), RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp))
-                            .padding(horizontal = 8.dp),
-                        contentAlignment = Alignment.Center
+                            .fillMaxSize()
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalArrangement = Arrangement.SpaceBetween,
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
+                        // 1. THANH TRẠNG THÁI HUD TRÊN MÀN HÌNH (🔊 56 | 🎧 | 001/035 | FAST-PC | 🔀 | [NOR] | SD | 🔋)
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 4.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(Color(0xFF0A0C10)).border(1.dp, Color(0xFF475569), CircleShape))
-
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text(
-                                    text = specLineStr,
-                                    color = EchoCyanSpec,
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    fontFamily = FontFamily.Monospace
-                                )
-                                Box(modifier = Modifier.border(1.dp, Color(0xFFA855F7), RoundedCornerShape(2.dp)).padding(horizontal = 2.dp)) {
-                                    Text("SQ", color = Color(0xFFD8B4FE), fontSize = 7.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Icon(Icons.AutoMirrored.Filled.VolumeUp, null, tint = Color.White, modifier = Modifier.size(13.dp))
+                                    Text("$masterVolumePercent", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
                                 }
                                 Icon(
-                                    imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                                    contentDescription = "Favorite",
-                                    tint = if (isFavorite) EchoCrimsonRed else Color.White.copy(alpha = 0.6f),
-                                    modifier = Modifier.size(12.dp).clickable { onToggleFavorite() }
+                                    imageVector = if (audioOutput.isBluetooth) Icons.Default.BluetoothAudio else Icons.Default.Headphones,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(13.dp)
                                 )
+                                Text(trackOrderStr, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace)
                             }
 
-                            Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(Color(0xFF0A0C10)).border(1.dp, Color(0xFF475569), CircleShape))
+                            Text("FAST-PC", color = Color.White, fontSize = 10.5.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Icon(Icons.Default.Shuffle, null, tint = Color.White.copy(alpha = 0.85f), modifier = Modifier.size(12.dp))
+                                Box(modifier = Modifier.border(1.dp, Color.White, RoundedCornerShape(2.dp)).padding(horizontal = 3.dp, vertical = 0.5.dp)) {
+                                    Text(playMode.badgeCode, color = Color.White, fontSize = 8.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                                }
+                                Icon(Icons.Default.SdStorage, null, tint = Color.White.copy(alpha = 0.85f), modifier = Modifier.size(12.dp))
+                                Box(modifier = Modifier.border(1.dp, Color.White, RoundedCornerShape(2.dp)).padding(horizontal = 3.dp, vertical = 0.5.dp)) {
+                                    Text("${audioOutput.batteryPercent}%", color = Color.White, fontSize = 8.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                                }
+                            }
                         }
+
+                        // 2. TIÊU ĐỀ BĂNG TRÊN (BORN FOR MUSIC)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(0.90f)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Color(0xFF20242D))
+                                .padding(horizontal = 8.dp, vertical = 2.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = trackTitleStr.uppercase(),
+                                color = Color(0xFFF8FAFC),
+                                fontSize = 13.5.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                letterSpacing = 1.2.sp
+                            )
+                        }
+
+                        // 3. CỬA SỔ CASSETTE TRUNG TÂM VỚI 2 CUỘN BĂNG MÀU ĐỎ SÂU 3D CHUẨN ẢNH MẪU
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(0.86f)
+                                .height(92.dp)
+                                .clip(RoundedCornerShape(46.dp))
+                                .background(Color(0xFF15181F))
+                                .border(2.dp, Color(0xFF3E4554), RoundedCornerShape(46.dp))
+                        ) {
+                            Canvas(modifier = Modifier.fillMaxSize()) {
+                                val w = size.width
+                                val h = size.height
+                                val centerY = h / 2f
+                                val leftX = w * 0.23f
+                                val rightX = w * 0.77f
+
+                                // Cuộn dây từ màu đen nâu co giãn thực tế theo tiến trình bài hát
+                                val maxSpool = h * 0.48f
+                                val minSpool = h * 0.23f
+                                val leftSpoolR = maxSpool - (maxSpool - minSpool) * progressFraction
+                                val rightSpoolR = minSpool + (maxSpool - minSpool) * progressFraction
+
+                                drawCircle(Color(0xFF0C0E12), leftSpoolR, Offset(leftX, centerY))
+                                drawCircle(Color(0xFF221C1A), leftSpoolR, Offset(leftX, centerY), style = Stroke(1.2.dp.toPx()))
+
+                                drawCircle(Color(0xFF0C0E12), rightSpoolR, Offset(rightX, centerY))
+                                drawCircle(Color(0xFF221C1A), rightSpoolR, Offset(rightX, centerY), style = Stroke(1.2.dp.toPx()))
+
+                                // Cửa sổ thước đo ở giữa với vạch đỏ trung tâm giống hệt ảnh mẫu
+                                val winL = w * 0.37f
+                                val winR = w * 0.63f
+                                val winT = h * 0.27f
+                                val winB = h * 0.73f
+
+                                drawRoundRect(Color(0xFF262B35), Offset(winL, winT), Size(winR - winL, winB - winT), CornerRadius(4.dp.toPx()))
+                                drawRoundRect(Color(0xFF475061), Offset(winL, winT), Size(winR - winL, winB - winT), CornerRadius(4.dp.toPx()), style = Stroke(1.2.dp.toPx()))
+
+                                for (t in 0..12) {
+                                    val tx = winL + 5.dp.toPx() + (winR - winL - 10.dp.toPx()) * (t.toFloat() / 12f)
+                                    val tickH = if (t % 3 == 0) 6.dp.toPx() else 3.5.dp.toPx()
+                                    drawLine(Color.White.copy(alpha = 0.65f), Offset(tx, centerY - tickH), Offset(tx, centerY + tickH), 1.dp.toPx())
+                                }
+                                drawLine(EchoCrimsonRed, Offset((winL + winR) / 2f, winT + 2.dp.toPx()), Offset((winL + winR) / 2f, winB - 2.dp.toPx()), 1.8.dp.toPx())
+
+                                // 2 Bánh răng bạc với lõi cánh quạt màu Đỏ Crimson sắc nét chuẩn ảnh mẫu
+                                val outerWheelR = h * 0.39f
+                                val redCoreR = outerWheelR * 0.62f
+                                val innerHoleR = outerWheelR * 0.23f
+
+                                listOf(leftX to leftReelAngle, rightX to rightReelAngle).forEach { (cx, angle) ->
+                                    drawCircle(Color(0xFFE2E8F0), outerWheelR, Offset(cx, centerY))
+                                    drawCircle(Color(0xFF1A1E26), outerWheelR * 0.84f, Offset(cx, centerY))
+                                    drawCircle(EchoCrimsonRed, redCoreR, Offset(cx, centerY))
+
+                                    rotate(angle, pivot = Offset(cx, centerY)) {
+                                        for (spoke in 0 until 6) {
+                                            rotate(spoke * 60f, pivot = Offset(cx, centerY)) {
+                                                drawLine(
+                                                    color = Color.White,
+                                                    start = Offset(cx, centerY - innerHoleR),
+                                                    end = Offset(cx, centerY - outerWheelR * 0.95f),
+                                                    strokeWidth = 2.6.dp.toPx(),
+                                                    cap = StrokeCap.Round
+                                                )
+                                                drawCircle(
+                                                    color = Color(0xFF0F1115),
+                                                    radius = 2.dp.toPx(),
+                                                    center = Offset(cx, centerY - outerWheelR * 0.74f)
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    drawCircle(Color(0xFF0E1015), innerHoleR, Offset(cx, centerY))
+                                    drawCircle(Color.White, innerHoleR, Offset(cx, centerY), style = Stroke(1.2.dp.toPx()))
+                                }
+                            }
+                        }
+
+                        // 4. HÀNG THÔNG TIN NGHỆ SĨ - ALBUM - HIFI & THỜI GIAN + THANH TIẾN TRÌNH ĐỎ NGANG MẶT BĂNG
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 6.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(Icons.Default.PersonOutline, null, tint = Color.White, modifier = Modifier.size(13.dp))
+                                    Text(trackArtistStr, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                    modifier = Modifier.weight(1f),
+                                    horizontalArrangement = Arrangement.Center
+                                ) {
+                                    Icon(Icons.Default.Album, null, tint = Color.White, modifier = Modifier.size(12.dp))
+                                    Text(albumNameStr, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                ) {
+                                    Icon(Icons.Default.Equalizer, null, tint = Color.White, modifier = Modifier.size(13.dp))
+                                    Text("HiFi", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text((if (isPlaying) "▶ " else "⏸ ") + formatTimeMs(posMs), color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                                Text(formatTimeMs(durMs), color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                            }
+
+                            // Thanh tiến trình màu đỏ mỏng trên mặt băng (Có thể kéo trực tiếp)
+                            Slider(
+                                value = safeCurrPos,
+                                onValueChange = { onSeek(it.toInt()) },
+                                valueRange = 0f..safeMaxDur,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(16.dp),
+                                colors = SliderDefaults.colors(
+                                    thumbColor = Color.White,
+                                    activeTrackColor = EchoCrimsonRed,
+                                    inactiveTrackColor = Color.White.copy(alpha = 0.22f)
+                                )
+                            )
+                        }
+
+                        // 5. ĐẾ HÌNH THANG PHÍA DƯỚI (WAV | 192kHz | 24bit | 1536kbps + [SQ] + ❤️)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(0.88f)
+                                .height(30.dp)
+                                .clip(RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp, bottomStart = 3.dp, bottomEnd = 3.dp))
+                                .background(Color(0xFF222631))
+                                .border(1.dp, Color(0xFF394052), RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp, bottomStart = 3.dp, bottomEnd = 3.dp))
+                                .padding(horizontal = 10.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(Color(0xFF090B0E)).border(1.dp, Color(0xFF475569), CircleShape))
+
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                                    Text(
+                                        text = specLineStr,
+                                        color = EchoCyanSpec,
+                                        fontSize = 9.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        fontFamily = FontFamily.Monospace,
+                                        maxLines = 1
+                                    )
+                                    Box(modifier = Modifier.border(1.dp, Color(0xFFA855F7), RoundedCornerShape(2.dp)).padding(horizontal = 3.dp, vertical = 0.5.dp)) {
+                                        Text(
+                                            text = if (specLineStr.contains("MHz", true)) "DSD" else "SQ",
+                                            color = Color(0xFFD8B4FE),
+                                            fontSize = 7.5.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            fontFamily = FontFamily.Monospace
+                                        )
+                                    }
+                                    Icon(
+                                        imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                        contentDescription = "Favorite",
+                                        tint = if (isFavorite) EchoCrimsonRed else Color.White.copy(alpha = 0.6f),
+                                        modifier = Modifier
+                                            .size(13.dp)
+                                            .clickable { onToggleFavorite() }
+                                    )
+                                }
+
+                                Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(Color(0xFF090B0E)).border(1.dp, Color(0xFF475569), CircleShape))
+                            }
+                        }
+                    }
+
+                    // Lớp phản quang chéo qua mặt kính máy nghe nhạc giống ảnh chụp thực tế
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val w = size.width
+                        val h = size.height
+                        val glarePath = Path().apply {
+                            moveTo(w * 0.42f, 0f)
+                            lineTo(w * 0.62f, 0f)
+                            lineTo(w * 0.46f, h)
+                            lineTo(w * 0.26f, h)
+                            close()
+                        }
+                        drawPath(
+                            path = glarePath,
+                            brush = Brush.linearGradient(
+                                colors = listOf(Color.White.copy(alpha = 0.05f), Color.White.copy(alpha = 0.01f))
+                            )
+                        )
                     }
                 }
             }
 
-            // Phần cằm máy vát kim loại khắc chìm SNOWSKY / ECHO
+            // Phần cằm máy vát kim loại khắc chìm SNOWSKY / ECHO giống ảnh mẫu
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                    .padding(top = 10.dp, start = 10.dp, end = 10.dp, bottom = 2.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("❄ SNOWSKY", color = Color(0xFF475569), fontSize = 10.sp, fontWeight = FontWeight.Black, letterSpacing = 1.5.sp)
-                Text("ECHO", color = Color(0xFF475569), fontSize = 10.sp, fontWeight = FontWeight.Black, letterSpacing = 2.sp)
+                Text(
+                    text = "❄ SNOWSKY",
+                    color = Color(0xFF475569),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Black,
+                    letterSpacing = 2.sp
+                )
+                Text(
+                    text = "ECHO",
+                    color = Color(0xFF475569),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Black,
+                    letterSpacing = 2.8.sp
+                )
             }
         }
 
-        Spacer(modifier = Modifier.height(6.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
-        // BÀN PHÍM CƠ HỌC PIANO-KEY (PHÍA DƯỚI CÙNG)
+        // BÀN PHÍM CƠ HỌC PIANO-KEY VẬT LÝ (PHÍA DƯỚI CÙNG)
         CassetteMechanicalPianoKeyDeck(
             isPlaying = isPlaying,
             playMode = playMode,
@@ -1846,5 +1967,1008 @@ fun SnowskyEchoNowPlayingScreen(
             onNext = onNext,
             onToggleRepeat = onToggleRepeat
         )
+    }
+}
+
+@Composable
+fun CassetteCornerScrew(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .size(8.dp)
+            .clip(CircleShape)
+            .background(
+                Brush.radialGradient(listOf(Color(0xFF94A3B8), Color(0xFF334155)))
+            )
+            .border(0.8.dp, Color(0xFF0F172A), CircleShape),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .width(4.dp)
+                .height(1.dp)
+                .background(Color(0xFF0F172A))
+        )
+    }
+}
+
+/**
+ * CỤM NÚT ẤN CƠ HỌC KIỂU ĐÀI CASSETTE THẬT (MECHANICAL PIANO-KEY TRANSPORT DECK)
+ */
+@Composable
+fun CassetteMechanicalPianoKeyDeck(
+    isPlaying: Boolean,
+    playMode: PlayMode,
+    onToggleShuffle: () -> Unit,
+    onPrev: () -> Unit,
+    onPlayPause: () -> Unit,
+    onNext: () -> Unit,
+    onToggleRepeat: () -> Unit
+) {
+    val isShuffle = playMode == PlayMode.SHUFFLE
+    val isRepeatOne = playMode == PlayMode.REPEAT_ONE
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(66.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color(0xFF050608))
+            .border(1.5.dp, Color(0xFF2E3442), RoundedCornerShape(14.dp))
+            .padding(5.dp),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        CassetteMechanicalKey(
+            modifier = Modifier.weight(0.85f),
+            label = "SHUF",
+            isLatched = isShuffle,
+            ledColor = ChampagneGold,
+            onClick = onToggleShuffle
+        ) {
+            Icon(
+                imageVector = Icons.Default.Shuffle,
+                contentDescription = "Shuffle",
+                tint = if (isShuffle) ChampagneGold else ColdSilver,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+
+        CassetteMechanicalKey(
+            modifier = Modifier.weight(1f),
+            label = "REW",
+            isLatched = false,
+            ledColor = null,
+            onClick = onPrev
+        ) {
+            Icon(
+                imageVector = Icons.Default.FastRewind,
+                contentDescription = "Previous",
+                tint = TextPure,
+                modifier = Modifier.size(22.dp)
+            )
+        }
+
+        CassetteMechanicalKey(
+            modifier = Modifier.weight(1.45f),
+            label = if (isPlaying) "PLAYING" else "PLAY",
+            isLatched = isPlaying,
+            isPrimaryGoldKey = true,
+            ledColor = if (isPlaying) LedPlayGreen else EchoCrimsonRed,
+            onClick = onPlayPause
+        ) {
+            Icon(
+                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                contentDescription = "Play/Pause",
+                tint = if (isPlaying) ChampagneGold else TextPure,
+                modifier = Modifier.size(26.dp)
+            )
+        }
+
+        CassetteMechanicalKey(
+            modifier = Modifier.weight(1f),
+            label = "FFWD",
+            isLatched = false,
+            ledColor = null,
+            onClick = onNext
+        ) {
+            Icon(
+                imageVector = Icons.Default.FastForward,
+                contentDescription = "Next",
+                tint = TextPure,
+                modifier = Modifier.size(22.dp)
+            )
+        }
+
+        CassetteMechanicalKey(
+            modifier = Modifier.weight(0.85f),
+            label = "RPT",
+            isLatched = isRepeatOne,
+            ledColor = ChampagneGold,
+            onClick = onToggleRepeat
+        ) {
+            Icon(
+                imageVector = if (isRepeatOne) Icons.Default.RepeatOne else Icons.Default.Repeat,
+                contentDescription = "Repeat",
+                tint = if (isRepeatOne) ChampagneGold else ColdSilver,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+    }
+}
+
+@Composable
+fun CassetteMechanicalKey(
+    modifier: Modifier = Modifier,
+    label: String,
+    isLatched: Boolean,
+    isPrimaryGoldKey: Boolean = false,
+    ledColor: Color?,
+    onClick: () -> Unit,
+    iconContent: @Composable () -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+
+    val isDepressed = isPressed || isLatched
+    val topInsetDp by animateDpAsState(
+        targetValue = if (isDepressed) 4.dp else 0.dp,
+        animationSpec = tween(durationMillis = 90),
+        label = "key_depress_offset"
+    )
+
+    val topSurfaceColors = when {
+        isDepressed && isPrimaryGoldKey -> listOf(Color(0xFF282318), Color(0xFF191610))
+        isDepressed -> listOf(Color(0xFF151820), Color(0xFF101218))
+        isPrimaryGoldKey -> listOf(Color(0xFF332D20), Color(0xFF221E15), Color(0xFF17140E))
+        else -> listOf(Color(0xFF2A303D), Color(0xFF1C2029), Color(0xFF14171E))
+    }
+
+    val borderStrokeColor = when {
+        isPrimaryGoldKey && isLatched -> ChampagneGold
+        isPrimaryGoldKey -> ChampagneGoldDim
+        isLatched -> ChampagneGold.copy(alpha = 0.75f)
+        else -> Color(0xFF384052)
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxHeight()
+            .padding(top = topInsetDp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(Brush.verticalGradient(topSurfaceColors))
+            .border(1.dp, borderStrokeColor, RoundedCornerShape(8.dp))
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick
+            )
+            .padding(vertical = 4.dp, horizontal = 4.dp)
+    ) {
+        if (!isDepressed) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth(0.85f)
+                    .height(1.dp)
+                    .background(Color.White.copy(alpha = 0.16f))
+            )
+        }
+
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.SpaceBetween,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                if (ledColor != null) {
+                    Box(
+                        modifier = Modifier
+                            .size(5.dp)
+                            .clip(CircleShape)
+                            .background(if (isLatched) ledColor else Color(0xFF2A303C))
+                    )
+                }
+                Text(
+                    text = label,
+                    color = if (isLatched) ChampagneGold else TextMuted,
+                    fontSize = 7.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    letterSpacing = 0.5.sp
+                )
+            }
+
+            iconContent()
+
+            Column(verticalArrangement = Arrangement.spacedBy(1.5.dp)) {
+                Box(
+                    modifier = Modifier
+                        .width(20.dp)
+                        .height(1.dp)
+                        .background(Color.Black.copy(alpha = 0.55f))
+                )
+                Box(
+                    modifier = Modifier
+                        .width(20.dp)
+                        .height(1.dp)
+                        .background(Color.White.copy(alpha = 0.08f))
+                )
+            }
+        }
+    }
+}
+
+/**
+ * =============================================================================================
+ * 2. MÀN HÌNH SETTINGS / AUDIO LAB
+ * =============================================================================================
+ */
+@Composable
+fun SignatureAudioLabScreen(
+    pureDsdMode: Boolean,
+    masterVol: Float,
+    megaBass: Float,
+    clearAudio: Boolean,
+    dsee: Boolean,
+    vinyl: Boolean,
+    phaseInvert: Boolean,
+    channelBalance: Float,
+    crossfade: Boolean,
+    tapeSpeed: Float,
+    keepScreenOn: Boolean,
+    sleepTimerRemainingSec: Int,
+    eq10Bands: List<Float>,
+    currentTrack: AudioTrack?,
+    currentBitrate: Int,
+    currentSampleRate: String,
+    audioOutput: AudioOutputState,
+    onBack: () -> Unit,
+    onPureDsdToggle: (Boolean) -> Unit,
+    onMasterVolChange: (Float) -> Unit,
+    onBassChange: (Float) -> Unit,
+    onClearAudioToggle: (Boolean) -> Unit,
+    onDseeToggle: (Boolean) -> Unit,
+    onVinylToggle: (Boolean) -> Unit,
+    onPhaseInvertToggle: (Boolean) -> Unit,
+    onBalanceChange: (Float) -> Unit,
+    onBand10Change: (Int, Float) -> Unit,
+    onResetEq: () -> Unit,
+    onCrossfadeToggle: (Boolean) -> Unit,
+    onTapeSpeedChange: (Float) -> Unit,
+    onKeepScreenOnToggle: (Boolean) -> Unit,
+    onSetSleepMinutes: (Int) -> Unit
+) {
+    val freqLabels = listOf("31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k")
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(DapChassisBlack)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                IconButton(
+                    onClick = onBack,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(PanelSurface)
+                        .border(1.dp, BezelBorder, RoundedCornerShape(10.dp))
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back",
+                        tint = TextPure,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                Column {
+                    Text(
+                        text = "Audio Lab",
+                        color = TextPure,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Sound Settings & DSP",
+                        color = TextMuted,
+                        fontSize = 11.sp
+                    )
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(if (pureDsdMode) ChampagneGold.copy(alpha = 0.15f) else PanelSurface)
+                    .border(
+                        width = 1.dp,
+                        color = if (pureDsdMode) ChampagneGold else BezelBorder,
+                        shape = RoundedCornerShape(6.dp)
+                    )
+                    .padding(horizontal = 10.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    text = if (pureDsdMode) "PURE" else "PROCESSED",
+                    color = if (pureDsdMode) ChampagneGold else ColdSilver,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp)
+        ) {
+            AudioLabSectionCard(title = "SOUND MODE") {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                        Text(
+                            text = "Pure DSD Mode",
+                            color = TextPure,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "Bỏ qua toàn bộ DSP, nghe trung tính",
+                            color = TextMuted,
+                            fontSize = 12.sp
+                        )
+                    }
+                    Switch(
+                        checked = pureDsdMode,
+                        onCheckedChange = onPureDsdToggle,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = DapChassisBlack,
+                            checkedTrackColor = ChampagneGold,
+                            uncheckedThumbColor = ColdSilver,
+                            uncheckedTrackColor = DapPanelDark
+                        )
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+                HorizontalDivider(color = BezelBorder)
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Signal Path Status", color = ColdSilver, fontSize = 12.sp)
+                    Text(
+                        text = if (pureDsdMode) "Pure Direct (1:1 L/R Matched)" else "DSP Processed (1:1 L/R Matched)",
+                        color = if (pureDsdMode) ChampagneGold else TextPure,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+
+            AudioLabSectionCard(title = "PROCESSING") {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Master Output Gain", color = TextPure, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Text("${(masterVol * 100).roundToInt()}%", color = ChampagneGold, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                    }
+                    Slider(
+                        value = masterVol.coerceIn(0f, 1f),
+                        onValueChange = onMasterVolChange,
+                        colors = SliderDefaults.colors(
+                            thumbColor = ChampagneGold,
+                            activeTrackColor = ChampagneGold,
+                            inactiveTrackColor = BezelBorder
+                        )
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Channel Balance (L - R)", color = TextPure, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            val balText = when {
+                                channelBalance < -0.03f -> "L +${(-channelBalance * 100).roundToInt()}%"
+                                channelBalance > 0.03f -> "R +${(channelBalance * 100).roundToInt()}%"
+                                else -> "Center (0.0 dB)"
+                            }
+                            Text(
+                                text = balText,
+                                color = if (abs(channelBalance) < 0.03f) LedPlayGreen else ChampagneGold,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                            if (abs(channelBalance) >= 0.03f) {
+                                Text(
+                                    text = "Reset 0",
+                                    color = ChampagneGold,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(DapPanelDark)
+                                        .border(1.dp, ChampagneGoldDim, RoundedCornerShape(4.dp))
+                                        .clickable { onBalanceChange(0f) }
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("L", color = TextMuted, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        Slider(
+                            value = channelBalance.coerceIn(-0.5f, 0.5f),
+                            onValueChange = onBalanceChange,
+                            valueRange = -0.5f..0.5f,
+                            modifier = Modifier.weight(1f),
+                            colors = SliderDefaults.colors(
+                                thumbColor = ColdSilver,
+                                activeTrackColor = ChampagneGold,
+                                inactiveTrackColor = BezelBorder
+                            )
+                        )
+                        Text("R", color = TextMuted, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                    }
+                }
+
+                Column(
+                    modifier = Modifier.alpha(if (pureDsdMode) 0.38f else 1.0f),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    HorizontalDivider(color = BezelBorder)
+
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Mega Bass", color = TextPure, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                            Text("+${(megaBass * 10).roundToInt()} dB", color = ChampagneGold, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        }
+                        Slider(
+                            value = megaBass.coerceIn(0f, 1f),
+                            onValueChange = { if (!pureDsdMode) onBassChange(it) },
+                            enabled = !pureDsdMode,
+                            colors = SliderDefaults.colors(
+                                thumbColor = ChampagneGold,
+                                activeTrackColor = ChampagneGold,
+                                inactiveTrackColor = BezelBorder
+                            )
+                        )
+                    }
+
+                    AudioLabSwitchRow(
+                        title = "Clear Audio",
+                        subtitle = "Tối ưu độ tách bạch và không gian Stereo",
+                        checked = clearAudio,
+                        enabled = !pureDsdMode,
+                        onCheckedChange = onClearAudioToggle
+                    )
+
+                    AudioLabSwitchRow(
+                        title = "DSEE",
+                        subtitle = "Khôi phục dải âm tần số cao",
+                        checked = dsee,
+                        enabled = !pureDsdMode,
+                        onCheckedChange = onDseeToggle
+                    )
+
+                    AudioLabSwitchRow(
+                        title = "Vinyl Processor",
+                        subtitle = "Tái tạo chất âm ấm mộc của đĩa than",
+                        checked = vinyl,
+                        enabled = !pureDsdMode,
+                        onCheckedChange = onVinylToggle
+                    )
+
+                    AudioLabSwitchRow(
+                        title = "Phase Invert",
+                        subtitle = "Đảo cực pha âm thanh 180°",
+                        checked = phaseInvert,
+                        enabled = !pureDsdMode,
+                        onCheckedChange = onPhaseInvertToggle
+                    )
+                }
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .alpha(if (pureDsdMode) 0.38f else 1.0f)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(PanelSurface)
+                    .border(1.dp, BezelBorder, RoundedCornerShape(16.dp))
+                    .padding(18.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "EQUALIZER (10-BAND)",
+                        color = ChampagneGold,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 1.2.sp
+                    )
+                    TextButton(
+                        onClick = { if (!pureDsdMode) onResetEq() },
+                        enabled = !pureDsdMode,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                        modifier = Modifier.height(28.dp)
+                    ) {
+                        Text("Reset EQ", color = ColdSilver, fontSize = 12.sp)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                freqLabels.forEachIndexed { idx, freq ->
+                    val gainVal = eq10Bands.getOrElse(idx) { 0f }.coerceIn(-8f, 8f)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(34.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "${freq}Hz",
+                            color = ColdSilver,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.width(46.dp)
+                        )
+                        Slider(
+                            value = gainVal,
+                            onValueChange = { if (!pureDsdMode) onBand10Change(idx, it) },
+                            valueRange = -8f..8f,
+                            enabled = !pureDsdMode,
+                            modifier = Modifier.weight(1f),
+                            colors = SliderDefaults.colors(
+                                thumbColor = ChampagneGold,
+                                activeTrackColor = ChampagneGold,
+                                inactiveTrackColor = BezelBorder
+                            )
+                        )
+                        Text(
+                            text = "%+.1f".format(gainVal),
+                            color = if (gainVal != 0f) ChampagneGold else TextMuted,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            textAlign = TextAlign.End,
+                            modifier = Modifier.width(40.dp)
+                        )
+                    }
+                }
+            }
+
+            AudioLabSectionCard(title = "OTHER") {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Sleep Timer", color = TextPure, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Text(
+                        text = if (sleepTimerRemainingSec > 0) "${sleepTimerRemainingSec / 60}m ${sleepTimerRemainingSec % 60}s" else "Off",
+                        color = if (sleepTimerRemainingSec > 0) ChampagneGold else TextMuted,
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(0 to "Off", 15 to "15m", 30 to "30m", 45 to "45m", 60 to "60m").forEach { (mins, label) ->
+                        val active = (mins == 0 && sleepTimerRemainingSec == 0) ||
+                                (mins > 0 && sleepTimerRemainingSec in ((mins - 14) * 60)..(mins * 60))
+                        OutlinedButton(
+                            onClick = { onSetSleepMinutes(mins) },
+                            modifier = Modifier.weight(1f).height(32.dp),
+                            border = BorderStroke(1.dp, if (active) ChampagneGold else BezelBorder),
+                            contentPadding = PaddingValues(0.dp)
+                        ) {
+                            Text(label, fontSize = 11.sp, color = if (active) ChampagneGold else ColdSilver)
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+                HorizontalDivider(color = BezelBorder)
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Playback Speed", color = TextPure, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Text("${"%.2f".format(tapeSpeed)}x", color = ColdSilver, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(0.85f, 0.95f, 1.0f, 1.10f, 1.20f).forEach { spd ->
+                        val selected = tapeSpeed == spd
+                        OutlinedButton(
+                            onClick = { onTapeSpeedChange(spd) },
+                            modifier = Modifier.weight(1f).height(32.dp),
+                            border = BorderStroke(1.dp, if (selected) ChampagneGold else BezelBorder),
+                            contentPadding = PaddingValues(0.dp)
+                        ) {
+                            Text("${spd}x", fontSize = 11.sp, color = if (selected) ChampagneGold else ColdSilver)
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                AudioLabSwitchRow(
+                    title = "Smooth Crossfade",
+                    subtitle = "Chuyển bài mượt không ngắt quãng",
+                    checked = crossfade,
+                    enabled = true,
+                    onCheckedChange = onCrossfadeToggle
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                AudioLabSwitchRow(
+                    title = "Keep Screen On",
+                    subtitle = "Giữ sáng màn hình khi đang mở ứng dụng",
+                    checked = keepScreenOn,
+                    enabled = true,
+                    onCheckedChange = onKeepScreenOnToggle
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+                HorizontalDivider(color = BezelBorder)
+                Spacer(modifier = Modifier.height(12.dp))
+
+                AudioLabInfoRow("Output Device", audioOutput.deviceName)
+                AudioLabInfoRow("Audio Codec", audioOutput.codecEstimate)
+                AudioLabInfoRow("Playing File", currentTrack?.title ?: "None")
+                AudioLabInfoRow("Stream Format", "${currentTrack?.formatName ?: "PCM"} • $currentSampleRate • $currentBitrate kbps")
+                AudioLabInfoRow("App Version", "Walkman 11.0.4")
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+        }
+    }
+}
+
+@Composable
+fun AudioLabSectionCard(
+    title: String,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(PanelSurface)
+            .border(1.dp, BezelBorder, RoundedCornerShape(16.dp))
+            .padding(18.dp)
+    ) {
+        Text(
+            text = title,
+            color = ChampagneGold,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 1.2.sp
+        )
+        Spacer(modifier = Modifier.height(14.dp))
+        content()
+    }
+}
+
+@Composable
+fun AudioLabSwitchRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    enabled: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(text = title, color = TextPure, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+            Text(text = subtitle, color = TextMuted, fontSize = 11.sp)
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            enabled = enabled,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = DapChassisBlack,
+                checkedTrackColor = ChampagneGold,
+                uncheckedThumbColor = ColdSilver,
+                uncheckedTrackColor = DapPanelDark
+            )
+        )
+    }
+}
+
+@Composable
+fun AudioLabInfoRow(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(text = label, color = TextMuted, fontSize = 12.sp)
+        Text(
+            text = value,
+            color = ColdSilver,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(start = 16.dp)
+        )
+    }
+}
+
+/**
+ * =============================================================================================
+ * 3. MÀN HÌNH THƯ VIỆN NHẠC (MUSIC LIBRARY)
+ * =============================================================================================
+ */
+@Composable
+fun SignatureLibraryScreen(
+    tracks: List<AudioTrack>,
+    favoriteTitles: Set<String>,
+    currentIndex: Int,
+    onBackToPlayer: () -> Unit,
+    onAutoScan: () -> Unit,
+    onPickFiles: () -> Unit,
+    onPickFolder: () -> Unit,
+    onToggleFavorite: (String) -> Unit,
+    onClearSaved: () -> Unit,
+    onSelectTrack: (AudioTrack) -> Unit
+) {
+    var subTab by remember { mutableStateOf(0) }
+    var selectedFolderFilter by remember { mutableStateOf<String?>(null) }
+
+    val foldersMap = remember(tracks) { tracks.groupBy { it.folderInfo } }
+
+    val displayedTracks = remember(tracks, favoriteTitles, subTab, selectedFolderFilter) {
+        when (subTab) {
+            1 -> tracks.filter { favoriteTitles.contains(it.title) }
+            2 -> if (selectedFolderFilter != null) tracks.filter { it.folderInfo == selectedFolderFilter } else emptyList()
+            else -> tracks
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(DapChassisBlack)
+            .padding(horizontal = 20.dp, vertical = 16.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                IconButton(
+                    onClick = onBackToPlayer,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(PanelSurface)
+                        .border(1.dp, BezelBorder, RoundedCornerShape(10.dp))
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back",
+                        tint = TextPure,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                Column {
+                    Text("Music Library", color = TextPure, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                    Text("${tracks.size} tracks", color = TextMuted, fontSize = 11.sp)
+                }
+            }
+
+            if (tracks.isNotEmpty()) {
+                TextButton(onClick = onClearSaved) {
+                    Text("Clear", color = TextMuted, fontSize = 12.sp)
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = onAutoScan,
+                modifier = Modifier.weight(1f).height(36.dp),
+                border = BorderStroke(1.dp, ChampagneGoldDim),
+                contentPadding = PaddingValues(0.dp)
+            ) {
+                Text("Auto Scan", fontSize = 11.sp, color = ChampagneGold)
+            }
+            OutlinedButton(
+                onClick = onPickFolder,
+                modifier = Modifier.weight(1f).height(36.dp),
+                border = BorderStroke(1.dp, BezelBorder),
+                contentPadding = PaddingValues(0.dp)
+            ) {
+                Text("Add Folder", fontSize = 11.sp, color = TextPure)
+            }
+            OutlinedButton(
+                onClick = onPickFiles,
+                modifier = Modifier.weight(1f).height(36.dp),
+                border = BorderStroke(1.dp, BezelBorder),
+                contentPadding = PaddingValues(0.dp)
+            ) {
+                Text("+ Files", fontSize = 11.sp, color = TextPure)
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            val tabs = listOf(
+                "All (${tracks.size})",
+                "Favorites (${tracks.count { favoriteTitles.contains(it.title) }})",
+                "Folders (${foldersMap.size})"
+            )
+            tabs.forEachIndexed { idx, label ->
+                val active = subTab == idx
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(34.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (active) ChampagneGold else PanelSurface)
+                        .clickable {
+                            subTab = idx
+                            selectedFolderFilter = null
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = label,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = if (active) DapChassisBlack else ColdSilver
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        if (subTab == 2 && selectedFolderFilter == null) {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                val folderEntries = foldersMap.entries.toList()
+                itemsIndexed(folderEntries) { _, entry ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(PanelSurface)
+                            .border(1.dp, BezelBorder, RoundedCornerShape(12.dp))
+                            .clickable { selectedFolderFilter = entry.key }
+                            .padding(14.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Folder, null, tint = ChampagneGold, modifier = Modifier.size(22.dp))
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text(entry.key, color = TextPure, fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                                Text("${entry.value.size} tracks", color = TextMuted, fontSize = 11.sp)
+                            }
+                        }
+                        Icon(Icons.Default.ChevronRight, null, tint = TextMuted)
+                    }
+                }
+            }
+        } else {
+            if (subTab == 2 && selectedFolderFilter != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "← Folders / $selectedFolderFilter",
+                        color = ChampagneGold,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.clickable { selectedFolderFilter = null }
+                    )
+                }
+            }
+
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                itemsIndexed(displayedTracks) { _, track ->
+                    val isFav = favoriteTitles.contains(track.title)
+                    val isPlayingTrack = tracks.getOrNull(currentIndex)?.id == track.id
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (isPlayingTrack) ElevatedMetallic else PanelSurface)
+                            .border(
+                                width = 1.dp,
+                                color = if (isPlayingTrack) ChampagneGoldDim else Color.Transparent,
+                                shape = RoundedCornerShape(12.dp)
+                            )
+                            .clickable { onSelectTrack(track) }
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                            Text(
+                                text = track.title,
+                                fontWeight = if (isPlayingTrack) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (isPlayingTrack) ChampagneGold else TextPure,
+                                fontSize = 14.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            val cleanArtist = track.artist.takeIf { !it.contains("<unknown>", true) } ?: track.folderInfo
+                            Text(
+                                text = "$cleanArtist • ${track.formatName}",
+                                color = TextMuted,
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        IconButton(
+                            onClick = { onToggleFavorite(track.title) },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (isFav) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                contentDescription = "Favorite",
+                                tint = if (isFav) ChampagneGold else TextMuted,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }

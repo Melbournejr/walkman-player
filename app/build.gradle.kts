@@ -5,8 +5,8 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-val walkmanVersion = "11.0.3"
-val walkmanVersionCode = 1103
+val walkmanVersion = "11.0.4"
+val walkmanVersionCode = 1104
 
 val fixedKeystoreFile = file("walkman-permanent.jks")
 if (!fixedKeystoreFile.exists()) {
@@ -89,4 +89,5 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
 }
+
 

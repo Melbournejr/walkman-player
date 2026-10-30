@@ -5,11 +5,8 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// =========================================================================
-// PHIÊN BẢN 11.0.1 (Cải tiến sau, chỉ cần đổi hậu tố ở dòng này)
-// =========================================================================
-val walkmanVersion = "11.0.2"
-val walkmanVersionCode = 1102
+val walkmanVersion = "11.0.3"
+val walkmanVersionCode = 1103
 
 val fixedKeystoreFile = file("walkman-permanent.jks")
 if (!fixedKeystoreFile.exists()) {

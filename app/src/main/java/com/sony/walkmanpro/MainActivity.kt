@@ -4,11 +4,14 @@ import android.Manifest
 import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -31,12 +34,14 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -54,6 +59,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -82,23 +88,105 @@ import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.abs
 import kotlin.math.roundToInt
-import kotlin.math.sin
 
 // =========================================================================================
-// BẢNG MÀU VẬT LIỆU SONY WALKMAN SIGNATURE SERIES (WM1ZM2 CHAMPAGNE GOLD & WM1AM2 COLD SILVER)
+// BẢNG MÀU VẬT LIỆU SONY WALKMAN SIGNATURE & SNOWSKY ECHO RETRO-MODERN
 // =========================================================================================
 private val WalkmanBlack = Color(0xFF08090C)
-private val ChassisDark = Color(0xFF101217)
-private val PanelSurface = Color(0xFF161920)
-private val ElevatedMetallic = Color(0xFF202530)
-private val BezelBorder = Color(0xFF2B313E)
-private val ChampagneGold = Color(0xFFC8B588)      // Vàng Champagne nhạt chuẩn WM1ZM2
-private val ChampagneGoldDim = Color(0xFF827350)   // Vàng đồng trầm cho viền khắc CNC
-private val ColdSilver = Color(0xFFA6B0BE)         // Bạc lạnh chuẩn nhôm phay WM1AM2
+private val ChassisDark = Color(0xFF111319)
+private val PanelSurface = Color(0xFF171A22)
+private val ElevatedMetallic = Color(0xFF222733)
+private val BezelBorder = Color(0xFF2D3342)
+private val ChampagneGold = Color(0xFFC8B588)
+private val ChampagneGoldDim = Color(0xFF827350)
+private val ColdSilver = Color(0xFFA6B0BE)
+private val EchoRed = Color(0xFFE11D48)
+private val EchoCyan = Color(0xFF38BDF8)
 private val TextPure = Color(0xFFF1F5F9)
 private val TextMuted = Color(0xFF64748B)
-private val LedPlayGreen = Color(0xFF10B981)       // Đèn LED báo PLAY
-private val LedRecAmber = Color(0xFFF59E0B)        // Đèn LED báo HI-RES / STANDBY
+private val LedPlayGreen = Color(0xFF10B981)
+private val LedRecAmber = Color(0xFFF59E0B)
+
+// 5 THEME BĂNG CASSETTE RETRO + HIỆN ĐẠI
+enum class CassetteTheme(
+    val id: String,
+    val displayName: String,
+    val shellTopColor: Color,
+    val shellBottomColor: Color,
+    val windowBgColor: Color,
+    val reelHubCoreColor: Color,
+    val reelRimColor: Color,
+    val progressLineColor: Color,
+    val specTextColor: Color,
+    val labelBannerColor: Color,
+    val labelTextColor: Color
+) {
+    ECHO_ORIGINAL(
+        id = "ECHO_ORIGINAL",
+        displayName = "ECHO RED",
+        shellTopColor = Color(0xFF282C35),
+        shellBottomColor = Color(0xFF171920),
+        windowBgColor = Color(0xFF1D2027),
+        reelHubCoreColor = Color(0xFFDC2626), // Lõi bánh răng đỏ chuẩn hình mẫu Snowsky ECHO
+        reelRimColor = Color(0xFFE2E8F0),
+        progressLineColor = Color(0xFFEF4444),
+        specTextColor = Color(0xFF38BDF8),     // Dòng thông số WAV/DSD màu xanh Cyan chuẩn hình mẫu
+        labelBannerColor = Color(0xFF22262F),
+        labelTextColor = Color(0xFFF8FAFC)
+    ),
+    WM1ZM2_GOLD(
+        id = "WM1ZM2_GOLD",
+        displayName = "WM1ZM2 GOLD",
+        shellTopColor = Color(0xFF242016),
+        shellBottomColor = Color(0xFF12100B),
+        windowBgColor = Color(0xFF14120D),
+        reelHubCoreColor = Color(0xFFD4AF37),
+        reelRimColor = Color(0xFFF3E5AB),
+        progressLineColor = Color(0xFFD4AF37),
+        specTextColor = Color(0xFFEAB308),
+        labelBannerColor = Color(0xFF1C1810),
+        labelTextColor = Color(0xFFF3E5AB)
+    ),
+    TPS_L2_1979(
+        id = "TPS_L2_1979",
+        displayName = "TPS-L2 1979",
+        shellTopColor = Color(0xFF1E293B),
+        shellBottomColor = Color(0xFF0F172A),
+        windowBgColor = Color(0xFF131C2E),
+        reelHubCoreColor = Color(0xFFEA580C),
+        reelRimColor = Color(0xFFF1F5F9),
+        progressLineColor = Color(0xFF38BDF8),
+        specTextColor = Color(0xFF7DD3FC),
+        labelBannerColor = Color(0xFFEAE3D2), // Nhãn giấy kem cổ điển 1979
+        labelTextColor = Color(0xFF0F172A)
+    ),
+    CYBER_CLEAR(
+        id = "CYBER_CLEAR",
+        displayName = "CYBER CLEAR",
+        shellTopColor = Color(0xFF162436),
+        shellBottomColor = Color(0xFF0B131E),
+        windowBgColor = Color(0xFF09101A),
+        reelHubCoreColor = Color(0xFF06B6D4),
+        reelRimColor = Color(0xFF67E8F9),
+        progressLineColor = Color(0xFFF43F5E),
+        specTextColor = Color(0xFF22D3EE),
+        labelBannerColor = Color(0xFF111C2D),
+        labelTextColor = Color(0xFFECFEFF)
+    ),
+    STUDIO_MASTER(
+        id = "STUDIO_MASTER",
+        displayName = "STUDIO REEL",
+        shellTopColor = Color(0xFF2D231E),
+        shellBottomColor = Color(0xFF18120F),
+        windowBgColor = Color(0xFF140F0C),
+        reelHubCoreColor = Color(0xFFF59E0B),
+        reelRimColor = Color(0xFFFDE68A),
+        progressLineColor = Color(0xFFF97316),
+        specTextColor = Color(0xFFFBBF24),
+        labelBannerColor = Color(0xFF241B16),
+        labelTextColor = Color(0xFFFEF3C7)
+    )
+}
 
 data class AudioTrack(
     val id: Long,
@@ -111,10 +199,10 @@ data class AudioTrack(
     var formatName: String = "AUDIO"
 )
 
-enum class PlayMode(val label: String) {
-    SEQUENTIAL("Sequential"),
-    REPEAT_ONE("Repeat One"),
-    SHUFFLE("Shuffle")
+enum class PlayMode(val label: String, val badgeCode: String) {
+    SEQUENTIAL("Sequential", "NOR"),
+    REPEAT_ONE("Repeat One", "RPT"),
+    SHUFFLE("Shuffle", "SHF")
 }
 
 enum class PlayerViewMode(val title: String) {
@@ -133,7 +221,8 @@ data class AudioOutputState(
     val deviceType: String = "Speaker",
     val isBluetooth: Boolean = false,
     val deviceName: String = "Internal Speaker",
-    val codecEstimate: String = "PCM"
+    val codecEstimate: String = "PCM",
+    val batteryPercent: Int = 100
 )
 
 @UnstableApi
@@ -229,6 +318,7 @@ class MainActivity : ComponentActivity() {
                     onSetCrossfade = { cf -> updateCrossfade(cf) },
                     onSetTapeSpeed = { spd -> updateTapeSpeed(spd) },
                     onSetKeepScreenOn = { keepOn -> setDeskScreenKeepOn(keepOn) },
+                    onToggleOrientation = { toggleScreenOrientation() },
                     onSetEqBand10 = { band, gain -> updateEqBand10(band, gain) },
                     getIsPlaying = { getActiveIsPlaying() },
                     getPosition = { getActivePosition() },
@@ -238,6 +328,19 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    private fun toggleScreenOrientation() {
+        val currentOrient = resources.configuration.orientation
+        requestedOrientation = if (currentOrient == Configuration.ORIENTATION_LANDSCAPE) {
+            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        }
+        // Sau 4 giây trả lại chế độ tự xoay cảm biến (fullSensor) để người dùng xoay tay tự nhiên
+        backgroundHandler.postDelayed({
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
+        }, 4000L)
     }
 
     private fun getActiveIsPlaying(): Boolean {
@@ -357,7 +460,6 @@ class MainActivity : ComponentActivity() {
         sharedDspProcessor.clearAudioEnabled = prefs.getBoolean("dsp_clear_audio", true)
         sharedDspProcessor.dseeEnabled = prefs.getBoolean("dsp_dsee", true)
 
-        // Sửa triệt để lỗi lệch kênh Trái/Phải do sai số lưu trữ: nếu gần 0 thì ép cứng về 0.0f
         val rawSavedBal = prefs.getFloat("dsp_balance", 0f)
         val cleanBal = if (abs(rawSavedBal) < 0.04f) 0f else rawSavedBal.coerceIn(-0.5f, 0.5f)
         sharedDspProcessor.channelBalance = cleanBal
@@ -519,7 +621,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateChannelBalance(bal: Float) {
-        // Tự động hút về đúng 0.0f khi người dùng kéo gần tâm (Dead-zone +/- 0.03f)
         val snappedBal = if (abs(bal) < 0.03f) 0f else bal.coerceIn(-0.5f, 0.5f)
         sharedDspProcessor.channelBalance = snappedBal
         getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
@@ -575,6 +676,15 @@ class MainActivity : ComponentActivity() {
         } catch (_: Throwable) {}
     }
 
+    private fun getPhoneBatteryPercent(context: Context): Int {
+        return try {
+            val bm = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+            bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)?.coerceIn(0, 100) ?: 100
+        } catch (_: Throwable) {
+            100
+        }
+    }
+
     private fun queryRealBluetoothCodecAndBattery(deviceNameHint: String): Pair<String?, Int> {
         var realCodecName: String? = null
         var batteryPercent = -1
@@ -628,6 +738,7 @@ class MainActivity : ComponentActivity() {
 
     private fun detectAudioOutputState(context: Context): AudioOutputState {
         ensureBluetoothA2dpProxy(context)
+        val phoneBatt = getPhoneBatteryPercent(context)
         val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val devices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
@@ -635,9 +746,10 @@ class MainActivity : ComponentActivity() {
                 when (dev.type) {
                     AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLE_HEADSET, AudioDeviceInfo.TYPE_BLE_SPEAKER -> {
                         val rawName = dev.productName?.toString() ?: "Bluetooth Audio"
-                        val (realCodec, batteryLevel) = queryRealBluetoothCodecAndBattery(rawName)
-                        val displayWithBattery = if (batteryLevel in 0..100) {
-                            "$rawName • $batteryLevel%"
+                        val (realCodec, btBattery) = queryRealBluetoothCodecAndBattery(rawName)
+                        val effectiveBatt = if (btBattery in 0..100) btBattery else phoneBatt
+                        val displayWithBattery = if (btBattery in 0..100) {
+                            "$rawName • $btBattery%"
                         } else {
                             rawName
                         }
@@ -646,18 +758,18 @@ class MainActivity : ComponentActivity() {
                             rawName.contains("Noble", true) || rawName.contains("Falcon", true) || rawName.contains("aptx", true) -> "Qualcomm® aptX™ Adaptive"
                             else -> "Bluetooth A2DP"
                         }
-                        return AudioOutputState("Bluetooth", true, displayWithBattery, codecLabel)
+                        return AudioOutputState("Bluetooth", true, displayWithBattery, codecLabel, effectiveBatt)
                     }
                     AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> {
-                        return AudioOutputState("4.4mm / 3.5mm", false, "Balanced / Headphones", "Direct Output")
+                        return AudioOutputState("4.4mm / 3.5mm", false, "Balanced / Headphones", "Direct Output", phoneBatt)
                     }
                     AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_USB_DEVICE -> {
-                        return AudioOutputState("USB-DAC", false, dev.productName?.toString() ?: "USB HiFi DAC", "Bit-Perfect Output")
+                        return AudioOutputState("USB-DAC", false, dev.productName?.toString() ?: "USB HiFi DAC", "Bit-Perfect Output", phoneBatt)
                     }
                 }
             }
         }
-        return AudioOutputState("Speaker", false, "Internal Stereo Speaker", "PCM Output")
+        return AudioOutputState("Speaker", false, "Internal Stereo Speaker", "PCM Output", phoneBatt)
     }
 
     private fun inspectTrackSpecsSafe(context: Context, track: AudioTrack): Pair<Int, String> {
@@ -668,7 +780,7 @@ class MainActivity : ComponentActivity() {
         val lowerTitle = track.title.lowercase()
         val lowerFmt = track.formatName.lowercase()
         var bitrate = 320
-        var sampleRate = "44.1 kHz / 16-bit"
+        var sampleRate = "44.1kHz | 16bit"
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(context, track.uri)
@@ -679,11 +791,11 @@ class MainActivity : ComponentActivity() {
             }
             val mime = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE) ?: ""
             sampleRate = when {
-                lowerTitle.contains("384k") || mime.contains("x-flac") -> "384.0 kHz / 32-bit"
-                lowerTitle.endsWith(".flac") || lowerFmt == "flac" -> "96.0 kHz / 24-bit"
-                lowerTitle.endsWith(".mqa") || lowerFmt == "mqa" -> "352.8 kHz / MQA"
-                lowerTitle.endsWith(".wav") -> "96.0 kHz / 24-bit"
-                else -> "44.1 kHz / 16-bit"
+                lowerTitle.contains("384k") || mime.contains("x-flac") -> "384kHz | 32bit"
+                lowerTitle.endsWith(".flac") || lowerFmt == "flac" -> "192kHz | 24bit"
+                lowerTitle.endsWith(".mqa") || lowerFmt == "mqa" -> "352.8kHz | 24bit"
+                lowerTitle.endsWith(".wav") -> "192kHz | 24bit"
+                else -> "44.1kHz | 16bit"
             }
         } catch (_: Throwable) {
         } finally {
@@ -699,14 +811,14 @@ class MainActivity : ComponentActivity() {
             if (info.isValid) {
                 val kbps = (info.dsdSampleRate * info.channels) / 1000
                 val dsdName = when {
-                    info.dsdSampleRate >= 11289600 -> "DSD256 • 11.2 MHz"
-                    info.dsdSampleRate >= 5644800 -> "DSD128 • 5.6 MHz"
-                    else -> "DSD64 • 2.8 MHz"
+                    info.dsdSampleRate >= 11289600 -> "11.2MHz | 1bit"
+                    info.dsdSampleRate >= 5644800 -> "5.6MHz | 1bit"
+                    else -> "2.8MHz | 1bit"
                 }
                 return Pair(kbps, dsdName)
             }
         } catch (_: Throwable) {}
-        return Pair(5644, "DSD64 • 2.8 MHz")
+        return Pair(5644, "2.8MHz | 1bit")
     }
 
     private fun isExcluded(text: String, file: String): Boolean {
@@ -838,6 +950,7 @@ object PlaylistStorage {
     private const val KEY_LAST_POS = "saved_last_pos_ms"
     private const val KEY_FAVORITES = "saved_favorites_set"
     private const val KEY_PLAY_MODE = "saved_play_mode"
+    private const val KEY_CASSETTE_THEME = "saved_cassette_theme"
 
     fun savePlaylist(context: Context, tracks: List<AudioTrack>) {
         try {
@@ -919,6 +1032,15 @@ object PlaylistStorage {
         return try { PlayMode.valueOf(name) } catch (_: Throwable) { PlayMode.SEQUENTIAL }
     }
 
+    fun saveCassetteTheme(context: Context, theme: CassetteTheme) {
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit().putString(KEY_CASSETTE_THEME, theme.name).apply()
+    }
+
+    fun loadCassetteTheme(context: Context): CassetteTheme {
+        val name = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).getString(KEY_CASSETTE_THEME, CassetteTheme.ECHO_ORIGINAL.name) ?: CassetteTheme.ECHO_ORIGINAL.name
+        return try { CassetteTheme.valueOf(name) } catch (_: Throwable) { CassetteTheme.ECHO_ORIGINAL }
+    }
+
     fun loadLastIndex(context: Context): Int = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).getInt(KEY_LAST_INDEX, 0)
     fun loadLastPos(context: Context): Int = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).getInt(KEY_LAST_POS, 0)
 
@@ -936,9 +1058,14 @@ object PlaylistStorage {
 
 fun formatTimeMs(ms: Int): String {
     val totalSec = (ms / 1000).coerceAtLeast(0)
-    val min = totalSec / 60
+    val hrs = totalSec / 3600
+    val min = (totalSec % 3600) / 60
     val sec = totalSec % 60
-    return "%02d:%02d".format(min, sec)
+    return if (hrs > 0) {
+        "%d:%02d:%02d".format(hrs, min, sec)
+    } else {
+        "0:%02d:%02d".format(min, sec)
+    }
 }
 
 @Composable
@@ -962,6 +1089,7 @@ fun SignatureWalkmanApp(
     onSetCrossfade: (Boolean) -> Unit,
     onSetTapeSpeed: (Float) -> Unit,
     onSetKeepScreenOn: (Boolean) -> Unit,
+    onToggleOrientation: () -> Unit,
     onSetEqBand10: (Int, Float) -> Unit,
     getIsPlaying: () -> Boolean,
     getPosition: () -> Int,
@@ -976,6 +1104,7 @@ fun SignatureWalkmanApp(
     var playlist by remember { mutableStateOf(PlaylistStorage.loadPlaylist(context)) }
     var favoriteTitles by remember { mutableStateOf(PlaylistStorage.loadFavorites(context)) }
     var playMode by remember { mutableStateOf(PlaylistStorage.loadPlayMode(context)) }
+    var cassetteTheme by remember { mutableStateOf(PlaylistStorage.loadCassetteTheme(context)) }
 
     var isScanning by remember { mutableStateOf(false) }
     var currentIndex by remember { mutableStateOf(PlaylistStorage.loadLastIndex(context)) }
@@ -1016,8 +1145,8 @@ fun SignatureWalkmanApp(
     }
 
     var audioOutput by remember { mutableStateOf(getAudioOutputState()) }
-    var currentBitrate by remember { mutableStateOf(320) }
-    var currentSampleRate by remember { mutableStateOf("44.1 kHz / 16-bit") }
+    var currentBitrate by remember { mutableStateOf(1536) }
+    var currentSampleRate by remember { mutableStateOf("192kHz | 24bit") }
 
     val notifPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
@@ -1224,7 +1353,6 @@ fun SignatureWalkmanApp(
         }
     }
 
-    // Vòng lặp cập nhật vị trí với tần suất cao (80ms) để cuộn băng và thanh tiến trình đồng bộ chính xác với nhạc
     LaunchedEffect(isPlaying) {
         var tickCounter = 0
         while (true) {
@@ -1246,6 +1374,7 @@ fun SignatureWalkmanApp(
     }
 
     val currentTrack = playlist.getOrNull(currentIndex)
+    val isCurrentFavorite = currentTrack != null && favoriteTitles.contains(currentTrack.title)
 
     Box(
         modifier = Modifier
@@ -1263,12 +1392,25 @@ fun SignatureWalkmanApp(
             when (screen) {
                 AppScreen.NOW_PLAYING -> WalkmanSignatureNowPlayingScreen(
                     track = currentTrack,
-                    formatBadgeText = if (currentSampleRate.contains("DSD", true)) {
-                        currentSampleRate
-                    } else {
-                        "${currentTrack?.formatName ?: "PCM"} • $currentSampleRate"
+                    trackIndex = currentIndex,
+                    totalTracks = playlist.size,
+                    cassetteTheme = cassetteTheme,
+                    onSelectCassetteTheme = { newTheme ->
+                        cassetteTheme = newTheme
+                        PlaylistStorage.saveCassetteTheme(context, newTheme)
                     },
+                    formatName = currentTrack?.formatName ?: "WAV",
+                    sampleRateText = currentSampleRate,
                     bitrateKbps = currentBitrate,
+                    masterVolumePercent = (masterVol * 100).roundToInt(),
+                    pureDsdMode = pureDsdMode,
+                    audioOutput = audioOutput,
+                    isFavorite = isCurrentFavorite,
+                    onToggleFavorite = {
+                        currentTrack?.let {
+                            favoriteTitles = PlaylistStorage.toggleFavorite(context, it.title)
+                        }
+                    },
                     isPlaying = isPlaying,
                     playMode = playMode,
                     posMs = posMs,
@@ -1308,6 +1450,7 @@ fun SignatureWalkmanApp(
                             playAtIndex(next, null)
                         }
                     },
+                    onToggleOrientation = onToggleOrientation,
                     onOpenLibrary = { currentScreen = AppScreen.LIBRARY },
                     onOpenAudioLab = {
                         audioOutput = getAudioOutputState()
@@ -1429,14 +1572,24 @@ fun SignatureWalkmanApp(
 
 /**
  * =============================================================================================
- * 1. MÀN HÌNH NOW PLAYING (3 CHẾ ĐỘ XEM, QUÁN TÍNH VẬT LÝ BĂNG TỪ & NÚT BẤM ĐÀI CASSETTE THẬT)
+ * 1. MÀN HÌNH NOW PLAYING (TỰ ĐỘNG CHUYỂN ĐỔI GIỮA DỌC PORTRAIT & NGANG LANDSCAPE SNOWSKY ECHO)
  * =============================================================================================
  */
 @Composable
 fun WalkmanSignatureNowPlayingScreen(
     track: AudioTrack?,
-    formatBadgeText: String,
+    trackIndex: Int,
+    totalTracks: Int,
+    cassetteTheme: CassetteTheme,
+    onSelectCassetteTheme: (CassetteTheme) -> Unit,
+    formatName: String,
+    sampleRateText: String,
     bitrateKbps: Int,
+    masterVolumePercent: Int,
+    pureDsdMode: Boolean,
+    audioOutput: AudioOutputState,
+    isFavorite: Boolean,
+    onToggleFavorite: () -> Unit,
     isPlaying: Boolean,
     playMode: PlayMode,
     posMs: Int,
@@ -1447,19 +1600,19 @@ fun WalkmanSignatureNowPlayingScreen(
     onPlayPause: () -> Unit,
     onPrev: () -> Unit,
     onNext: () -> Unit,
+    onToggleOrientation: () -> Unit,
     onOpenLibrary: () -> Unit,
     onOpenAudioLab: () -> Unit
 ) {
     var viewMode by remember { mutableStateOf(PlayerViewMode.CASSETTE) }
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     val safeMaxDur = durMs.toFloat().coerceAtLeast(1f)
     val safeCurrPos = posMs.toFloat().coerceIn(0f, safeMaxDur)
     val progressFraction = (safeCurrPos / safeMaxDur).coerceIn(0f, 1f)
 
-    // Mô phỏng vật lý cuộn băng:
-    // 1. Có quán tính (Inertia) khi bắt đầu quay (Play) và khi hãm dừng (Pause).
-    // 2. Khi người dùng Seek, góc quay lập tức nhảy tương ứng theo quãng đường băng đã tua.
-    // 3. Tốc độ góc của mỗi cuộn tỷ lệ nghịch với bán kính cuộn băng hiện tại (cuộn ít băng quay nhanh hơn).
+    // Quán tính vật lý cuộn băng (Inertia)
     val targetAngularVelocity = if (isPlaying) 68f else 0f
     val smoothVelocity by animateFloatAsState(
         targetValue = targetAngularVelocity,
@@ -1470,7 +1623,6 @@ fun WalkmanSignatureNowPlayingScreen(
     var baseSpinAngle by remember { mutableStateOf(0f) }
     var lastSyncedPosMs by remember { mutableStateOf(posMs) }
 
-    // Khi Seek (độ lệch thời gian đột ngột > 800ms), cập nhật góc nhảy ngay lập tức
     LaunchedEffect(posMs) {
         val diffMs = posMs - lastSyncedPosMs
         if (abs(diffMs) > 800) {
@@ -1479,7 +1631,6 @@ fun WalkmanSignatureNowPlayingScreen(
         lastSyncedPosMs = posMs
     }
 
-    // Vòng lặp 60fps tính góc quay mượt với quán tính
     LaunchedEffect(isPlaying, smoothVelocity) {
         var lastNanos = withFrameNanos { it }
         while (isPlaying || smoothVelocity > 0.4f) {
@@ -1490,638 +1641,1046 @@ fun WalkmanSignatureNowPlayingScreen(
         }
     }
 
-    // Tỷ lệ vận tốc góc thực tế: Cuộn Trái (nhỏ dần -> nhanh dần), Cuộn Phải (to dần -> chậm dần)
     val leftSpeedRatio = 1.35f - 0.55f * progressFraction
     val rightSpeedRatio = 0.80f + 0.55f * progressFraction
     val leftReelAngle = (baseSpinAngle * leftSpeedRatio) % 360f
     val rightReelAngle = (baseSpinAngle * rightSpeedRatio) % 360f
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 20.dp, vertical = 14.dp),
-        verticalArrangement = Arrangement.SpaceBetween,
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        // 1. Thanh đỉnh máy: Nút Library | Bộ chọn 3 chế độ CASSETTE - COVER - MINIMAL | Nút Audio Lab
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(
-                onClick = onOpenLibrary,
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(PanelSurface)
-                    .border(1.dp, BezelBorder, RoundedCornerShape(10.dp))
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.QueueMusic,
-                    contentDescription = "Library",
-                    tint = ColdSilver,
-                    modifier = Modifier.size(19.dp)
-                )
-            }
+    val fullSpecLine = "$formatName | $sampleRateText | ${bitrateKbps}kbps"
+    val trackOrderStr = if (totalTracks > 0) "%03d/%03d".format(trackIndex + 1, totalTracks) else "000/000"
+    val filterModeLabel = if (pureDsdMode) "PURE-DSD" else "FAST-PC"
 
-            // Công tắc chuyển đổi 3 chế độ: CASSETTE | COVER | MINIMAL
-            Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(9.dp))
-                    .background(ChassisDark)
-                    .border(1.dp, BezelBorder, RoundedCornerShape(9.dp))
-                    .padding(3.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                PlayerViewMode.values().forEach { mode ->
-                    val active = viewMode == mode
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(if (active) ElevatedMetallic else Color.Transparent)
-                            .clickable { viewMode = mode }
-                            .padding(horizontal = 10.dp, vertical = 5.dp)
-                    ) {
-                        Text(
-                            text = mode.title,
-                            color = if (active) ChampagneGold else TextMuted,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            letterSpacing = 0.8.sp
-                        )
-                    }
-                }
-            }
-
-            IconButton(
-                onClick = onOpenAudioLab,
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(PanelSurface)
-                    .border(1.dp, BezelBorder, RoundedCornerShape(10.dp))
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Tune,
-                    contentDescription = "Audio Lab",
-                    tint = ChampagneGold,
-                    modifier = Modifier.size(19.dp)
-                )
-            }
-        }
-
-        // 2. Khu vực hiển thị chính theo 3 chế độ (Cassette View / Cover Art View / Minimal View)
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .padding(vertical = 10.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            AnimatedContent(
-                targetState = viewMode,
-                transitionSpec = { fadeIn(tween(260)) togetherWith fadeOut(tween(200)) },
-                label = "player_mode_content"
-            ) { mode ->
-                when (mode) {
-                    PlayerViewMode.CASSETTE -> SonyWalkmanRealisticCassetteDeck(
-                        trackTitle = track?.title ?: "NO TRACK SELECTED",
-                        trackArtist = track?.artist?.takeIf { !it.contains("<unknown>", true) } ?: "SONY WALKMAN",
-                        formatBadge = formatBadgeText,
-                        isPlaying = isPlaying,
-                        posMs = posMs,
-                        leftReelAngle = leftReelAngle,
-                        rightReelAngle = rightReelAngle,
-                        capstanPhase = baseSpinAngle,
-                        progressFraction = progressFraction
-                    )
-
-                    PlayerViewMode.COVER_ART -> SonySignatureCoverArtView(
-                        formatBadge = formatBadgeText,
-                        isPlaying = isPlaying,
-                        reelAngle = leftReelAngle
-                    )
-
-                    PlayerViewMode.MINIMAL -> SonySignatureMinimalFocusView(
-                        trackTitle = track?.title ?: "No Track Selected",
-                        trackArtist = track?.artist?.takeIf { !it.contains("<unknown>", true) } ?: "Unknown Artist",
-                        albumName = track?.folderInfo ?: "Album",
-                        formatBadge = formatBadgeText,
-                        bitrateKbps = bitrateKbps,
-                        isPlaying = isPlaying,
-                        posMs = posMs,
-                        durMs = durMs
-                    )
-                }
-            }
-        }
-
-        // 3. Thông tin bài hát & Đèn LED báo trạng thái kiểu Walkman cổ điển (Ẩn bớt tiêu đề lặp khi ở chế độ Minimal)
-        if (viewMode != PlayerViewMode.MINIMAL) {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(5.dp)
-            ) {
-                // Cụm đèn báo LED nhỏ (PLAY / HI-RES Indicator) + Nhãn Format tinh tế
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    // Đèn LED PLAY
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp),
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(ChassisDark)
-                            .border(0.8.dp, BezelBorder, RoundedCornerShape(4.dp))
-                            .padding(horizontal = 7.dp, vertical = 2.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(6.dp)
-                                .clip(CircleShape)
-                                .background(if (isPlaying) LedPlayGreen else Color(0xFF334155))
-                        )
-                        Text(
-                            text = if (isPlaying) "PLAY" else "PAUSE",
-                            color = if (isPlaying) LedPlayGreen else TextMuted,
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace,
-                            letterSpacing = 0.8.sp
-                        )
-                    }
-
-                    // Nhãn Format (ví dụ: DSD128 • 5.6 MHz)
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp),
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(PanelSurface)
-                            .border(0.8.dp, ChampagneGoldDim.copy(alpha = 0.55f), RoundedCornerShape(4.dp))
-                            .padding(horizontal = 8.dp, vertical = 2.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(5.dp)
-                                .clip(CircleShape)
-                                .background(ChampagneGold)
-                        )
-                        Text(
-                            text = formatBadgeText,
-                            color = ChampagneGold,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Medium,
-                            fontFamily = FontFamily.Monospace,
-                            letterSpacing = 0.6.sp
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(2.dp))
-
-                Text(
-                    text = track?.title ?: "Chưa chọn bài hát",
-                    color = TextPure,
-                    fontSize = 19.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    textAlign = TextAlign.Center
-                )
-
-                val cleanArtist = track?.artist?.takeIf { !it.contains("<unknown>", true) } ?: "Unknown Artist"
-                val cleanAlbum = track?.folderInfo ?: "Album"
-                Text(
-                    text = "$cleanArtist — $cleanAlbum",
-                    color = ColdSilver,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Normal,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    textAlign = TextAlign.Center
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // 4. Thanh tiến trình phong cách Thước Analog (Analog Scale Progress Bar)
-        AnalogScaleSeekBar(
-            posMs = posMs,
-            durMs = durMs,
-            progressFraction = progressFraction,
-            onSeek = onSeek
-        )
-
-        Spacer(modifier = Modifier.height(10.dp))
-
-        // 5. Cụm phím bấm cơ học kiểu đài Cassette thật (Mechanical Piano-Key Transport Deck)
-        CassetteMechanicalPianoKeyDeck(
-            isPlaying = isPlaying,
-            playMode = playMode,
-            onToggleShuffle = onToggleShuffle,
-            onPrev = onPrev,
-            onPlayPause = onPlayPause,
-            onNext = onNext,
-            onToggleRepeat = onToggleRepeat
-        )
-    }
-}
-
-/**
- * GIAO DIỆN BĂNG CASSETTE CHÂN THỰC CÓ CHIỀU SÂU, TỐC ĐỘ QUAY VẬT LÝ & CHỈ BÁO TAPE MOVING
- */
-@Composable
-fun SonyWalkmanRealisticCassetteDeck(
-    trackTitle: String,
-    trackArtist: String,
-    formatBadge: String,
-    isPlaying: Boolean,
-    posMs: Int,
-    leftReelAngle: Float,
-    rightReelAngle: Float,
-    capstanPhase: Float,
-    progressFraction: Float
-) {
-    val isHiResOrDsd = formatBadge.contains("DSD", true) || formatBadge.contains("96.", true) ||
-            formatBadge.contains("192.", true) || formatBadge.contains("384.", true) || formatBadge.contains("FLAC", true)
-
-    val tapeTypeTitle = if (isHiResOrDsd) "METAL MASTER 90" else "BHF 60"
-    val biasLabel = if (isHiResOrDsd) "TYPE IV • 70μs EQ" else "TYPE I • 120μs EQ"
-    val tapeCounterStr = "%03d".format((posMs / 1000) % 1000)
-
-    // Khung hốc chứa băng của máy Walkman (Recessed Cassette Compartment)
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(274.dp)
-            .shadow(12.dp, RoundedCornerShape(20.dp))
-            .clip(RoundedCornerShape(20.dp))
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(Color(0xFF252A34), Color(0xFF171A21), Color(0xFF0E1015))
-                )
-            )
-            .border(1.5.dp, Color(0xFF383F4E), RoundedCornerShape(20.dp))
-            .padding(14.dp)
-    ) {
-        // 4 Ốc vít kim loại ở 4 góc vỏ băng
-        CassetteCornerScrew(Modifier.align(Alignment.TopStart))
-        CassetteCornerScrew(Modifier.align(Alignment.TopEnd))
-        CassetteCornerScrew(Modifier.align(Alignment.BottomStart))
-        CassetteCornerScrew(Modifier.align(Alignment.BottomEnd))
-
+    if (isLandscape) {
+        // =====================================================================================
+        // CHẾ ĐỘ XOAY NGANG (LANDSCAPE SNOWSKY ECHO HARDWARE DECK MODE)
+        // =====================================================================================
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 6.dp, vertical = 2.dp),
-            verticalArrangement = Arrangement.SpaceBetween,
-            horizontalAlignment = Alignment.CenterHorizontally
+                .background(Color(0xFF0A0B0F))
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.SpaceBetween
         ) {
-            // 1. Nhãn băng kim loại phay xước + Bộ đếm số cơ học (Tape Counter)
+            // Gờ nút cứng trên đỉnh máy giống hệt ảnh mẫu Snowsky ECHO (1 nút đỏ + 3 nút đen)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp, bottomStart = 3.dp, bottomEnd = 3.dp))
-                    .background(
-                        Brush.horizontalGradient(
-                            colors = listOf(Color(0xFF1A1E26), Color(0xFF282E3B), Color(0xFF1A1E26))
-                        )
-                    )
-                    .border(
-                        width = 0.9.dp,
-                        color = ChampagneGoldDim.copy(alpha = 0.65f),
-                        shape = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp, bottomStart = 3.dp, bottomEnd = 3.dp)
-                    )
-                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                    .padding(horizontal = 24.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.Bottom
             ) {
-                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text(
-                            text = "SONY",
-                            color = ChampagneGold,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            letterSpacing = 2.2.sp
-                        )
-                        Text(
-                            text = tapeTypeTitle,
-                            color = ColdSilver,
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            fontFamily = FontFamily.Monospace
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = trackTitle,
-                        color = TextPure,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Bottom) {
+                    // Nút nguồn/chế độ màu đỏ nổi bật ở góc trái đỉnh máy
+                    Box(
+                        modifier = Modifier
+                            .width(44.dp)
+                            .height(7.dp)
+                            .clip(RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp))
+                            .background(EchoRed)
+                            .clickable { onPlayPause() }
                     )
-                }
-
-                // Hộp số cơ học 3 chữ số (Mechanical 3-Digit Counter)
-                Column(horizontalAlignment = Alignment.End) {
-                    Text(
-                        text = "COUNTER",
-                        color = TextMuted,
-                        fontSize = 7.sp,
-                        fontFamily = FontFamily.Monospace,
-                        letterSpacing = 1.sp
+                    // Các gờ phím cứng màu đen
+                    Box(
+                        modifier = Modifier
+                            .width(56.dp)
+                            .height(5.dp)
+                            .clip(RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp))
+                            .background(Color(0xFF2B303C))
                     )
                     Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(Color(0xFF07080A))
-                            .border(1.dp, Color(0xFF333947), RoundedCornerShape(4.dp))
-                            .padding(horizontal = 7.dp, vertical = 2.dp)
+                            .width(36.dp)
+                            .height(5.dp)
+                            .clip(RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp))
+                            .background(Color(0xFF2B303C))
+                    )
+                }
+
+                // Dải chọn nhanh 5 Theme Cassette ở góc phải đỉnh máy khi xoay ngang
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    CassetteTheme.values().forEach { th ->
+                        val active = th == cassetteTheme
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(5.dp))
+                                .background(if (active) th.reelHubCoreColor else ChassisDark)
+                                .border(1.dp, if (active) Color.White.copy(alpha = 0.7f) else BezelBorder, RoundedCornerShape(5.dp))
+                                .clickable { onSelectCassetteTheme(th) }
+                                .padding(horizontal = 7.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = th.displayName,
+                                color = if (active) Color.White else ColdSilver,
+                                fontSize = 8.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Thân máy ngang: Bên trái là Màn hình Cassette Snowsky ECHO lớn, bên phải là Bảng điều khiển cơ học
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(
+                        Brush.verticalGradient(listOf(Color(0xFF1E222B), Color(0xFF14171E), Color(0xFF0E1015)))
+                    )
+                    .border(2.dp, Color(0xFF323846), RoundedCornerShape(16.dp))
+                    .padding(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Khung màn hình kính đen chứa Cassette chuẩn ảnh mẫu (Chiếm 66% chiều ngang)
+                Box(
+                    modifier = Modifier
+                        .weight(0.66f)
+                        .fillMaxHeight()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xFF060709))
+                        .border(2.dp, Color(0xFF252A34), RoundedCornerShape(10.dp))
+                        .padding(8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    EchoStyleCassetteDeckView(
+                        theme = cassetteTheme,
+                        trackTitle = track?.title ?: "BORN FOR MUSIC",
+                        trackArtist = track?.artist?.takeIf { !it.contains("<unknown>", true) } ?: "Walkman",
+                        albumName = track?.folderInfo ?: "FIIO",
+                        specLine = fullSpecLine,
+                        volumeNumber = masterVolumePercent,
+                        trackOrderStr = trackOrderStr,
+                        filterModeLabel = filterModeLabel,
+                        playModeBadge = playMode.badgeCode,
+                        batteryPercent = audioOutput.batteryPercent,
+                        isBluetooth = audioOutput.isBluetooth,
+                        isFavorite = isFavorite,
+                        onToggleFavorite = onToggleFavorite,
+                        isPlaying = isPlaying,
+                        posMs = posMs,
+                        durMs = durMs,
+                        leftReelAngle = leftReelAngle,
+                        rightReelAngle = rightReelAngle,
+                        progressFraction = progressFraction
+                    )
+                }
+
+                // Cụm điều khiển bên phải khi xoay ngang (Chiếm 34% chiều ngang)
+                Column(
+                    modifier = Modifier
+                        .weight(0.34f)
+                        .fillMaxHeight(),
+                    verticalArrangement = Arrangement.SpaceBetween,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    // Hàng nút công cụ: Library, Xoay dọc, Audio Lab
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(
+                            onClick = onOpenLibrary,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(PanelSurface)
+                                .border(1.dp, BezelBorder, RoundedCornerShape(8.dp))
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.QueueMusic, contentDescription = "Library", tint = ColdSilver, modifier = Modifier.size(18.dp))
+                        }
+
+                        IconButton(
+                            onClick = onToggleOrientation,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(PanelSurface)
+                                .border(1.dp, BezelBorder, RoundedCornerShape(8.dp))
+                        ) {
+                            Icon(Icons.Default.ScreenRotation, contentDescription = "Rotate", tint = ChampagneGold, modifier = Modifier.size(17.dp))
+                        }
+
+                        IconButton(
+                            onClick = onOpenAudioLab,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(PanelSurface)
+                                .border(1.dp, BezelBorder, RoundedCornerShape(8.dp))
+                        ) {
+                            Icon(Icons.Default.Tune, contentDescription = "Audio Lab", tint = ChampagneGold, modifier = Modifier.size(18.dp))
+                        }
+                    }
+
+                    // Khắc chìm logo WALKMAN / ECHO trên vỏ nhám giống ảnh mẫu
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF12151C))
+                            .border(1.dp, Color(0xFF232834), RoundedCornerShape(10.dp))
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Text(
-                            text = tapeCounterStr,
+                            text = "WALKMAN SIGNATURE",
+                            color = Color(0xFF475569),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Black,
+                            letterSpacing = 2.sp
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = audioOutput.deviceName,
                             color = ChampagneGold,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace,
-                            letterSpacing = 1.5.sp
+                            fontSize = 10.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    // Thanh tua nhanh Seekbar
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Slider(
+                            value = safeCurrPos,
+                            onValueChange = { onSeek(it.toInt()) },
+                            valueRange = 0f..safeMaxDur,
+                            modifier = Modifier.fillMaxWidth().height(22.dp),
+                            colors = SliderDefaults.colors(
+                                thumbColor = cassetteTheme.progressLineColor,
+                                activeTrackColor = cassetteTheme.progressLineColor,
+                                inactiveTrackColor = Color(0xFF222631)
+                            )
+                        )
+                    }
+
+                    // Bàn phím cơ học 5 nút
+                    CassetteMechanicalPianoKeyDeck(
+                        isPlaying = isPlaying,
+                        playMode = playMode,
+                        onToggleShuffle = onToggleShuffle,
+                        onPrev = onPrev,
+                        onPlayPause = onPlayPause,
+                        onNext = onNext,
+                        onToggleRepeat = onToggleRepeat
+                    )
+                }
+            }
+        }
+    } else {
+        // =====================================================================================
+        // CHẾ ĐỘ DỌC (PORTRAIT MODE CHUẨN SONY WALKMAN + SNOWSKY ECHO CASSETTE)
+        // =====================================================================================
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 18.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.SpaceBetween,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // 1. Thanh đỉnh máy: Nút Library | CASSETTE - COVER - MINIMAL | Nút Xoay Ngang | Nút Audio Lab
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(
+                    onClick = onOpenLibrary,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(PanelSurface)
+                        .border(1.dp, BezelBorder, RoundedCornerShape(10.dp))
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.QueueMusic,
+                        contentDescription = "Library",
+                        tint = ColdSilver,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(9.dp))
+                        .background(ChassisDark)
+                        .border(1.dp, BezelBorder, RoundedCornerShape(9.dp))
+                        .padding(3.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    PlayerViewMode.values().forEach { mode ->
+                        val active = viewMode == mode
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(if (active) ElevatedMetallic else Color.Transparent)
+                                .clickable { viewMode = mode }
+                                .padding(horizontal = 9.dp, vertical = 5.dp)
+                        ) {
+                            Text(
+                                text = mode.title,
+                                color = if (active) ChampagneGold else TextMuted,
+                                fontSize = 9.5.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                letterSpacing = 0.6.sp
+                            )
+                        }
+                    }
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    IconButton(
+                        onClick = onToggleOrientation,
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(PanelSurface)
+                            .border(1.dp, BezelBorder, RoundedCornerShape(10.dp))
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ScreenRotation,
+                            contentDescription = "Landscape Mode",
+                            tint = ColdSilver,
+                            modifier = Modifier.size(17.dp)
+                        )
+                    }
+
+                    IconButton(
+                        onClick = onOpenAudioLab,
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(PanelSurface)
+                            .border(1.dp, BezelBorder, RoundedCornerShape(10.dp))
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Tune,
+                            contentDescription = "Audio Lab",
+                            tint = ChampagneGold,
+                            modifier = Modifier.size(18.dp)
                         )
                     }
                 }
             }
 
-            // 2. Cửa sổ nhựa Acrylic trong suốt có chiều sâu (Recessed Acrylic Window)
+            // 2. Thanh chọn 5 Theme Cassette (Retro + Hiện đại)
+            if (viewMode == PlayerViewMode.CASSETTE) {
+                LazyRow(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)
+                ) {
+                    itemsIndexed(CassetteTheme.values().toList()) { _, th ->
+                        val selected = th == cassetteTheme
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(if (selected) ElevatedMetallic else ChassisDark)
+                                .border(
+                                    width = 1.dp,
+                                    color = if (selected) th.reelHubCoreColor else BezelBorder,
+                                    shape = RoundedCornerShape(14.dp)
+                                )
+                                .clickable { onSelectCassetteTheme(th) }
+                                .padding(horizontal = 10.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(th.reelHubCoreColor)
+                            )
+                            Text(
+                                text = th.displayName,
+                                color = if (selected) TextPure else TextMuted,
+                                fontSize = 9.5.sp,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                }
+            }
+
+            // 3. Điểm nhấn trung tâm: Hốc máy Cassette kiểu Snowsky ECHO / Cover Art / Minimal
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(132.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(
-                        Brush.verticalGradient(
-                            colors = listOf(Color(0xFF060709), Color(0xFF0E1117), Color(0xFF07090C))
-                        )
-                    )
-                    .border(2.dp, Color(0xFF2D3443), RoundedCornerShape(10.dp))
+                    .weight(1f)
+                    .padding(vertical = 8.dp),
+                contentAlignment = Alignment.Center
             ) {
-                Canvas(modifier = Modifier.fillMaxSize()) {
-                    val w = size.width
-                    val h = size.height
-                    val centerY = h * 0.48f
-                    val leftReelX = w * 0.26f
-                    val rightReelX = w * 0.74f
+                AnimatedContent(
+                    targetState = viewMode,
+                    transitionSpec = { fadeIn(tween(260)) togetherWith fadeOut(tween(200)) },
+                    label = "player_mode_content"
+                ) { mode ->
+                    when (mode) {
+                        PlayerViewMode.CASSETTE -> {
+                            // Vỏ máy bao quanh màn hình Cassette giống thiết kế Snowsky ECHO trong ảnh
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .shadow(14.dp, RoundedCornerShape(18.dp))
+                                    .clip(RoundedCornerShape(18.dp))
+                                    .background(
+                                        Brush.verticalGradient(
+                                            listOf(Color(0xFF222630), Color(0xFF161920), Color(0xFF111318))
+                                        )
+                                    )
+                                    .border(2.dp, Color(0xFF343B4A), RoundedCornerShape(18.dp))
+                                    .padding(10.dp)
+                            ) {
+                                // Khung kính đen chứa màn hình HUD + Cassette
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(248.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(Color(0xFF060709))
+                                        .border(1.5.dp, Color(0xFF262B36), RoundedCornerShape(10.dp))
+                                        .padding(8.dp)
+                                ) {
+                                    EchoStyleCassetteDeckView(
+                                        theme = cassetteTheme,
+                                        trackTitle = track?.title ?: "BORN FOR MUSIC",
+                                        trackArtist = track?.artist?.takeIf { !it.contains("<unknown>", true) } ?: "Walkman",
+                                        albumName = track?.folderInfo ?: "FIIO",
+                                        specLine = fullSpecLine,
+                                        volumeNumber = masterVolumePercent,
+                                        trackOrderStr = trackOrderStr,
+                                        filterModeLabel = filterModeLabel,
+                                        playModeBadge = playMode.badgeCode,
+                                        batteryPercent = audioOutput.batteryPercent,
+                                        isBluetooth = audioOutput.isBluetooth,
+                                        isFavorite = isFavorite,
+                                        onToggleFavorite = onToggleFavorite,
+                                        isPlaying = isPlaying,
+                                        posMs = posMs,
+                                        durMs = durMs,
+                                        leftReelAngle = leftReelAngle,
+                                        rightReelAngle = rightReelAngle,
+                                        progressFraction = progressFraction
+                                    )
+                                }
 
-                    // Vẽ khung viền chìm tạo chiều sâu 3D bên trong cửa sổ nhựa
-                    drawRoundRect(
-                        color = Color.Black.copy(alpha = 0.65f),
-                        topLeft = Offset(3.dp.toPx(), 3.dp.toPx()),
-                        size = Size(w - 6.dp.toPx(), h - 6.dp.toPx()),
-                        cornerRadius = CornerRadius(8.dp.toPx(), 8.dp.toPx()),
-                        style = Stroke(width = 3.dp.toPx())
-                    )
-
-                    // Bán kính 2 cuộn băng từ thay đổi thực tế theo tiến độ bài hát
-                    val maxSpoolRadius = h * 0.43f
-                    val minSpoolRadius = h * 0.21f
-                    val leftSpoolRadius = maxSpoolRadius - (maxSpoolRadius - minSpoolRadius) * progressFraction
-                    val rightSpoolRadius = minSpoolRadius + (maxSpoolRadius - minSpoolRadius) * progressFraction
-
-                    // Vẽ cuộn dây băng từ bên Trái (Supply Spool) với hiệu ứng vân đồng tâm
-                    drawCircle(
-                        brush = Brush.radialGradient(
-                            colors = listOf(Color(0xFF281F1C), Color(0xFF16110F), Color(0xFF241C19)),
-                            center = Offset(leftReelX, centerY),
-                            radius = leftSpoolRadius
-                        ),
-                        radius = leftSpoolRadius,
-                        center = Offset(leftReelX, centerY)
-                    )
-                    drawCircle(
-                        color = Color(0xFF382C28),
-                        radius = leftSpoolRadius,
-                        center = Offset(leftReelX, centerY),
-                        style = Stroke(width = 1.2.dp.toPx())
-                    )
-
-                    // Vẽ cuộn dây băng từ bên Phải (Take-up Spool)
-                    drawCircle(
-                        brush = Brush.radialGradient(
-                            colors = listOf(Color(0xFF281F1C), Color(0xFF16110F), Color(0xFF241C19)),
-                            center = Offset(rightReelX, centerY),
-                            radius = rightSpoolRadius
-                        ),
-                        radius = rightSpoolRadius,
-                        center = Offset(rightReelX, centerY)
-                    )
-                    drawCircle(
-                        color = Color(0xFF382C28),
-                        radius = rightSpoolRadius,
-                        center = Offset(rightReelX, centerY),
-                        style = Stroke(width = 1.2.dp.toPx())
-                    )
-
-                    // Vẽ dây băng từ căng ngang từ cuộn trái xuống trục đọc từ ở đáy rồi lên cuộn phải
-                    val guideLeftX = w * 0.12f
-                    val guideRightX = w * 0.88f
-                    val guideBottomY = h * 0.88f
-                    drawLine(
-                        color = Color(0xFF3D302A),
-                        start = Offset(leftReelX - leftSpoolRadius * 0.7f, centerY + leftSpoolRadius * 0.6f),
-                        end = Offset(guideLeftX, guideBottomY),
-                        strokeWidth = 1.6.dp.toPx()
-                    )
-                    drawLine(
-                        color = Color(0xFF3D302A),
-                        start = Offset(guideLeftX, guideBottomY),
-                        end = Offset(guideRightX, guideBottomY),
-                        strokeWidth = 1.8.dp.toPx()
-                    )
-                    drawLine(
-                        color = Color(0xFF3D302A),
-                        start = Offset(guideRightX, guideBottomY),
-                        end = Offset(rightReelX + rightSpoolRadius * 0.7f, centerY + rightSpoolRadius * 0.6f),
-                        strokeWidth = 1.6.dp.toPx()
-                    )
-
-                    // Chỉ báo "Tape Moving" (Dải xung chạy dọc dây băng ở đáy khi đang phát)
-                    if (isPlaying) {
-                        val dashOffset = (capstanPhase * 1.4f) % 24f
-                        var dx = guideLeftX + dashOffset
-                        while (dx < guideRightX - 10f) {
-                            drawLine(
-                                color = ChampagneGold.copy(alpha = 0.55f),
-                                start = Offset(dx, guideBottomY),
-                                end = Offset(dx + 6f, guideBottomY),
-                                strokeWidth = 2.dp.toPx(),
-                                cap = StrokeCap.Round
-                            )
-                            dx += 24f
-                        }
-                    }
-
-                    // Vạch chia thước đo lượng băng (0 — 50 — 100) ở chính giữa cửa sổ
-                    val scaleStartX = w * 0.39f
-                    val scaleEndX = w * 0.61f
-                    drawLine(
-                        color = ColdSilver.copy(alpha = 0.40f),
-                        start = Offset(scaleStartX, centerY),
-                        end = Offset(scaleEndX, centerY),
-                        strokeWidth = 1.dp.toPx()
-                    )
-                    for (tick in 0..8) {
-                        val tx = scaleStartX + (scaleEndX - scaleStartX) * (tick / 8f)
-                        val tickH = if (tick % 4 == 0) 6.dp.toPx() else if (tick % 2 == 0) 4.dp.toPx() else 2.2.dp.toPx()
-                        drawLine(
-                            color = if (tick % 4 == 0) ChampagneGold else ColdSilver.copy(alpha = 0.55f),
-                            start = Offset(tx, centerY - tickH),
-                            end = Offset(tx, centerY + tickH),
-                            strokeWidth = 1.2.dp.toPx()
-                        )
-                    }
-
-                    // Vẽ 2 trục bánh răng quay độc lập (Left Reel & Right Reel)
-                    val hubRadius = h * 0.195f
-                    val reelPairs = listOf(leftReelX to leftReelAngle, rightReelX to rightReelAngle)
-
-                    reelPairs.forEach { (cx, angle) ->
-                        // Vành kim loại sáng của trục bánh răng
-                        drawCircle(
-                            color = Color(0xFF141820),
-                            radius = hubRadius,
-                            center = Offset(cx, centerY)
-                        )
-                        drawCircle(
-                            color = ColdSilver,
-                            radius = hubRadius,
-                            center = Offset(cx, centerY),
-                            style = Stroke(width = 2.4.dp.toPx())
-                        )
-
-                        // 6 chấu bánh răng + 3 vấu kẹp băng quay mượt theo góc vật lý
-                        rotate(angle, pivot = Offset(cx, centerY)) {
-                            for (spoke in 0 until 6) {
-                                rotate(spoke * 60f, pivot = Offset(cx, centerY)) {
-                                    drawLine(
-                                        color = ChampagneGold,
-                                        start = Offset(cx, centerY - hubRadius * 0.36f),
-                                        end = Offset(cx, centerY - hubRadius * 0.94f),
-                                        strokeWidth = 2.8.dp.toPx(),
-                                        cap = StrokeCap.Round
+                                // Phần cằm máy vát kim loại khắc chìm chữ giống ảnh mẫu Snowsky ECHO
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(top = 8.dp, start = 8.dp, end = 8.dp, bottom = 2.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "❄ WALKMAN PRO",
+                                        color = Color(0xFF475569),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Black,
+                                        letterSpacing = 1.8.sp
+                                    )
+                                    Text(
+                                        text = "ECHO",
+                                        color = Color(0xFF475569),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Black,
+                                        letterSpacing = 2.5.sp
                                     )
                                 }
                             }
                         }
 
-                        // Tâm trục tối
-                        drawCircle(
-                            color = Color(0xFF060709),
-                            radius = hubRadius * 0.34f,
-                            center = Offset(cx, centerY)
+                        PlayerViewMode.COVER_ART -> SonySignatureCoverArtView(
+                            formatBadge = fullSpecLine,
+                            isPlaying = isPlaying,
+                            reelAngle = leftReelAngle
                         )
-                        drawCircle(
-                            color = ChampagneGoldDim,
-                            radius = hubRadius * 0.34f,
-                            center = Offset(cx, centerY),
-                            style = Stroke(width = 1.dp.toPx())
-                        )
-                    }
 
-                    // Hiệu ứng lớp kính Acrylic phản quang đa tầng
-                    val highlightPath1 = Path().apply {
-                        moveTo(w * 0.28f, 0f)
-                        lineTo(w * 0.42f, 0f)
-                        lineTo(w * 0.24f, h)
-                        lineTo(w * 0.10f, h)
-                        close()
-                    }
-                    drawPath(
-                        path = highlightPath1,
-                        brush = Brush.linearGradient(
-                            colors = listOf(Color.White.copy(alpha = 0.06f), Color.White.copy(alpha = 0.015f))
+                        PlayerViewMode.MINIMAL -> SonySignatureMinimalFocusView(
+                            trackTitle = track?.title ?: "No Track Selected",
+                            trackArtist = track?.artist?.takeIf { !it.contains("<unknown>", true) } ?: "Unknown Artist",
+                            albumName = track?.folderInfo ?: "Album",
+                            formatBadge = fullSpecLine,
+                            bitrateKbps = bitrateKbps,
+                            isPlaying = isPlaying,
+                            posMs = posMs,
+                            durMs = durMs
                         )
+                    }
+                }
+            }
+
+            // 4. Thông tin bài hát & Thiết bị đầu ra
+            if (viewMode != PlayerViewMode.MINIMAL) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    Text(
+                        text = track?.title ?: "Chưa chọn bài hát",
+                        color = TextPure,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center
+                    )
+
+                    val cleanArtist = track?.artist?.takeIf { !it.contains("<unknown>", true) } ?: "Unknown Artist"
+                    val cleanAlbum = track?.folderInfo ?: "Album"
+                    Text(
+                        text = "$cleanArtist • ${audioOutput.deviceName}",
+                        color = ColdSilver,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Normal,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center
                     )
                 }
             }
 
-            // 3. Cụm đầu từ & Con lăn dẫn băng phía dưới (Head Shield & Capstan Rollers)
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // 5. Thanh tiến trình Analog Scale
+            AnalogScaleSeekBar(
+                posMs = posMs,
+                durMs = durMs,
+                progressFraction = progressFraction,
+                accentColor = cassetteTheme.progressLineColor,
+                onSeek = onSeek
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // 6. Bàn phím cơ học kiểu đài Cassette thật
+            CassetteMechanicalPianoKeyDeck(
+                isPlaying = isPlaying,
+                playMode = playMode,
+                onToggleShuffle = onToggleShuffle,
+                onPrev = onPrev,
+                onPlayPause = onPlayPause,
+                onNext = onNext,
+                onToggleRepeat = onToggleRepeat
+            )
+        }
+    }
+}
+
+/**
+ * =============================================================================================
+ * GIAO DIỆN CASSETTE ĐƯỢC THIẾT KẾ CHÍNH XÁC THEO HÌNH ẢNH MẪU (FIIO SNOWSKY ECHO HUD + TAPE)
+ * =============================================================================================
+ */
+@Composable
+fun EchoStyleCassetteDeckView(
+    theme: CassetteTheme,
+    trackTitle: String,
+    trackArtist: String,
+    albumName: String,
+    specLine: String,
+    volumeNumber: Int,
+    trackOrderStr: String,
+    filterModeLabel: String,
+    playModeBadge: String,
+    batteryPercent: Int,
+    isBluetooth: Boolean,
+    isFavorite: Boolean,
+    onToggleFavorite: () -> Unit,
+    isPlaying: Boolean,
+    posMs: Int,
+    durMs: Int,
+    leftReelAngle: Float,
+    rightReelAngle: Float,
+    progressFraction: Float
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .clip(RoundedCornerShape(8.dp))
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(theme.shellTopColor, theme.shellBottomColor)
+                )
+            )
+            .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(8.dp))
+    ) {
+        // 4 Ốc vít cơ khí ở 4 góc mặt băng giống ảnh mẫu
+        CassetteCornerScrew(Modifier.align(Alignment.TopStart).padding(5.dp))
+        CassetteCornerScrew(Modifier.align(Alignment.TopEnd).padding(5.dp))
+        CassetteCornerScrew(Modifier.align(Alignment.BottomStart).padding(5.dp))
+        CassetteCornerScrew(Modifier.align(Alignment.BottomEnd).padding(5.dp))
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.SpaceBetween,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // 1. THANH TRẠNG THÁI HUD PHÍA TRÊN (Giống hệt ảnh mẫu: 🔊 56 | 🎧 | 001/035 | FAST-PC | 🔀 | [NOR] | SD | 🔋)
             Row(
                 modifier = Modifier
-                    .fillMaxWidth(0.90f)
-                    .height(30.dp)
-                    .clip(RoundedCornerShape(topStart = 7.dp, topEnd = 7.dp, bottomStart = 4.dp, bottomEnd = 4.dp))
-                    .background(
-                        Brush.verticalGradient(listOf(Color(0xFF222733), Color(0xFF151820)))
-                    )
-                    .border(1.dp, Color(0xFF343B4A), RoundedCornerShape(topStart = 7.dp, topEnd = 7.dp, bottomStart = 4.dp, bottomEnd = 4.dp))
-                    .padding(horizontal = 14.dp),
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Con lăn dẫn băng trái
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Box(
-                        modifier = Modifier
-                            .size(9.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF08090C))
-                            .border(1.2.dp, ColdSilver.copy(alpha = 0.6f), CircleShape)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // Icon loa + chỉ số âm lượng
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Text(
+                            text = "$volumeNumber",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+
+                    // Icon Tai nghe / Bluetooth
+                    Icon(
+                        imageVector = if (isBluetooth) Icons.Default.BluetoothAudio else Icons.Default.Headphones,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(13.dp)
                     )
-                    Box(
-                        modifier = Modifier
-                            .size(5.dp)
-                            .clip(CircleShape)
-                            .background(if (isPlaying) ChampagneGold else TextMuted)
+
+                    // Thứ tự bài hát: 001/035
+                    Text(
+                        text = trackOrderStr,
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        fontFamily = FontFamily.Monospace
                     )
                 }
 
-                // Dòng thông số Bias & Chỉ báo TAPE RUNNING
+                // Giữa: FAST-PC / PURE-DSD
+                Text(
+                    text = filterModeLabel,
+                    color = Color.White,
+                    fontSize = 10.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+
+                // Phải: Icon Shuffle, [NOR], Thẻ nhớ, Pin
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
+                    Icon(
+                        imageVector = Icons.Default.Shuffle,
+                        contentDescription = null,
+                        tint = Color.White.copy(alpha = 0.85f),
+                        modifier = Modifier.size(12.dp)
+                    )
+
                     Box(
                         modifier = Modifier
-                            .size(5.dp)
-                            .clip(CircleShape)
-                            .background(if (isPlaying) LedPlayGreen else LedRecAmber.copy(alpha = 0.5f))
+                            .border(1.dp, Color.White.copy(alpha = 0.85f), RoundedCornerShape(2.dp))
+                            .padding(horizontal = 3.dp, vertical = 0.5.dp)
+                    ) {
+                        Text(
+                            text = playModeBadge,
+                            color = Color.White,
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+
+                    Icon(
+                        imageVector = Icons.Default.SdStorage,
+                        contentDescription = null,
+                        tint = Color.White.copy(alpha = 0.85f),
+                        modifier = Modifier.size(12.dp)
+                    )
+
+                    // Biểu tượng Pin có vạch chia như trong ảnh
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .border(1.dp, Color.White, RoundedCornerShape(2.dp))
+                            .padding(horizontal = 3.dp, vertical = 1.dp)
+                    ) {
+                        Text(
+                            text = "$batteryPercent%",
+                            color = Color.White,
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+            }
+
+            // 2. DÒNG TIÊU ĐỀ LỚN CHÍNH GIỮA TRÊN CỬA SỔ BĂNG (Như dòng "BORN FOR MUSIC" trong ảnh mẫu)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.92f)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(theme.labelBannerColor)
+                    .padding(horizontal = 8.dp, vertical = 2.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = trackTitle.uppercase(),
+                    color = theme.labelTextColor,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    letterSpacing = 1.2.sp
+                )
+            }
+
+            // 3. CỬA SỔ TRUNG TÂM CHỨA 2 BÁNH RĂNG LÕI ĐỎ/VÀNG & THƯỚC ĐO BĂNG GIỐNG ẢNH MẪU
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.84f)
+                    .height(82.dp)
+                    .clip(RoundedCornerShape(42.dp))
+                    .background(theme.windowBgColor)
+                    .border(2.dp, Color(0xFF3E4452), RoundedCornerShape(42.dp))
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val w = size.width
+                    val h = size.height
+                    val centerY = h / 2f
+                    val leftX = w * 0.23f
+                    val rightX = w * 0.77f
+
+                    // Bán kính cuộn băng từ màu đen nâu phía sau
+                    val maxSpool = h * 0.48f
+                    val minSpool = h * 0.30f
+                    val leftSpoolR = maxSpool - (maxSpool - minSpool) * progressFraction
+                    val rightSpoolR = minSpool + (maxSpool - minSpool) * progressFraction
+
+                    drawCircle(
+                        color = Color(0xFF101216),
+                        radius = leftSpoolR,
+                        center = Offset(leftX, centerY)
+                    )
+                    drawCircle(
+                        color = Color(0xFF101216),
+                        radius = rightSpoolR,
+                        center = Offset(rightX, centerY)
+                    )
+
+                    // Khung cửa sổ chữ nhật nhỏ ở giữa chứa vạch thước đo và vạch đỏ trung tâm (giống ảnh mẫu)
+                    val winLeft = w * 0.38f
+                    val winRight = w * 0.62f
+                    val winTop = h * 0.28f
+                    val winBot = h * 0.72f
+
+                    drawRoundRect(
+                        color = Color(0xFF2B303B),
+                        topLeft = Offset(winLeft, winTop),
+                        size = Size(winRight - winLeft, winBot - winTop),
+                        cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx())
+                    )
+                    drawRoundRect(
+                        color = Color(0xFF475061),
+                        topLeft = Offset(winLeft, winTop),
+                        size = Size(winRight - winLeft, winBot - winTop),
+                        cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx()),
+                        style = Stroke(width = 1.2.dp.toPx())
+                    )
+
+                    // Các vạch chia dọc màu trắng bạc + đường chỉ đỏ ngang ở tâm thước đo
+                    val tickCount = 12
+                    for (t in 0..tickCount) {
+                        val tx = winLeft + 6.dp.toPx() + (winRight - winLeft - 12.dp.toPx()) * (t.toFloat() / tickCount)
+                        val tickH = if (t % 3 == 0) 6.dp.toPx() else 3.5.dp.toPx()
+                        drawLine(
+                            color = Color.White.copy(alpha = 0.65f),
+                            start = Offset(tx, centerY - tickH),
+                            end = Offset(tx, centerY + tickH),
+                            strokeWidth = 1.dp.toPx()
+                        )
+                    }
+                    // Vạch chỉ đỏ ở giữa cửa sổ thước
+                    drawLine(
+                        color = theme.progressLineColor,
+                        start = Offset((winLeft + winRight) / 2f, winTop + 3.dp.toPx()),
+                        end = Offset((winLeft + winRight) / 2f, winBot - 3.dp.toPx()),
+                        strokeWidth = 1.8.dp.toPx()
+                    )
+
+                    // Vẽ 2 Bánh răng Cassette giống hệt ảnh mẫu (Vành bạc bóng + Lõi trục màu đỏ/vàng + 6 chấu răng cưa)
+                    val outerWheelR = h * 0.39f
+                    val redCoreR = outerWheelR * 0.62f
+                    val innerHoleR = outerWheelR * 0.24f
+
+                    listOf(leftX to leftReelAngle, rightX to rightReelAngle).forEach { (cx, angle) ->
+                        // 1. Vành kim loại bạc ngoài cùng
+                        drawCircle(
+                            color = theme.reelRimColor,
+                            radius = outerWheelR,
+                            center = Offset(cx, centerY)
+                        )
+                        drawCircle(
+                            color = Color(0xFF1F242D),
+                            radius = outerWheelR * 0.84f,
+                            center = Offset(cx, centerY)
+                        )
+
+                        // 2. Lõi trục kẹp màu Đỏ / Vàng đặc trưng của Snowsky ECHO
+                        drawCircle(
+                            color = theme.reelHubCoreColor,
+                            radius = redCoreR,
+                            center = Offset(cx, centerY)
+                        )
+
+                        // 3. Các chấu bánh răng bạc quay theo góc vật lý
+                        rotate(angle, pivot = Offset(cx, centerY)) {
+                            for (spoke in 0 until 6) {
+                                rotate(spoke * 60f, pivot = Offset(cx, centerY)) {
+                                    // Chấu bạc từ tâm ra vành ngoài
+                                    drawLine(
+                                        color = Color.White,
+                                        start = Offset(cx, centerY - innerHoleR),
+                                        end = Offset(cx, centerY - outerWheelR * 0.95f),
+                                        strokeWidth = 2.6.dp.toPx(),
+                                        cap = StrokeCap.Round
+                                    )
+                                    // Chấm đen cơ khí trên vành bạc
+                                    drawCircle(
+                                        color = Color(0xFF111318),
+                                        radius = 2.dp.toPx(),
+                                        center = Offset(cx, centerY - outerWheelR * 0.74f)
+                                    )
+                                }
+                            }
+                        }
+
+                        // 4. Lỗ trục trung tâm
+                        drawCircle(
+                            color = Color(0xFF12141A),
+                            radius = innerHoleR,
+                            center = Offset(cx, centerY)
+                        )
+                        drawCircle(
+                            color = Color.White,
+                            radius = innerHoleR,
+                            center = Offset(cx, centerY),
+                            style = Stroke(width = 1.2.dp.toPx())
+                        )
+                    }
+                }
+            }
+
+            // 4. HÀNG THÔNG TIN NGHỆ SĨ - ALBUM - HIFI & THỜI GIAN + THANH TIẾN TRÌNH ĐỎ NGANG MẶT BĂNG (Chuẩn ảnh mẫu)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                // Hàng: 👤 James | 💿 FIIO | 📊 HiFi
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.PersonOutline, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
+                        Text(
+                            text = trackArtist,
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                        modifier = Modifier.weight(1f),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Icon(Icons.Default.Album, contentDescription = null, tint = Color.White, modifier = Modifier.size(12.dp))
+                        Text(
+                            text = albumName,
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                        modifier = Modifier.weight(1f),
+                        horizontalAlignment = Alignment.End
+                    ) {
+                        Icon(Icons.Default.Equalizer, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
+                        Text(
+                            text = "HiFi",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                // Hàng thời gian: ▶ 0:00:46 bên trái và 0:03:46 bên phải
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = (if (isPlaying) "▶ " else "⏸ ") + formatTimeMs(posMs),
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
                     )
                     Text(
-                        text = if (isPlaying) "TAPE RUNNING • $biasLabel" else "STANDBY • $biasLabel",
-                        color = ChampagneGold.copy(alpha = 0.9f),
-                        fontSize = 8.5.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        fontFamily = FontFamily.Monospace,
-                        letterSpacing = 0.8.sp
+                        text = formatTimeMs(durMs),
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
                     )
                 }
 
-                // Con lăn dẫn băng phải
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                // Đường tiến trình mỏng màu đỏ chạy ngang mặt băng ngay trên đế hình thang (Giống ảnh mẫu)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(2.5.dp)
+                        .background(Color.White.copy(alpha = 0.2f))
+                ) {
                     Box(
                         modifier = Modifier
-                            .size(5.dp)
-                            .clip(CircleShape)
-                            .background(if (isPlaying) ChampagneGold else TextMuted)
-                    )
-                    Box(
-                        modifier = Modifier
-                            .size(9.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF08090C))
-                            .border(1.2.dp, ColdSilver.copy(alpha = 0.6f), CircleShape)
+                            .fillMaxWidth(progressFraction)
+                            .fillMaxHeight()
+                            .background(theme.progressLineColor)
                     )
                 }
             }
+
+            // 5. ĐẾ HÌNH THANG PHÍA DƯỚI (HEAD BRIDGE): Hiển thị dòng thông số màu xanh Cyan + [SQ] + ❤️ (Chuẩn ảnh mẫu)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.86f)
+                    .height(30.dp)
+                    .clip(RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp, bottomStart = 3.dp, bottomEnd = 3.dp))
+                    .background(Color(0xFF232732))
+                    .border(1.dp, Color(0xFF3B4254), RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp, bottomStart = 3.dp, bottomEnd = 3.dp))
+                    .padding(horizontal = 10.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Lỗ trục dẫn băng trái
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF0B0D12))
+                            .border(1.dp, Color(0xFF475569), CircleShape)
+                    )
+
+                    // Dòng thông số Cyan + [SQ] + Trái tim đỏ
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Text(
+                            text = specLine,
+                            color = theme.specTextColor,
+                            fontSize = 9.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1
+                        )
+
+                        Box(
+                            modifier = Modifier
+                                .border(1.dp, Color(0xFFA855F7), RoundedCornerShape(2.dp))
+                                .padding(horizontal = 3.dp, vertical = 0.5.dp)
+                        ) {
+                            Text(
+                                text = if (specLine.contains("DSD", true)) "HR" else "SQ",
+                                color = Color(0xFFD8B4FE),
+                                fontSize = 7.5.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+
+                        Icon(
+                            imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                            contentDescription = "Favorite",
+                            tint = if (isFavorite) EchoRed else Color.White.copy(alpha = 0.6f),
+                            modifier = Modifier
+                                .size(13.dp)
+                                .clickable { onToggleFavorite() }
+                        )
+                    }
+
+                    // Lỗ trục dẫn băng phải
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF0B0D12))
+                            .border(1.dp, Color(0xFF475569), CircleShape)
+                    )
+                }
+            }
+        }
+
+        // Lớp phản quang chéo qua mặt kính máy nghe nhạc giống ảnh chụp thực tế
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val w = size.width
+            val h = size.height
+            val glarePath = Path().apply {
+                moveTo(w * 0.42f, 0f)
+                lineTo(w * 0.64f, 0f)
+                lineTo(w * 0.48f, h)
+                lineTo(w * 0.26f, h)
+                close()
+            }
+            drawPath(
+                path = glarePath,
+                brush = Brush.linearGradient(
+                    colors = listOf(Color.White.copy(alpha = 0.05f), Color.White.copy(alpha = 0.01f))
+                )
+            )
         }
     }
 }
@@ -2130,19 +2689,19 @@ fun SonyWalkmanRealisticCassetteDeck(
 fun CassetteCornerScrew(modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
-            .size(9.dp)
+            .size(8.dp)
             .clip(CircleShape)
             .background(
-                Brush.radialGradient(listOf(Color(0xFF475063), Color(0xFF222630)))
+                Brush.radialGradient(listOf(Color(0xFF94A3B8), Color(0xFF334155)))
             )
-            .border(0.8.dp, Color(0xFF0D0F14), CircleShape),
+            .border(0.8.dp, Color(0xFF0F172A), CircleShape),
         contentAlignment = Alignment.Center
     ) {
         Box(
             modifier = Modifier
-                .width(5.dp)
+                .width(4.dp)
                 .height(1.dp)
-                .background(Color(0xFF111318))
+                .background(Color(0xFF0F172A))
         )
     }
 }
@@ -2158,7 +2717,7 @@ fun SonySignatureCoverArtView(
 ) {
     Box(
         modifier = Modifier
-            .size(258.dp)
+            .size(250.dp)
             .shadow(10.dp, RoundedCornerShape(24.dp))
             .clip(RoundedCornerShape(24.dp))
             .background(
@@ -2194,7 +2753,7 @@ fun SonySignatureCoverArtView(
 }
 
 /**
- * CHẾ ĐỘ XEM 3: MINIMAL VIEW (CHỈ TẬP TRUNG VÀO TYPOGRAPHY, THÔNG SỐ DIGITAL & CỤM NÚT BẤM)
+ * CHẾ ĐỘ XEM 3: MINIMAL VIEW
  */
 @Composable
 fun SonySignatureMinimalFocusView(
@@ -2283,7 +2842,7 @@ fun SonySignatureMinimalFocusView(
                 Text(
                     text = formatBadge,
                     color = ChampagneGold,
-                    fontSize = 11.sp,
+                    fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace
                 )
             }
@@ -2291,7 +2850,7 @@ fun SonySignatureMinimalFocusView(
             Text(
                 text = "${formatTimeMs(posMs)} / ${formatTimeMs(durMs)}",
                 color = TextPure,
-                fontSize = 18.sp,
+                fontSize = 16.sp,
                 fontWeight = FontWeight.Medium,
                 fontFamily = FontFamily.Monospace
             )
@@ -2300,13 +2859,14 @@ fun SonySignatureMinimalFocusView(
 }
 
 /**
- * THANH TIẾN TRÌNH PHONG CÁCH THƯỚC TRƯỢT ANALOG (ANALOG RAIL PROGRESS BAR)
+ * THANH TIẾN TRÌNH PHONG CÁCH THƯỚC TRƯỢT ANALOG
  */
 @Composable
 fun AnalogScaleSeekBar(
     posMs: Int,
     durMs: Int,
     progressFraction: Float,
+    accentColor: Color,
     onSeek: (Int) -> Unit
 ) {
     val safeMaxDur = durMs.toFloat().coerceAtLeast(1f)
@@ -2318,13 +2878,12 @@ fun AnalogScaleSeekBar(
             .clip(RoundedCornerShape(12.dp))
             .background(ChassisDark)
             .border(1.dp, BezelBorder, RoundedCornerShape(12.dp))
-            .padding(horizontal = 14.dp, vertical = 8.dp)
+            .padding(horizontal = 14.dp, vertical = 6.dp)
     ) {
-        // Vạch chia Analog mảnh phía trên rãnh trượt
         Canvas(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(6.dp)
+                .height(5.dp)
         ) {
             val tickCount = 24
             for (i in 0..tickCount) {
@@ -2332,7 +2891,7 @@ fun AnalogScaleSeekBar(
                 val passed = (i.toFloat() / tickCount) <= progressFraction
                 val tickH = if (i % 6 == 0) size.height else size.height * 0.55f
                 drawLine(
-                    color = if (passed) ChampagneGold else BezelBorder,
+                    color = if (passed) accentColor else BezelBorder,
                     start = Offset(x, size.height - tickH),
                     end = Offset(x, size.height),
                     strokeWidth = if (i % 6 == 0) 1.5.dp.toPx() else 1.dp.toPx()
@@ -2346,47 +2905,18 @@ fun AnalogScaleSeekBar(
             valueRange = 0f..safeMaxDur,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(24.dp),
+                .height(22.dp),
             colors = SliderDefaults.colors(
-                thumbColor = ChampagneGold,
-                activeTrackColor = ChampagneGold,
+                thumbColor = accentColor,
+                activeTrackColor = accentColor,
                 inactiveTrackColor = Color(0xFF222631)
             )
         )
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = formatTimeMs(posMs),
-                color = ChampagneGold,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
-                fontFamily = FontFamily.Monospace
-            )
-            Text(
-                text = "ANALOG TAPE SCALE",
-                color = TextMuted,
-                fontSize = 8.sp,
-                fontFamily = FontFamily.Monospace,
-                letterSpacing = 1.2.sp
-            )
-            Text(
-                text = formatTimeMs(durMs),
-                color = ColdSilver,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium,
-                fontFamily = FontFamily.Monospace
-            )
-        }
     }
 }
 
 /**
  * CỤM NÚT ẤN CƠ HỌC KIỂU ĐÀI CASSETTE THẬT (MECHANICAL PIANO-KEY TRANSPORT DECK)
- * - Các phím bấm hình khối chữ nhật vát cạnh kim loại, có rãnh khía chống trượt và độ lún vật lý khi nhấn.
  */
 @Composable
 fun CassetteMechanicalPianoKeyDeck(
@@ -2401,11 +2931,10 @@ fun CassetteMechanicalPianoKeyDeck(
     val isShuffle = playMode == PlayMode.SHUFFLE
     val isRepeatOne = playMode == PlayMode.REPEAT_ONE
 
-    // Khung kim loại bao quanh bàn phím cơ học
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(68.dp)
+            .height(64.dp)
             .clip(RoundedCornerShape(14.dp))
             .background(Color(0xFF050608))
             .border(1.5.dp, Color(0xFF2E3442), RoundedCornerShape(14.dp))
@@ -2413,7 +2942,6 @@ fun CassetteMechanicalPianoKeyDeck(
         horizontalArrangement = Arrangement.spacedBy(5.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Phím 1: SHUFFLE
         CassetteMechanicalKey(
             modifier = Modifier.weight(0.85f),
             label = "SHUF",
@@ -2425,11 +2953,10 @@ fun CassetteMechanicalPianoKeyDeck(
                 imageVector = Icons.Default.Shuffle,
                 contentDescription = "Shuffle",
                 tint = if (isShuffle) ChampagneGold else ColdSilver,
-                modifier = Modifier.size(18.dp)
+                modifier = Modifier.size(17.dp)
             )
         }
 
-        // Phím 2: REW / PREVIOUS
         CassetteMechanicalKey(
             modifier = Modifier.weight(1f),
             label = "REW",
@@ -2441,28 +2968,26 @@ fun CassetteMechanicalPianoKeyDeck(
                 imageVector = Icons.Default.FastRewind,
                 contentDescription = "Previous",
                 tint = TextPure,
-                modifier = Modifier.size(22.dp)
+                modifier = Modifier.size(21.dp)
             )
         }
 
-        // Phím 3: PLAY / PAUSE (Phím chính rộng hơn, có chấm tactile vàng & đèn LED xanh lá như đài Cassette thật)
         CassetteMechanicalKey(
             modifier = Modifier.weight(1.45f),
             label = if (isPlaying) "PLAYING" else "PLAY",
             isLatched = isPlaying,
             isPrimaryGoldKey = true,
-            ledColor = if (isPlaying) LedPlayGreen else LedRecAmber.copy(alpha = 0.4f),
+            ledColor = if (isPlaying) LedPlayGreen else EchoRed,
             onClick = onPlayPause
         ) {
             Icon(
                 imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                 contentDescription = "Play/Pause",
                 tint = if (isPlaying) ChampagneGold else TextPure,
-                modifier = Modifier.size(26.dp)
+                modifier = Modifier.size(25.dp)
             )
         }
 
-        // Phím 4: FF / NEXT
         CassetteMechanicalKey(
             modifier = Modifier.weight(1f),
             label = "FFWD",
@@ -2474,11 +2999,10 @@ fun CassetteMechanicalPianoKeyDeck(
                 imageVector = Icons.Default.FastForward,
                 contentDescription = "Next",
                 tint = TextPure,
-                modifier = Modifier.size(22.dp)
+                modifier = Modifier.size(21.dp)
             )
         }
 
-        // Phím 5: REPEAT
         CassetteMechanicalKey(
             modifier = Modifier.weight(0.85f),
             label = "RPT",
@@ -2490,7 +3014,7 @@ fun CassetteMechanicalPianoKeyDeck(
                 imageVector = if (isRepeatOne) Icons.Default.RepeatOne else Icons.Default.Repeat,
                 contentDescription = "Repeat",
                 tint = if (isRepeatOne) ChampagneGold else ColdSilver,
-                modifier = Modifier.size(18.dp)
+                modifier = Modifier.size(17.dp)
             )
         }
     }
@@ -2509,7 +3033,6 @@ fun CassetteMechanicalKey(
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
 
-    // Hiệu ứng lún cơ học khi nhấn tay hoặc khi phím đang chốt (isLatched)
     val isDepressed = isPressed || isLatched
     val topInsetDp by animateDpAsState(
         targetValue = if (isDepressed) 4.dp else 0.dp,
@@ -2543,9 +3066,8 @@ fun CassetteMechanicalKey(
                 indication = null,
                 onClick = onClick
             )
-            .padding(vertical = 5.dp, horizontal = 4.dp)
+            .padding(vertical = 4.dp, horizontal = 4.dp)
     ) {
-        // Viền sáng kim loại vát trên đỉnh phím khi chưa bị nhấn lún
         if (!isDepressed) {
             Box(
                 modifier = Modifier
@@ -2561,7 +3083,6 @@ fun CassetteMechanicalKey(
             verticalArrangement = Arrangement.SpaceBetween,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Đèn LED nhỏ hoặc rãnh khía cơ học trên mặt phím
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -2577,27 +3098,25 @@ fun CassetteMechanicalKey(
                 Text(
                     text = label,
                     color = if (isLatched) ChampagneGold else TextMuted,
-                    fontSize = 8.sp,
+                    fontSize = 7.5.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace,
-                    letterSpacing = 0.6.sp
+                    letterSpacing = 0.5.sp
                 )
             }
 
-            // Icon chính ở giữa phím
             iconContent()
 
-            // 2 rãnh khía ngang chống trượt ở mép dưới phím Cassette (Tactile Grip Grooves)
             Column(verticalArrangement = Arrangement.spacedBy(1.5.dp)) {
                 Box(
                     modifier = Modifier
-                        .width(22.dp)
+                        .width(20.dp)
                         .height(1.dp)
                         .background(Color.Black.copy(alpha = 0.55f))
                 )
                 Box(
                     modifier = Modifier
-                        .width(22.dp)
+                        .width(20.dp)
                         .height(1.dp)
                         .background(Color.White.copy(alpha = 0.08f))
                 )
@@ -2608,7 +3127,7 @@ fun CassetteMechanicalKey(
 
 /**
  * =============================================================================================
- * 2. MÀN HÌNH SETTINGS / AUDIO LAB (4 SECTION RÕ RÀNG, CÓ NÚT CENTER BALANCE CHỐNG LỆCH KÊNH)
+ * 2. MÀN HÌNH SETTINGS / AUDIO LAB
  * =============================================================================================
  */
 @Composable
@@ -2722,7 +3241,6 @@ fun SignatureAudioLabScreen(
                 .padding(horizontal = 20.dp, vertical = 6.dp),
             verticalArrangement = Arrangement.spacedBy(18.dp)
         ) {
-            // 1. SOUND MODE
             AudioLabSectionCard(title = "SOUND MODE") {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -2773,7 +3291,6 @@ fun SignatureAudioLabScreen(
                 }
             }
 
-            // 2. PROCESSING
             AudioLabSectionCard(title = "PROCESSING") {
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -2793,7 +3310,6 @@ fun SignatureAudioLabScreen(
 
                 Spacer(modifier = Modifier.height(6.dp))
 
-                // Channel Balance (L - R) kèm nút Reset Center 0.0
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -2903,7 +3419,6 @@ fun SignatureAudioLabScreen(
                 }
             }
 
-            // 3. EQUALIZER (10-BAND)
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2976,7 +3491,6 @@ fun SignatureAudioLabScreen(
                 }
             }
 
-            // 4. OTHER
             AudioLabSectionCard(title = "OTHER") {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -3062,7 +3576,7 @@ fun SignatureAudioLabScreen(
                 AudioLabInfoRow("Audio Codec", audioOutput.codecEstimate)
                 AudioLabInfoRow("Playing File", currentTrack?.title ?: "None")
                 AudioLabInfoRow("Stream Format", "${currentTrack?.formatName ?: "PCM"} • $currentSampleRate • $currentBitrate kbps")
-                AudioLabInfoRow("App Version", "Walkman Signature Edition • v10.3")
+                AudioLabInfoRow("App Version", "Walkman 11.0.0")
             }
 
             Spacer(modifier = Modifier.height(24.dp))

@@ -1,6 +1,35 @@
-﻿plugins {
+﻿import java.util.Base64
+
+plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+// =========================================================================
+// CHỈ CẦN ĐỔI HẬU TỐ PHIÊN BẢN Ở DÒNG NÀY CHO CÁC BẢN CẢI TIẾN TIẾP THEO:
+// =========================================================================
+val walkmanVersion = "11.0.0"
+val walkmanVersionCode = 1100
+
+// Tạo hoặc giữ cố định chữ ký APK duy nhất để cài đè mọi phiên bản về sau không cần gỡ app cũ
+val fixedKeystoreFile = file("walkman-permanent.jks")
+if (!fixedKeystoreFile.exists()) {
+    try {
+        val javaHome = System.getProperty("java.home")
+        val keytoolExe = if (System.getProperty("os.name").lowercase().contains("win")) {
+            "$javaHome\\bin\\keytool.exe"
+        } else {
+            "$javaHome/bin/keytool"
+        }
+        ProcessBuilder(
+            keytoolExe, "-genkeypair", "-v",
+            "-keystore", fixedKeystoreFile.absolutePath,
+            "-alias", "walkman_ permanent_key",
+            "-keyalg", "RSA", "-keysize", "2048", "-validity", "36500",
+            "-storepass", "walkman2026", "-keypass", "walkman2026",
+            "-dname", "CN=SonyWalkman, OU=SignatureSeries, O=Sony, L=Tokyo, S=Tokyo, C=JP"
+        ).start().waitFor()
+    } catch (_: Exception) {}
 }
 
 android {
@@ -11,8 +40,36 @@ android {
         applicationId = "com.sony.walkmanpro"
         minSdk = 26
         targetSdk = 34
-        versionCode = 98
-        versionName = "9.8-TrueAptX-CrystalDSD"
+        versionCode = walkmanVersionCode
+        versionName = walkmanVersion
+        setProperty("archivesBaseName", "Walkman $walkmanVersion")
+    }
+
+    signingConfigs {
+        if (fixedKeystoreFile.exists()) {
+            create("permanentSignature") {
+                storeFile = fixedKeystoreFile
+                storePassword = "walkman2026"
+                keyAlias = "walkman_ permanent_key"
+                keyPassword = "walkman2026"
+            }
+        }
+    }
+
+    buildTypes {
+        getByName("debug") {
+            if (fixedKeystoreFile.exists()) {
+                signingConfig = signingConfigs.getByName("permanentSignature")
+            }
+        }
+    }
+
+    // Tự động đặt tên file APK xuất ra là: "Walkman 11.0.0.apk"
+    applicationVariants.all {
+        outputs.all {
+            val outputImpl = this as? com.android.build.gradle.internal.api.BaseVariantOutputImpl
+            outputImpl?.outputFileName = "Walkman ${walkmanVersion}.apk"
+        }
     }
 
     compileOptions {

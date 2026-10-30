@@ -42,7 +42,6 @@ android {
         targetSdk = 34
         versionCode = walkmanVersionCode
         versionName = walkmanVersion
-        setProperty("archivesBaseName", "Walkman $walkmanVersion")
         buildConfigField("String", "GITHUB_REPO", "\"$githubRepoSlug\"")
         buildConfigField("String", "VERSION_NAME", "\"$walkmanVersion\"")
     }

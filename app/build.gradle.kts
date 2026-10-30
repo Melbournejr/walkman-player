@@ -5,8 +5,12 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-val walkmanVersion = "11.0.5"
-val walkmanVersionCode = 1105
+// =========================================================================
+// CHỈ CẦN ĐỔI HẬU TỐ PHIÊN BẢN Ở DÒNG NÀY CHO CÁC BẢN CẢI TIẾN TIẾP THEO:
+// =========================================================================
+val walkmanVersion = "11.1.0"
+val walkmanVersionCode = 1110
+val githubRepoSlug = "Melbournejr/walkman-player"
 
 val fixedKeystoreFile = file("walkman-permanent.jks")
 if (!fixedKeystoreFile.exists()) {
@@ -39,6 +43,8 @@ android {
         versionCode = walkmanVersionCode
         versionName = walkmanVersion
         setProperty("archivesBaseName", "Walkman $walkmanVersion")
+        buildConfigField("String", "GITHUB_REPO", "\"$githubRepoSlug\"")
+        buildConfigField("String", "VERSION_NAME", "\"$walkmanVersion\"")
     }
 
     signingConfigs {
@@ -72,7 +78,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.8" }
 }
 
@@ -89,6 +98,3 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
 }
-
-
-

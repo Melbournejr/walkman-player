@@ -1,37 +1,54 @@
-﻿name: Build Walkman Pro APK
+﻿name: Build & Release Walkman APK
 
 on:
   push:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Source
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: '8.4'
-          cache-read-only: false
+          cache: gradle
 
       - name: Assemble Debug APK
-        env:
-          GRADLE_OPTS: -Dorg.gradle.jvmargs="-Xmx4096m -XX:MaxMetaspaceSize=1024m"
         run: gradle assembleDebug --no-daemon
 
       - name: Upload Walkman Pro APK
         uses: actions/upload-artifact@v4
         with:
-          name: Walkman-Pro-MultiSkin-APK
+          name: Walkman-APK
           path: app/build/outputs/apk/debug/*.apk
 
+      - name: Extract Version from build.gradle.kts
+        id: extract_ver
+        run: |
+          VER=$(grep 'val walkmanVersion =' app/build.gradle.kts | cut -d '"' -f 2)
+          echo "version=$VER" >> $GITHUB_OUTPUT
+
+      - name: Publish GitHub Release for OTA Update
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.extract_ver.outputs.version }}
+          name: Walkman ${{ steps.extract_ver.outputs.version }}
+          body: |
+            ### Walkman ${{ steps.extract_ver.outputs.version }} OTA Release
+            - Cơ học cuộn băng Cassette 3D thực tế (bảo toàn diện tích cuộn băng Trái/Phải & dây băng chạy tiếp tuyến qua đầu từ).
+            - Tích hợp trình cập nhật trực tuyến OTA qua GitHub Releases.
+            - Bộ giải mã DSD 1024-Tap Symmetric Kaiser FIR (-140dB).
+          files: app/build/outputs/apk/debug/*.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

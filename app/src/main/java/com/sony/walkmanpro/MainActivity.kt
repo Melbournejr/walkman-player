@@ -66,6 +66,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import androidx.documentfile.provider.DocumentFile
 import androidx.media3.common.AudioAttributes
@@ -85,8 +86,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.roundToInt
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 private val DapChassisBlack = Color(0xFF0A0B0E)
 private val DapPanelDark = Color(0xFF151820)
@@ -1004,6 +1009,17 @@ fun SnowskyEchoDapApp(
     var posMs by remember { mutableStateOf(PlaylistStorage.loadLastPos(context)) }
     var durMs by remember { mutableStateOf(226000) }
 
+    // Trạng thái OTA Update
+    var otaAutoCheck by remember { mutableStateOf(OtaUpdateManager.isAutoCheckEnabled(context)) }
+    var otaIsChecking by remember { mutableStateOf(false) }
+    var otaAvailableRelease by remember { mutableStateOf<OtaReleaseInfo?>(null) }
+    var otaIsDownloading by remember { mutableStateOf(false) }
+    var otaDownloadPercent by remember { mutableStateOf(0) }
+    var otaDownloadedMb by remember { mutableStateOf(0f) }
+    var otaTotalMb by remember { mutableStateOf(0f) }
+    var otaDownloadedFile by remember { mutableStateOf<File?>(null) }
+    var otaErrorMsg by remember { mutableStateOf<String?>(null) }
+
     val dspPrefs = context.getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
     var masterVol by remember { mutableStateOf(dspPrefs.getFloat("dsp_master_vol", 0.75f)) }
     var pureDsdMode by remember { mutableStateOf(dspPrefs.getBoolean("dsp_pure_dsd_mode", false)) }
@@ -1050,6 +1066,38 @@ fun SnowskyEchoDapApp(
 
     BackHandler(enabled = currentScreen != AppScreen.NOW_PLAYING) {
         currentScreen = AppScreen.NOW_PLAYING
+    }
+
+    fun triggerOtaCheck(showToastWhenUpToDate: Boolean) {
+        if (otaIsChecking) return
+        otaIsChecking = true
+        otaErrorMsg = null
+        scope.launch {
+            when (val res = OtaUpdateManager.checkForUpdates(context)) {
+                is OtaCheckResult.UpdateAvailable -> {
+                    otaIsChecking = false
+                    otaDownloadedFile = null
+                    otaDownloadPercent = 0
+                    otaAvailableRelease = res.release
+                }
+                is OtaCheckResult.UpToDate -> {
+                    otaIsChecking = false
+                    if (showToastWhenUpToDate) {
+                        Toast.makeText(
+                            context,
+                            "Bạn đang dùng phiên bản mới nhất (Walkman ${res.currentVersion})",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+                is OtaCheckResult.Error -> {
+                    otaIsChecking = false
+                    if (showToastWhenUpToDate) {
+                        Toast.makeText(context, res.message, Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
     }
 
     fun updateSystemMediaNotification(playing: Boolean) {
@@ -1243,6 +1291,11 @@ fun SnowskyEchoDapApp(
                 }
             }
         }
+        // Tự động kiểm tra OTA ngầm khi mở ứng dụng nếu được bật
+        if (otaAutoCheck) {
+            delay(1500)
+            triggerOtaCheck(showToastWhenUpToDate = false)
+        }
     }
 
     LaunchedEffect(isPlaying) {
@@ -1261,7 +1314,7 @@ fun SnowskyEchoDapApp(
                     updateSystemMediaNotification(true)
                 }
             }
-            delay(80)
+            delay(60)
         }
     }
 
@@ -1390,6 +1443,13 @@ fun SnowskyEchoDapApp(
                     currentBitrate = currentBitrate,
                     currentSampleRate = currentSampleRate,
                     audioOutput = audioOutput,
+                    otaAutoCheck = otaAutoCheck,
+                    otaIsChecking = otaIsChecking,
+                    onOtaAutoCheckToggle = { enabled ->
+                        otaAutoCheck = enabled
+                        OtaUpdateManager.setAutoCheckEnabled(context, enabled)
+                    },
+                    onCheckOtaNow = { triggerOtaCheck(showToastWhenUpToDate = true) },
                     onBack = { currentScreen = AppScreen.NOW_PLAYING },
                     onPureDsdToggle = {
                         pureDsdMode = it
@@ -1453,12 +1513,242 @@ fun SnowskyEchoDapApp(
                 )
             }
         }
+
+        // HỘP THOẠI OTA UPDATE KHI PHÁT HIỆN PHIÊN BẢN MỚI TRÊN GITHUB RELEASES
+        otaAvailableRelease?.let { release ->
+            OtaUpdateDialog(
+                release = release,
+                isDownloading = otaIsDownloading,
+                downloadPercent = otaDownloadPercent,
+                downloadedMb = otaDownloadedMb,
+                totalMb = otaTotalMb,
+                downloadedFile = otaDownloadedFile,
+                errorMessage = otaErrorMsg,
+                onDismiss = {
+                    if (!otaIsDownloading) {
+                        otaAvailableRelease = null
+                        otaErrorMsg = null
+                    }
+                },
+                onStartDownload = {
+                    if (!otaIsDownloading) {
+                        otaIsDownloading = true
+                        otaErrorMsg = null
+                        otaDownloadPercent = 0
+                        scope.launch {
+                            val res = OtaUpdateManager.downloadUpdateApk(context, release) { dl, total, pct ->
+                                otaDownloadPercent = pct
+                                otaDownloadedMb = dl / (1024f * 1024f)
+                                otaTotalMb = total / (1024f * 1024f)
+                            }
+                            otaIsDownloading = false
+                            res.onSuccess { file ->
+                                otaDownloadedFile = file
+                                val installRes = OtaUpdateManager.triggerApkInstallation(context, file)
+                                installRes.onFailure { err ->
+                                    otaErrorMsg = err.localizedMessage
+                                }
+                            }.onFailure { err ->
+                                otaErrorMsg = err.localizedMessage ?: "Lỗi tải gói cập nhật APK."
+                            }
+                        }
+                    }
+                },
+                onInstallDownloaded = { file ->
+                    val installRes = OtaUpdateManager.triggerApkInstallation(context, file)
+                    installRes.onFailure { err ->
+                        otaErrorMsg = err.localizedMessage
+                    }
+                }
+            )
+        }
+    }
+}
+
+/**
+ * DIALOG CẬP NHẬT TRỰC TUYẾN OTA (CHANGELOG + TIẾN TRÌNH TẢI + FILEPROVIDER INSTALLER)
+ */
+@Composable
+fun OtaUpdateDialog(
+    release: OtaReleaseInfo,
+    isDownloading: Boolean,
+    downloadPercent: Int,
+    downloadedMb: Float,
+    totalMb: Float,
+    downloadedFile: File?,
+    errorMessage: String?,
+    onDismiss: () -> Unit,
+    onStartDownload: () -> Unit,
+    onInstallDownloaded: (File) -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(18.dp))
+                .background(PanelSurface)
+                .border(1.5.dp, ChampagneGold, RoundedCornerShape(18.dp))
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Default.SystemUpdate, contentDescription = null, tint = ChampagneGold, modifier = Modifier.size(22.dp))
+                    Text(
+                        text = "Bản Cập Nhật Mới",
+                        color = TextPure,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(ChampagneGold.copy(alpha = 0.18f))
+                        .border(1.dp, ChampagneGold, RoundedCornerShape(6.dp))
+                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        text = "v${release.cleanVersion}",
+                        color = ChampagneGold,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            }
+
+            Text(
+                text = "${release.releaseTitle} (${if (release.publishedAt.isNotBlank()) release.publishedAt else "GitHub Release"})",
+                color = ColdSilver,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium
+            )
+
+            // Khung Changelog có thanh cuộn
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 80.dp, max = 180.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(DapChassisBlack)
+                    .border(1.dp, BezelBorder, RoundedCornerShape(10.dp))
+                    .verticalScroll(rememberScrollState())
+                    .padding(12.dp)
+            ) {
+                Text(
+                    text = "CHANGELOG:",
+                    color = ChampagneGold,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    letterSpacing = 1.sp
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = release.changelog,
+                    color = TextPure,
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp
+                )
+            }
+
+            if (isDownloading) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Đang tải gói APK...",
+                            color = ChampagneGold,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = if (totalMb > 0f) {
+                                "%d%% (%.1f / %.1f MB)".format(downloadPercent, downloadedMb, totalMb)
+                            } else {
+                                "$downloadPercent%"
+                            },
+                            color = TextPure,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                    LinearProgressIndicator(
+                        progress = { (downloadPercent / 100f).coerceIn(0f, 1f) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(6.dp)
+                            .clip(RoundedCornerShape(3.dp)),
+                        color = ChampagneGold,
+                        trackColor = BezelBorder
+                    )
+                }
+            }
+
+            if (!errorMessage.isNullOrBlank()) {
+                Text(
+                    text = errorMessage,
+                    color = EchoCrimsonRed,
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (!isDownloading) {
+                    TextButton(onClick = onDismiss) {
+                        Text("Để sau", color = TextMuted, fontSize = 13.sp)
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+
+                if (downloadedFile != null && !isDownloading) {
+                    Button(
+                        onClick = { onInstallDownloaded(downloadedFile) },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = LedPlayGreen,
+                            contentColor = DapChassisBlack
+                        ),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text("Cài đặt ngay", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    }
+                } else {
+                    Button(
+                        onClick = onStartDownload,
+                        enabled = !isDownloading,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = ChampagneGold,
+                            contentColor = DapChassisBlack
+                        ),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text(
+                            text = if (isDownloading) "Đang tải..." else "Cập nhật ngay",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
 /**
  * =============================================================================================
- * MÀN HÌNH NOW PLAYING CHUẨN SNOWSKY ECHO DAP (THIẾT KẾ VẬT LÝ TUYỆT ĐỐI THEO ẢNH MẪU)
+ * MÀN HÌNH NOW PLAYING VỚI CƠ HỌC BĂNG CASSETTE VẬT LÝ THẬT (DYNAMIC SPOOL & MOVING TAPE PATH)
  * =============================================================================================
  */
 @Composable
@@ -1491,38 +1781,37 @@ fun SnowskyEchoNowPlayingScreen(
     val safeCurrPos = posMs.toFloat().coerceIn(0f, safeMaxDur)
     val progressFraction = (safeCurrPos / safeMaxDur).coerceIn(0f, 1f)
 
-    val targetAngularVelocity = if (isPlaying) 70f else 0f
-    val smoothVelocity by animateFloatAsState(
-        targetValue = targetAngularVelocity,
-        animationSpec = tween(durationMillis = 450, easing = FastOutSlowInEasing),
-        label = "echo_reel_velocity"
+    // Vận tốc góc cơ bản của dây băng có quán tính mượt khi Play / Pause
+    val targetLinearTapeSpeed = if (isPlaying) 1.0f else 0.0f
+    val smoothTapeMotion by animateFloatAsState(
+        targetValue = targetLinearTapeSpeed,
+        animationSpec = tween(durationMillis = 380, easing = FastOutSlowInEasing),
+        label = "tape_inertia"
     )
 
-    var baseSpinAngle by remember { mutableStateOf(0f) }
+    // Biến tích lũy quãng đường dây băng đã chạy (dùng để quay 2 cuộn băng và di chuyển vệt từ trên dây)
+    var cumulativeTapeDistance by remember { mutableStateOf(0f) }
     var lastSyncedPosMs by remember { mutableStateOf(posMs) }
 
+    // Khi người dùng kéo Seekbar, lập tức xoay vọt cuộn băng và vị trí dây theo đúng thời gian mới
     LaunchedEffect(posMs) {
         val diffMs = posMs - lastSyncedPosMs
-        if (abs(diffMs) > 800) {
-            baseSpinAngle = (baseSpinAngle + diffMs * 0.12f) % 36000f
+        if (abs(diffMs) > 600) {
+            cumulativeTapeDistance = (cumulativeTapeDistance + diffMs * 0.16f) % 100000f
         }
         lastSyncedPosMs = posMs
     }
 
-    LaunchedEffect(isPlaying, smoothVelocity) {
+    // Vòng lặp vật lý 60fps: Chỉ chạy khi đang Play hoặc trong pha quán tính dừng; khi Pause dừng cứng 100%
+    LaunchedEffect(isPlaying, smoothTapeMotion) {
         var lastNanos = withFrameNanos { it }
-        while (isPlaying || smoothVelocity > 0.4f) {
+        while (isPlaying || smoothTapeMotion > 0.01f) {
             val now = withFrameNanos { it }
             val dt = (now - lastNanos) / 1_000_000_000f
             lastNanos = now
-            baseSpinAngle = (baseSpinAngle + smoothVelocity * dt) % 36000f
+            cumulativeTapeDistance = (cumulativeTapeDistance + smoothTapeMotion * dt * 95f) % 100000f
         }
     }
-
-    val leftSpeedRatio = 1.35f - 0.55f * progressFraction
-    val rightSpeedRatio = 0.80f + 0.55f * progressFraction
-    val leftReelAngle = (baseSpinAngle * leftSpeedRatio) % 360f
-    val rightReelAngle = (baseSpinAngle * rightSpeedRatio) % 360f
 
     val trackOrderStr = if (totalTracks > 0) "%03d/%03d".format(trackIndex + 1, totalTracks) else "001/035"
     val specLineStr = "$formatName | $sampleRateText | ${bitrateKbps}kbps"
@@ -1605,20 +1894,20 @@ fun SnowskyEchoNowPlayingScreen(
             }
         }
 
-        // THÂN MÁY DAP TRUNG TÂM (MÀN HÌNH KÍNH ĐEN + CASSETTE 3D CHUẨN ẢNH MẪU SNOWSKY ECHO)
+        // THÂN MÁY DAP TRUNG TÂM (MÀN HÌNH KÍNH ĐEN + CASSETTE CƠ HỌC 3D)
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
                 .padding(vertical = 6.dp)
-                .shadow(16.dp, RoundedCornerShape(16.dp))
-                .clip(RoundedCornerShape(16.dp))
+                .shadow(18.dp, RoundedCornerShape(18.dp))
+                .clip(RoundedCornerShape(18.dp))
                 .background(
                     Brush.verticalGradient(
-                        listOf(Color(0xFF222732), Color(0xFF161920), Color(0xFF0E1015))
+                        listOf(Color(0xFF242936), Color(0xFF161922), Color(0xFF0C0E13))
                     )
                 )
-                .border(2.dp, Color(0xFF343B4A), RoundedCornerShape(16.dp))
+                .border(2.dp, Color(0xFF373F50), RoundedCornerShape(18.dp))
                 .padding(12.dp),
             verticalArrangement = Arrangement.SpaceBetween,
             horizontalAlignment = Alignment.CenterHorizontally
@@ -1628,28 +1917,29 @@ fun SnowskyEchoNowPlayingScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
-                    .clip(RoundedCornerShape(10.dp))
+                    .clip(RoundedCornerShape(12.dp))
                     .background(DapGlassScreen)
-                    .border(2.dp, Color(0xFF252A34), RoundedCornerShape(10.dp))
+                    .border(2.dp, Color(0xFF262C38), RoundedCornerShape(12.dp))
                     .padding(10.dp)
             ) {
-                // Khung vỏ băng Cassette 3D bên trong màn hình kính
+                // Vỏ băng Cassette 3D có chiều sâu cơ khí, gờ kim loại phay xước & hốc bóng đổ
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .clip(RoundedCornerShape(8.dp))
+                        .shadow(10.dp, RoundedCornerShape(10.dp))
+                        .clip(RoundedCornerShape(10.dp))
                         .background(
                             Brush.verticalGradient(
-                                listOf(Color(0xFF2B303A), Color(0xFF1E222A), Color(0xFF15181E))
+                                listOf(Color(0xFF2F3542), Color(0xFF1F232C), Color(0xFF14171D))
                             )
                         )
-                        .border(1.2.dp, Color(0xFF3D4454), RoundedCornerShape(8.dp))
+                        .border(1.5.dp, Color(0xFF454E61), RoundedCornerShape(10.dp))
                 ) {
-                    // 4 ốc vít nhỏ ở 4 góc mặt băng
-                    CassetteCornerScrew(Modifier.align(Alignment.TopStart).padding(5.dp))
-                    CassetteCornerScrew(Modifier.align(Alignment.TopEnd).padding(5.dp))
-                    CassetteCornerScrew(Modifier.align(Alignment.BottomStart).padding(5.dp))
-                    CassetteCornerScrew(Modifier.align(Alignment.BottomEnd).padding(5.dp))
+                    // 4 ốc vít lục giác có chiều sâu ở 4 góc mặt băng
+                    CassetteCornerScrew(Modifier.align(Alignment.TopStart).padding(6.dp))
+                    CassetteCornerScrew(Modifier.align(Alignment.TopEnd).padding(6.dp))
+                    CassetteCornerScrew(Modifier.align(Alignment.BottomStart).padding(6.dp))
+                    CassetteCornerScrew(Modifier.align(Alignment.BottomEnd).padding(6.dp))
 
                     Column(
                         modifier = Modifier
@@ -1658,7 +1948,7 @@ fun SnowskyEchoNowPlayingScreen(
                         verticalArrangement = Arrangement.SpaceBetween,
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        // 1. THANH TRẠNG THÁI HUD TRÊN MÀN HÌNH (🔊 56 | 🎧 | 001/035 | FAST-PC | 🔀 | [NOR] | SD | 🔋)
+                        // 1. THANH TRẠNG THÁI HUD TRÊN MÀN HÌNH
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1697,10 +1987,15 @@ fun SnowskyEchoNowPlayingScreen(
                         // 2. TIÊU ĐỀ BĂNG TRÊN (BORN FOR MUSIC)
                         Box(
                             modifier = Modifier
-                                .fillMaxWidth(0.90f)
+                                .fillMaxWidth(0.92f)
                                 .clip(RoundedCornerShape(4.dp))
-                                .background(Color(0xFF20242D))
-                                .padding(horizontal = 8.dp, vertical = 2.dp),
+                                .background(
+                                    Brush.horizontalGradient(
+                                        listOf(Color(0xFF1A1E26), Color(0xFF282E3A), Color(0xFF1A1E26))
+                                    )
+                                )
+                                .border(0.8.dp, Color(0xFF475063), RoundedCornerShape(4.dp))
+                                .padding(horizontal = 10.dp, vertical = 3.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
@@ -1714,58 +2009,269 @@ fun SnowskyEchoNowPlayingScreen(
                             )
                         }
 
-                        // 3. CỬA SỔ CASSETTE TRUNG TÂM VỚI 2 CUỘN BĂNG MÀU ĐỎ SÂU 3D CHUẨN ẢNH MẪU
+                        // 3. CỬA SỔ CASSETTE CƠ HỌC 3D CHÂN THỰC:
+                        // - Thể hiện rõ lượng băng thật (Đầu bài: Trái đầy ắp - Phải cạn; Giữa bài: Cân bằng; Cuối bài: Trái cạn - Phải đầy ắp)
+                        // - Dây băng từ nối tiếp tuyến giữa 2 cuộn băng, đi qua 2 con lăn dẫn hướng và chạy ngang qua đầu từ đọc ở đáy.
                         Box(
                             modifier = Modifier
-                                .fillMaxWidth(0.86f)
-                                .height(92.dp)
-                                .clip(RoundedCornerShape(46.dp))
-                                .background(Color(0xFF15181F))
-                                .border(2.dp, Color(0xFF3E4554), RoundedCornerShape(46.dp))
+                                .fillMaxWidth(0.94f)
+                                .height(128.dp)
+                                .clip(RoundedCornerShape(18.dp))
+                                .background(
+                                    Brush.verticalGradient(
+                                        listOf(Color(0xFF07080B), Color(0xFF10131A), Color(0xFF080A0E))
+                                    )
+                                )
+                                .border(2.2.dp, Color(0xFF3E4656), RoundedCornerShape(18.dp))
                         ) {
                             Canvas(modifier = Modifier.fillMaxSize()) {
                                 val w = size.width
                                 val h = size.height
-                                val centerY = h / 2f
-                                val leftX = w * 0.23f
-                                val rightX = w * 0.77f
+                                val centerY = h * 0.45f
+                                val leftX = w * 0.26f
+                                val rightX = w * 0.74f
 
-                                // Cuộn dây từ màu đen nâu co giãn thực tế theo tiến trình bài hát
-                                val maxSpool = h * 0.48f
-                                val minSpool = h * 0.23f
-                                val leftSpoolR = maxSpool - (maxSpool - minSpool) * progressFraction
-                                val rightSpoolR = minSpool + (maxSpool - minSpool) * progressFraction
+                                // A. Khung viền bóng đổ chìm 3D (Recessed Window Inner Bevel)
+                                drawRoundRect(
+                                    color = Color.Black.copy(alpha = 0.75f),
+                                    topLeft = Offset(2.dp.toPx(), 2.dp.toPx()),
+                                    size = Size(w - 4.dp.toPx(), h - 4.dp.toPx()),
+                                    cornerRadius = CornerRadius(16.dp.toPx()),
+                                    style = Stroke(width = 4.dp.toPx())
+                                )
 
-                                drawCircle(Color(0xFF0C0E12), leftSpoolR, Offset(leftX, centerY))
-                                drawCircle(Color(0xFF221C1A), leftSpoolR, Offset(leftX, centerY), style = Stroke(1.2.dp.toPx()))
+                                // B. TÍNH TOÁN BÁN KÍNH THỰC CỦA 2 CUỘN BĂNG TỪ THEO ĐỊNH LUẬT BẢO TOÀN DIỆN TÍCH:
+                                // Trục bánh răng (hubRadius) = 0.21 * h
+                                // Khi rỗng (0% băng): minSpoolR = 0.225 * h (Sát mép trục bánh răng)
+                                // Khi đầy (100% băng): maxSpoolR = 0.445 * h (Gần chạm mép cửa sổ, lớn gấp đôi khi rỗng!)
+                                val hubOuterR = h * 0.205f
+                                val minSpoolR = h * 0.222f
+                                val maxSpoolR = h * 0.445f
 
-                                drawCircle(Color(0xFF0C0E12), rightSpoolR, Offset(rightX, centerY))
-                                drawCircle(Color(0xFF221C1A), rightSpoolR, Offset(rightX, centerY), style = Stroke(1.2.dp.toPx()))
+                                val minArea = minSpoolR * minSpoolR
+                                val maxArea = maxSpoolR * maxSpoolR
 
-                                // Cửa sổ thước đo ở giữa với vạch đỏ trung tâm giống hệt ảnh mẫu
-                                val winL = w * 0.37f
-                                val winR = w * 0.63f
-                                val winT = h * 0.27f
-                                val winB = h * 0.73f
+                                // Cuộn Trái (Supply Reel): Mới bắt đầu (p=0) -> maxSpoolR (Đầy); Cuối bài (p=1) -> minSpoolR (Hết)
+                                val leftSpoolR = sqrt(maxArea - progressFraction * (maxArea - minArea))
+                                // Cuộn Phải (Take-up Reel): Mới bắt đầu (p=0) -> minSpoolR (Hết); Cuối bài (p=1) -> maxSpoolR (Đầy)
+                                val rightSpoolR = sqrt(minArea + progressFraction * (maxArea - minArea))
 
-                                drawRoundRect(Color(0xFF262B35), Offset(winL, winT), Size(winR - winL, winB - winT), CornerRadius(4.dp.toPx()))
-                                drawRoundRect(Color(0xFF475061), Offset(winL, winT), Size(winR - winL, winB - winT), CornerRadius(4.dp.toPx()), style = Stroke(1.2.dp.toPx()))
+                                // Vận tốc góc thực tế: ω = v / R (Cuộn nào bán kính nhỏ hơn sẽ quay nhanh hơn đúng vật lý!)
+                                // Chiều quay chuẩn máy Cassette: Cả 2 cuộn cùng quay ngược chiều kim đồng hồ (hoặc cùng chiều) để kéo băng từ Trái -> Phải
+                                val leftAngle = -((cumulativeTapeDistance * (maxSpoolR / leftSpoolR.coerceAtLeast(1f))) % 360f)
+                                val rightAngle = -((cumulativeTapeDistance * (maxSpoolR / rightSpoolR.coerceAtLeast(1f))) % 360f)
 
-                                for (t in 0..12) {
-                                    val tx = winL + 5.dp.toPx() + (winR - winL - 10.dp.toPx()) * (t.toFloat() / 12f)
-                                    val tickH = if (t % 3 == 0) 6.dp.toPx() else 3.5.dp.toPx()
-                                    drawLine(Color.White.copy(alpha = 0.65f), Offset(tx, centerY - tickH), Offset(tx, centerY + tickH), 1.dp.toPx())
+                                // C. VẼ 2 CUỘN DÂY BĂNG TỪ (MAGNETIC TAPE PACKS) VỚI VÂN ĐỒNG TÂM & BÓNG PHẢN QUANG XOAY
+                                listOf(
+                                    Triple(leftX, leftSpoolR, leftAngle),
+                                    Triple(rightX, rightSpoolR, rightAngle)
+                                ).forEach { (cx, spoolR, angle) ->
+                                    // Bóng đổ của cuộn băng xuống đáy hốc máy
+                                    drawCircle(
+                                        color = Color.Black.copy(alpha = 0.65f),
+                                        radius = spoolR + 3.dp.toPx(),
+                                        center = Offset(cx + 2.dp.toPx(), centerY + 3.dp.toPx())
+                                    )
+
+                                    // Thân cuộn băng từ màu Nâu Đen Oxit Sắt (Ferric/Chrome Magnetic Tape)
+                                    drawCircle(
+                                        brush = Brush.radialGradient(
+                                            colors = listOf(
+                                                Color(0xFF3B2822),
+                                                Color(0xFF241814),
+                                                Color(0xFF18100D),
+                                                Color(0xFF2D1E1A)
+                                            ),
+                                            center = Offset(cx, centerY),
+                                            radius = spoolR.coerceAtLeast(1f)
+                                        ),
+                                        radius = spoolR,
+                                        center = Offset(cx, centerY)
+                                    )
+
+                                    // Các đường rãnh lớp băng quấn đồng tâm (Winding Layers) để nhìn rõ độ dày cuộn băng
+                                    val tapeThickness = (spoolR - hubOuterR).coerceAtLeast(0f)
+                                    val ringSteps = (tapeThickness / 3.5.dp.toPx()).toInt().coerceIn(1, 14)
+                                    for (rStep in 1..ringSteps) {
+                                        val ringR = hubOuterR + (tapeThickness * (rStep.toFloat() / (ringSteps + 1)))
+                                        drawCircle(
+                                            color = Color(0xFF4A352D).copy(alpha = 0.42f),
+                                            radius = ringR,
+                                            center = Offset(cx, centerY),
+                                            style = Stroke(width = 0.8.dp.toPx())
+                                        )
+                                    }
+
+                                    // Ánh kim phản chiếu trên bề mặt cuộn dây băng quay theo góc thực tế
+                                    if (tapeThickness > 2.dp.toPx()) {
+                                        rotate(angle * 0.5f, pivot = Offset(cx, centerY)) {
+                                            drawLine(
+                                                color = Color(0xFF8C6252).copy(alpha = 0.30f),
+                                                start = Offset(cx - spoolR * 0.92f, centerY),
+                                                end = Offset(cx + spoolR * 0.92f, centerY),
+                                                strokeWidth = 3.dp.toPx()
+                                            )
+                                        }
+                                    }
+
+                                    // Viền mép ngoài sắc nét của cuộn băng từ
+                                    drawCircle(
+                                        color = Color(0xFF5C4238),
+                                        radius = spoolR,
+                                        center = Offset(cx, centerY),
+                                        style = Stroke(width = 1.4.dp.toPx())
+                                    )
                                 }
-                                drawLine(EchoCrimsonRed, Offset((winL + winR) / 2f, winT + 2.dp.toPx()), Offset((winL + winR) / 2f, winB - 2.dp.toPx()), 1.8.dp.toPx())
 
-                                // 2 Bánh răng bạc với lõi cánh quạt màu Đỏ Crimson sắc nét chuẩn ảnh mẫu
-                                val outerWheelR = h * 0.39f
-                                val redCoreR = outerWheelR * 0.62f
-                                val innerHoleR = outerWheelR * 0.23f
+                                // D. VẼ DÂY BĂNG TỪ CHUYỂN ĐỘNG GIỮA HAI CUỘN QUA CON LĂN DẪN HƯỚNG (DYNAMIC MOVING TAPE PATH)
+                                val rollerLeftX = w * 0.13f
+                                val rollerRightX = w * 0.87f
+                                val rollerY = h * 0.86f
+                                val rollerR = 5.5.dp.toPx()
 
-                                listOf(leftX to leftReelAngle, rightX to rightReelAngle).forEach { (cx, angle) ->
-                                    drawCircle(Color(0xFFE2E8F0), outerWheelR, Offset(cx, centerY))
-                                    drawCircle(Color(0xFF1A1E26), outerWheelR * 0.84f, Offset(cx, centerY))
+                                // Điểm tiếp tuyến từ mép ngoài cuộn băng Trái xuống con lăn Trái
+                                val leftTangentX = leftX - leftSpoolR * 0.78f
+                                val leftTangentY = centerY + leftSpoolR * 0.62f
+
+                                // Điểm tiếp tuyến từ con lăn Phải lên mép ngoài cuộn băng Phải
+                                val rightTangentX = rightX + rightSpoolR * 0.78f
+                                val rightTangentY = centerY + rightSpoolR * 0.62f
+
+                                // 1. Nhánh dây băng bên trái (đi từ cuộn phát xuống con lăn trái)
+                                drawLine(
+                                    color = Color(0xFF4A332B),
+                                    start = Offset(leftTangentX, leftTangentY),
+                                    end = Offset(rollerLeftX - rollerR * 0.6f, rollerY),
+                                    strokeWidth = 2.2.dp.toPx(),
+                                    cap = StrokeCap.Round
+                                )
+
+                                // 2. Đoạn dây băng chính chạy ngang qua Đầu Từ Đọc (Magnetic Play Head) ở đáy cửa sổ
+                                drawLine(
+                                    color = Color(0xFF593D33),
+                                    start = Offset(rollerLeftX, rollerY + rollerR * 0.5f),
+                                    end = Offset(rollerRightX, rollerY + rollerR * 0.5f),
+                                    strokeWidth = 2.8.dp.toPx(),
+                                    cap = StrokeCap.Round
+                                )
+
+                                // 3. Nhánh dây băng bên phải (đi từ con lăn phải cuộn vào cuộn thu)
+                                drawLine(
+                                    color = Color(0xFF4A332B),
+                                    start = Offset(rollerRightX + rollerR * 0.6f, rollerY),
+                                    end = Offset(rightTangentX, rightTangentY),
+                                    strokeWidth = 2.2.dp.toPx(),
+                                    cap = StrokeCap.Round
+                                )
+
+                                // Hiệu ứng hạt từ ánh kim chạy dọc trên dây băng từ Trái -> Phải (Nhìn thấy rõ dây băng đang chạy!)
+                                val dashSpacing = 18.dp.toPx()
+                                val dashLen = 6.dp.toPx()
+                                val movingOffset = (cumulativeTapeDistance * 0.9f) % dashSpacing
+
+                                // Vệt chạy trên đoạn ngang qua đầu từ
+                                var curX = rollerLeftX + movingOffset
+                                while (curX < rollerRightX - dashLen) {
+                                    drawLine(
+                                        color = ChampagneGold.copy(alpha = 0.75f),
+                                        start = Offset(curX, rollerY + rollerR * 0.5f),
+                                        end = Offset(curX + dashLen, rollerY + rollerR * 0.5f),
+                                        strokeWidth = 2.dp.toPx(),
+                                        cap = StrokeCap.Round
+                                    )
+                                    curX += dashSpacing
+                                }
+
+                                // Vệt chạy trên nhánh dây nghiêng bên trái & bên phải
+                                val branchProgress = ((cumulativeTapeDistance * 0.05f) % 1.0f)
+                                val bLeftX = leftTangentX + (rollerLeftX - leftTangentX) * branchProgress
+                                val bLeftY = leftTangentY + (rollerY - leftTangentY) * branchProgress
+                                drawCircle(
+                                    color = ChampagneGold.copy(alpha = 0.7f),
+                                    radius = 1.8.dp.toPx(),
+                                    center = Offset(bLeftX, bLeftY)
+                                )
+
+                                val bRightX = rollerRightX + (rightTangentX - rollerRightX) * branchProgress
+                                val bRightY = rollerY + (rightTangentY - rollerY) * branchProgress
+                                drawCircle(
+                                    color = ChampagneGold.copy(alpha = 0.7f),
+                                    radius = 1.8.dp.toPx(),
+                                    center = Offset(bRightX, bRightY)
+                                )
+
+                                // Vẽ 2 Con lăn dẫn hướng băng (Tape Guide Rollers) quay tít ở 2 góc dưới
+                                val rollerAngle = -(cumulativeTapeDistance * 3.2f) % 360f
+                                listOf(rollerLeftX, rollerRightX).forEach { rx ->
+                                    drawCircle(
+                                        color = Color(0xFF94A3B8),
+                                        radius = rollerR,
+                                        center = Offset(rx, rollerY)
+                                    )
+                                    rotate(rollerAngle, pivot = Offset(rx, rollerY)) {
+                                        drawLine(
+                                            color = Color(0xFF0F172A),
+                                            start = Offset(rx - rollerR * 0.8f, rollerY),
+                                            end = Offset(rx + rollerR * 0.8f, rollerY),
+                                            strokeWidth = 1.5.dp.toPx()
+                                        )
+                                    }
+                                    drawCircle(
+                                        color = ChampagneGold,
+                                        radius = rollerR * 0.35f,
+                                        center = Offset(rx, rollerY)
+                                    )
+                                }
+
+                                // E. CỬA SỔ THƯỚC ĐO LƯỢNG BĂNG Ở GIỮA (SCALE WINDOW + VẠCH ĐỎ CHỈ BÁO TIẾN ĐỘ)
+                                val winL = w * 0.39f
+                                val winR = w * 0.61f
+                                val winT = centerY - h * 0.16f
+                                val winB = centerY + h * 0.16f
+
+                                drawRoundRect(
+                                    color = Color(0xFF1E222B).copy(alpha = 0.90f),
+                                    topLeft = Offset(winL, winT),
+                                    size = Size(winR - winL, winB - winT),
+                                    cornerRadius = CornerRadius(4.dp.toPx())
+                                )
+                                drawRoundRect(
+                                    color = Color(0xFF475061),
+                                    topLeft = Offset(winL, winT),
+                                    size = Size(winR - winL, winB - winT),
+                                    cornerRadius = CornerRadius(4.dp.toPx()),
+                                    style = Stroke(1.1.dp.toPx())
+                                )
+
+                                for (t in 0..10) {
+                                    val tx = winL + 5.dp.toPx() + (winR - winL - 10.dp.toPx()) * (t.toFloat() / 10f)
+                                    val tickH = if (t % 5 == 0) 6.dp.toPx() else 3.2.dp.toPx()
+                                    drawLine(
+                                        color = Color.White.copy(alpha = 0.65f),
+                                        start = Offset(tx, centerY - tickH),
+                                        end = Offset(tx, centerY + tickH),
+                                        strokeWidth = 1.dp.toPx()
+                                    )
+                                }
+
+                                // Kim chỉ đỏ trên thước dịch chuyển từ Trái -> Phải theo đúng tiến độ bài hát
+                                val gaugeX = winL + 5.dp.toPx() + (winR - winL - 10.dp.toPx()) * progressFraction
+                                drawLine(
+                                    color = EchoCrimsonRed,
+                                    start = Offset(gaugeX, winT + 2.dp.toPx()),
+                                    end = Offset(gaugeX, winB - 2.dp.toPx()),
+                                    strokeWidth = 2.dp.toPx()
+                                )
+
+                                // F. VẼ 2 TRỤC BÁNH RĂNG ĐỎ/BẠC (PRECISION REEL HUBS) NẰM Ở TÂM 2 CUỘN BĂNG
+                                val redCoreR = hubOuterR * 0.66f
+                                val innerHoleR = hubOuterR * 0.26f
+
+                                listOf(leftX to leftAngle, rightX to rightAngle).forEach { (cx, angle) ->
+                                    // Vành kim loại bạc phay xước của trục
+                                    drawCircle(Color(0xFFE2E8F0), hubOuterR, Offset(cx, centerY))
+                                    drawCircle(Color(0xFF1A1E26), hubOuterR * 0.85f, Offset(cx, centerY))
+                                    // Lõi cánh quạt màu Đỏ Crimson đặc trưng
                                     drawCircle(EchoCrimsonRed, redCoreR, Offset(cx, centerY))
 
                                     rotate(angle, pivot = Offset(cx, centerY)) {
@@ -1774,20 +2280,21 @@ fun SnowskyEchoNowPlayingScreen(
                                                 drawLine(
                                                     color = Color.White,
                                                     start = Offset(cx, centerY - innerHoleR),
-                                                    end = Offset(cx, centerY - outerWheelR * 0.95f),
-                                                    strokeWidth = 2.6.dp.toPx(),
+                                                    end = Offset(cx, centerY - hubOuterR * 0.96f),
+                                                    strokeWidth = 2.5.dp.toPx(),
                                                     cap = StrokeCap.Round
                                                 )
                                                 drawCircle(
                                                     color = Color(0xFF0F1115),
-                                                    radius = 2.dp.toPx(),
-                                                    center = Offset(cx, centerY - outerWheelR * 0.74f)
+                                                    radius = 1.8.dp.toPx(),
+                                                    center = Offset(cx, centerY - hubOuterR * 0.74f)
                                                 )
                                             }
                                         }
                                     }
 
-                                    drawCircle(Color(0xFF0E1015), innerHoleR, Offset(cx, centerY))
+                                    // Lỗ trục tâm
+                                    drawCircle(Color(0xFF0A0C10), innerHoleR, Offset(cx, centerY))
                                     drawCircle(Color.White, innerHoleR, Offset(cx, centerY), style = Stroke(1.2.dp.toPx()))
                                 }
                             }
@@ -1816,9 +2323,11 @@ fun SnowskyEchoNowPlayingScreen(
 
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center,
                                     modifier = Modifier.weight(1f)
                                 ) {
                                     Icon(Icons.Default.Album, null, tint = Color.White, modifier = Modifier.size(12.dp))
+                                    Spacer(modifier = Modifier.width(3.dp))
                                     Text(albumNameStr, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
 
@@ -1840,7 +2349,6 @@ fun SnowskyEchoNowPlayingScreen(
                                 Text(formatTimeMs(durMs), color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
                             }
 
-                            // Thanh tiến trình màu đỏ mỏng trên mặt băng (Có thể kéo trực tiếp)
                             Slider(
                                 value = safeCurrPos,
                                 onValueChange = { onSeek(it.toInt()) },
@@ -1862,8 +2370,10 @@ fun SnowskyEchoNowPlayingScreen(
                                 .fillMaxWidth(0.88f)
                                 .height(30.dp)
                                 .clip(RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp, bottomStart = 3.dp, bottomEnd = 3.dp))
-                                .background(Color(0xFF222631))
-                                .border(1.dp, Color(0xFF394052), RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp, bottomStart = 3.dp, bottomEnd = 3.dp))
+                                .background(
+                                    Brush.verticalGradient(listOf(Color(0xFF282D3A), Color(0xFF1B1F28)))
+                                )
+                                .border(1.dp, Color(0xFF3E4658), RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp, bottomStart = 3.dp, bottomEnd = 3.dp))
                                 .padding(horizontal = 10.dp),
                             contentAlignment = Alignment.Center
                         ) {
@@ -1907,46 +2417,46 @@ fun SnowskyEchoNowPlayingScreen(
                         }
                     }
 
-                    // Lớp phản quang chéo qua mặt kính máy nghe nhạc giống ảnh chụp thực tế
+                    // Lớp kính phản quang chéo tạo chiều sâu vật liệu thật
                     Canvas(modifier = Modifier.fillMaxSize()) {
                         val w = size.width
                         val h = size.height
                         val glarePath = Path().apply {
-                            moveTo(w * 0.42f, 0f)
-                            lineTo(w * 0.62f, 0f)
-                            lineTo(w * 0.46f, h)
-                            lineTo(w * 0.26f, h)
+                            moveTo(w * 0.40f, 0f)
+                            lineTo(w * 0.60f, 0f)
+                            lineTo(w * 0.44f, h)
+                            lineTo(w * 0.24f, h)
                             close()
                         }
                         drawPath(
                             path = glarePath,
                             brush = Brush.linearGradient(
-                                colors = listOf(Color.White.copy(alpha = 0.05f), Color.White.copy(alpha = 0.01f))
+                                colors = listOf(Color.White.copy(alpha = 0.055f), Color.White.copy(alpha = 0.01f))
                             )
                         )
                     }
                 }
             }
 
-            // Phần cằm máy vát kim loại khắc chìm SNOWSKY / ECHO giống ảnh mẫu
+            // Phần cằm máy vát kim loại khắc chìm SNOWSKY / ECHO
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 10.dp, start = 10.dp, end = 10.dp, bottom = 2.dp),
+                    .padding(top = 8.dp, start = 10.dp, end = 10.dp, bottom = 2.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
                     text = "❄ SNOWSKY",
                     color = Color(0xFF475569),
-                    fontSize = 12.sp,
+                    fontSize = 11.5.sp,
                     fontWeight = FontWeight.Black,
                     letterSpacing = 2.sp
                 )
                 Text(
                     text = "ECHO",
                     color = Color(0xFF475569),
-                    fontSize = 12.sp,
+                    fontSize = 11.5.sp,
                     fontWeight = FontWeight.Black,
                     letterSpacing = 2.8.sp
                 )
@@ -2201,7 +2711,7 @@ fun CassetteMechanicalKey(
 
 /**
  * =============================================================================================
- * 2. MÀN HÌNH SETTINGS / AUDIO LAB
+ * 2. MÀN HÌNH SETTINGS / AUDIO LAB (TÍCH HỢP OTA UPDATE TRONG PHẦN OTHER)
  * =============================================================================================
  */
 @Composable
@@ -2223,6 +2733,10 @@ fun SignatureAudioLabScreen(
     currentBitrate: Int,
     currentSampleRate: String,
     audioOutput: AudioOutputState,
+    otaAutoCheck: Boolean,
+    otaIsChecking: Boolean,
+    onOtaAutoCheckToggle: (Boolean) -> Unit,
+    onCheckOtaNow: () -> Unit,
     onBack: () -> Unit,
     onPureDsdToggle: (Boolean) -> Unit,
     onMasterVolChange: (Float) -> Unit,
@@ -2280,7 +2794,7 @@ fun SignatureAudioLabScreen(
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = "Sound Settings & DSP",
+                        text = "Sound Settings, DSP & OTA Update",
                         color = TextMuted,
                         fontSize = 11.sp
                     )
@@ -2565,7 +3079,71 @@ fun SignatureAudioLabScreen(
                 }
             }
 
-            AudioLabSectionCard(title = "OTHER") {
+            // SECTION 4: OTHER & OTA SOFTWARE UPDATE
+            AudioLabSectionCard(title = "OTHER & OTA UPDATE") {
+                // Khối kiểm tra cập nhật OTA từ GitHub Releases
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                        Text(
+                            text = "Phiên bản: Walkman ${BuildConfig.VERSION_NAME}",
+                            color = TextPure,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "Nguồn OTA: github.com/${BuildConfig.GITHUB_REPO}",
+                            color = TextMuted,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    Button(
+                        onClick = onCheckOtaNow,
+                        enabled = !otaIsChecking,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = ChampagneGold,
+                            contentColor = DapChassisBlack
+                        ),
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.height(36.dp)
+                    ) {
+                        if (otaIsChecking) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                strokeWidth = 2.dp,
+                                color = DapChassisBlack
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Đang kiểm tra...", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        } else {
+                            Icon(Icons.Default.SystemUpdate, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text("Kiểm tra cập nhật", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                AudioLabSwitchRow(
+                    title = "Tự động kiểm tra cập nhật",
+                    subtitle = "Kiểm tra bản APK mới trên GitHub Releases khi mở ứng dụng",
+                    checked = otaAutoCheck,
+                    enabled = true,
+                    onCheckedChange = onOtaAutoCheckToggle
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+                HorizontalDivider(color = BezelBorder)
+                Spacer(modifier = Modifier.height(12.dp))
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -2650,7 +3228,7 @@ fun SignatureAudioLabScreen(
                 AudioLabInfoRow("Audio Codec", audioOutput.codecEstimate)
                 AudioLabInfoRow("Playing File", currentTrack?.title ?: "None")
                 AudioLabInfoRow("Stream Format", "${currentTrack?.formatName ?: "PCM"} • $currentSampleRate • $currentBitrate kbps")
-                AudioLabInfoRow("App Version", "Walkman 11.0.5")
+                AudioLabInfoRow("App Version", "Walkman ${BuildConfig.VERSION_NAME}")
             }
 
             Spacer(modifier = Modifier.height(24.dp))
@@ -2970,4 +3548,3 @@ fun SignatureLibraryScreen(
         }
     }
 }
-

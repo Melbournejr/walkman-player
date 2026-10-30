@@ -6,12 +6,11 @@ plugins {
 }
 
 // =========================================================================
-// CHỈ CẦN ĐỔI HẬU TỐ PHIÊN BẢN Ở DÒNG NÀY CHO CÁC BẢN CẢI TIẾN TIẾP THEO:
+// PHIÊN BẢN 11.0.1 (Cải tiến sau, chỉ cần đổi hậu tố ở dòng này)
 // =========================================================================
-val walkmanVersion = "11.0.0"
-val walkmanVersionCode = 1100
+val walkmanVersion = "11.0.1"
+val walkmanVersionCode = 1101
 
-// Tạo hoặc giữ cố định chữ ký APK duy nhất để cài đè mọi phiên bản về sau không cần gỡ app cũ
 val fixedKeystoreFile = file("walkman-permanent.jks")
 if (!fixedKeystoreFile.exists()) {
     try {
@@ -64,7 +63,6 @@ android {
         }
     }
 
-    // Tự động đặt tên file APK xuất ra là: "Walkman 11.0.0.apk"
     applicationVariants.all {
         outputs.all {
             val outputImpl = this as? com.android.build.gradle.internal.api.BaseVariantOutputImpl

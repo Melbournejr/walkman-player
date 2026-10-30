@@ -2121,7 +2121,6 @@ fun WalkmanSignatureNowPlayingScreen(
             if (viewMode != PlayerViewMode.MINIMAL) {
                 Column(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(3.dp)
                 ) {
                     Text(
@@ -3576,7 +3575,7 @@ fun SignatureAudioLabScreen(
                 AudioLabInfoRow("Audio Codec", audioOutput.codecEstimate)
                 AudioLabInfoRow("Playing File", currentTrack?.title ?: "None")
                 AudioLabInfoRow("Stream Format", "${currentTrack?.formatName ?: "PCM"} • $currentSampleRate • $currentBitrate kbps")
-                AudioLabInfoRow("App Version", "Walkman 11.0.0")
+                AudioLabInfoRow("App Version", "Walkman 11.0.1")
             }
 
             Spacer(modifier = Modifier.height(24.dp))
@@ -3896,3 +3895,4 @@ fun SignatureLibraryScreen(
         }
     }
 }
+

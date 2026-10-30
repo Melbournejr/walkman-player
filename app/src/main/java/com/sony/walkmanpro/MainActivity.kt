@@ -1816,9 +1816,7 @@ fun SnowskyEchoNowPlayingScreen(
 
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(3.dp),
-                                    modifier = Modifier.weight(1f),
-                                    horizontalArrangement = Arrangement.Center
+                                    modifier = Modifier.weight(1f)
                                 ) {
                                     Icon(Icons.Default.Album, null, tint = Color.White, modifier = Modifier.size(12.dp))
                                     Text(albumNameStr, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -2652,7 +2650,7 @@ fun SignatureAudioLabScreen(
                 AudioLabInfoRow("Audio Codec", audioOutput.codecEstimate)
                 AudioLabInfoRow("Playing File", currentTrack?.title ?: "None")
                 AudioLabInfoRow("Stream Format", "${currentTrack?.formatName ?: "PCM"} • $currentSampleRate • $currentBitrate kbps")
-                AudioLabInfoRow("App Version", "Walkman 11.0.4")
+                AudioLabInfoRow("App Version", "Walkman 11.0.5")
             }
 
             Spacer(modifier = Modifier.height(24.dp))
@@ -2972,3 +2970,4 @@ fun SignatureLibraryScreen(
         }
     }
 }
+

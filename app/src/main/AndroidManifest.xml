@@ -18,7 +18,7 @@
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
-        android:label="Walkman 11.4.0"
+        android:label="Walkman 11.5.0"
         android:requestLegacyExternalStorage="true"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
@@ -68,6 +68,7 @@
         </activity>
     </application>
 </manifest>
+
 
 
 

@@ -53,6 +53,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -68,6 +69,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -95,10 +97,9 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
-private val DapChassisBlack = Color(0xFF0A0B0E)
-private val DapBodyMatte = Color(0xFF22252C)
-private val DapBodyDark = Color(0xFF17191E)
-private val DapGlassBezel = Color(0xFF0B0C0E)
+private val DapChassisBlack = Color(0xFF090A0D)
+private val DapBodyDark = Color(0xFF151820)
+private val DapGlassBezel = Color(0xFF050608)
 private val PanelSurface = Color(0xFF171A22)
 private val ElevatedMetallic = Color(0xFF222733)
 private val BezelBorder = Color(0xFF2D3342)
@@ -107,6 +108,9 @@ private val ChampagneGoldDim = Color(0xFF827350)
 private val EchoCrimsonRed = Color(0xFFE11D48)
 private val EchoProgressRed = Color(0xFFDC2626)
 private val EchoCyanSpec = Color(0xFF38BDF8)
+private val RetroStripeOrange = Color(0xFFEA580C)
+private val RetroStripeGold = Color(0xFFEAB308)
+private val RetroStripeTeal = Color(0xFF0D9488)
 private val ColdSilver = Color(0xFFA6B0BE)
 private val TextPure = Color(0xFFF1F5F9)
 private val TextMuted = Color(0xFF64748B)
@@ -1010,7 +1014,6 @@ fun SnowskyEchoDapApp(
     var posMs by remember { mutableStateOf(PlaylistStorage.loadLastPos(context)) }
     var durMs by remember { mutableStateOf(226000) }
 
-    // Trạng thái OTA Update
     var otaAutoCheck by remember { mutableStateOf(OtaUpdateManager.isAutoCheckEnabled(context)) }
     var otaIsChecking by remember { mutableStateOf(false) }
     var otaAvailableRelease by remember { mutableStateOf<OtaReleaseInfo?>(null) }
@@ -1747,7 +1750,7 @@ fun OtaUpdateDialog(
 
 /**
  * =============================================================================================
- * GIAO DIỆN MÁY NGHE NHẠC GIỐNG HỆT 100% HÌNH ẢNH MẪU (BỎ HẾT CHỮ THỪA, CHỈ GIỮ TÊN BÀI, CA SĨ, THÔNG SỐ)
+ * MÀN HÌNH NOW PLAYING (XỬ LÝ RIÊNG LAYOUT PORTRAIT VÀ LANDSCAPE ĐỂ BĂNG CASSETTE LUÔN LỚN & ĐÚNG TỶ LỆ)
  * =============================================================================================
  */
 @Composable
@@ -1783,7 +1786,7 @@ fun ExactReferenceCassetteScreen(
     val safeCurrPos = posMs.toFloat().coerceIn(0f, safeMaxDur)
     val progressFraction = (safeCurrPos / safeMaxDur).coerceIn(0f, 1f)
 
-    // Chuyển động vật lý thực của cuộn băng có quán tính mượt khi Play / Pause
+    // Giữ nguyên logic chuyển động băng theo thời gian thực
     val targetLinearTapeSpeed = if (isPlaying) 1.0f else 0.0f
     val smoothTapeMotion by animateFloatAsState(
         targetValue = targetLinearTapeSpeed,
@@ -1817,966 +1820,419 @@ fun ExactReferenceCassetteScreen(
     val trackTitleStr = track?.title ?: "Chưa chọn bài hát"
     val trackArtistStr = track?.artist?.takeIf { !it.contains("<unknown>", true) } ?: "Unknown Artist"
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xFF08090C))
-            .padding(
-                horizontal = if (isLandscape) 24.dp else 12.dp,
-                vertical = if (isLandscape) 8.dp else 14.dp
-            ),
-        verticalArrangement = Arrangement.SpaceBetween,
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        // =========================================================================================
-        // KHỐI THÂN MÁY VẬT LÝ GIỐNG HỆT TRONG ẢNH (CÓ GỜ NÚT ĐỎ/ĐEN Ở ĐỈNH + MÀN HÌNH KÍNH + CẰM VÁT TRỐNG)
-        // =========================================================================================
-        Column(
+    if (isLandscape) {
+        // =====================================================================================
+        // BỐ CỤC LANDSCAPE (XOAY NGANG):
+        // - Cuốn băng Cassette nằm ở trung tâm, chiếm tối đa chiều cao màn hình và khóa tỷ lệ thực 1.58:1
+        // - Các phím điều khiển vật lý xếp gọn thành 2 cột dọc bên sườn Trái / Phải để không làm băng bị bé!
+        // =====================================================================================
+        Row(
             modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
+                .fillMaxSize()
+                .background(Color(0xFF07080B))
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            // 1. HÀNG GỜ NÚT BẤM VẬT LÝ TRÊN ĐỈNH MÁY GIỐNG HỆT ẢNH MẪU (1 Nút Đỏ + 4 Nút Đen)
-            // Cho phép bấm trực tiếp vào các gờ nút này để điều khiển!
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth(0.84f)
-                    .padding(bottom = 0.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.Bottom
-            ) {
-                // Nút Đỏ bên trái (Play / Pause)
-                Box(
-                    modifier = Modifier
-                        .width(48.dp)
-                        .height(8.dp)
-                        .clip(RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp))
-                        .background(
-                            Brush.verticalGradient(listOf(Color(0xFFEF4444), Color(0xFFB91C1C)))
-                        )
-                        .clickable { onPlayPause() }
-                )
-
-                // Nút Đen rộng thứ 2 (Previous Track)
-                Box(
-                    modifier = Modifier
-                        .width(74.dp)
-                        .height(6.dp)
-                        .clip(RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp))
-                        .background(
-                            Brush.verticalGradient(listOf(Color(0xFF3A3F4B), Color(0xFF1B1E24)))
-                        )
-                        .clickable { onPrev() }
-                )
-
-                // Nút Đen thứ 3 (Next Track)
-                Box(
-                    modifier = Modifier
-                        .width(46.dp)
-                        .height(6.dp)
-                        .clip(RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp))
-                        .background(
-                            Brush.verticalGradient(listOf(Color(0xFF3A3F4B), Color(0xFF1B1E24)))
-                        )
-                        .clickable { onNext() }
-                )
-
-                // Nút Đen thứ 4 (Mở Thư Viện Nhạc)
-                Box(
-                    modifier = Modifier
-                        .width(46.dp)
-                        .height(6.dp)
-                        .clip(RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp))
-                        .background(
-                            Brush.verticalGradient(listOf(Color(0xFF3A3F4B), Color(0xFF1B1E24)))
-                        )
-                        .clickable { onOpenLibrary() }
-                )
-
-                // Nút Đen thứ 5 (Mở Audio Lab / OTA Settings)
-                Box(
-                    modifier = Modifier
-                        .width(46.dp)
-                        .height(6.dp)
-                        .clip(RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp))
-                        .background(
-                            Brush.verticalGradient(listOf(Color(0xFF3A3F4B), Color(0xFF1B1E24)))
-                        )
-                        .clickable { onOpenAudioLab() }
-                )
-            }
-
-            // 2. KHUNG VỎ MÁY XÁM ĐEN NHÁM (MATTE CHARCOAL HARDWARE CHASSIS)
+            // Cột điều khiển phụ bên Trái (Library, Shuffle, Repeat, Rotate)
             Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .shadow(24.dp, RoundedCornerShape(6.dp))
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(Color(0xFF2B2F37), Color(0xFF20232A), Color(0xFF181A20))
-                        )
-                    )
-                    .border(
-                        width = 2.dp,
-                        brush = Brush.linearGradient(
-                            colors = listOf(Color(0xFF454B57), Color(0xFF252830), Color(0xFF121418))
-                        ),
-                        shape = RoundedCornerShape(6.dp)
-                    )
+                    .width(60.dp)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color(0xFF0E1016))
+                    .border(1.2.dp, Color(0xFF282E3B), RoundedCornerShape(14.dp))
+                    .padding(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Phần trên của thân máy: Chứa Viền Kính Đen (Black Glass Bezel) & Màn Hình Cassette
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(0.76f)
-                        .padding(start = 18.dp, end = 18.dp, top = 16.dp, bottom = 4.dp)
-                        .clip(RoundedCornerShape(3.dp))
-                        .background(DapGlassBezel)
-                        .border(1.5.dp, Color(0xFF14161B), RoundedCornerShape(3.dp))
-                        .padding(horizontal = if (isLandscape) 28.dp else 14.dp, vertical = 14.dp)
+                CassetteMechanicalKey(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    isLatched = false,
+                    ledColor = null,
+                    onClick = onOpenLibrary
                 ) {
-                    // =========================================================================
-                    // MẶT BĂNG CASSETTE TRONG MÀN HÌNH LCD (GIỐNG HỆT 100% BỨC ẢNH THAM CHIẾU)
-                    // =========================================================================
-                    Box(
+                    Icon(Icons.AutoMirrored.Filled.QueueMusic, contentDescription = "Library", tint = ColdSilver, modifier = Modifier.size(20.dp))
+                }
+
+                CassetteMechanicalKey(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    isLatched = playMode == PlayMode.SHUFFLE,
+                    ledColor = ChampagneGold,
+                    onClick = onToggleShuffle
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Shuffle,
+                        contentDescription = "Shuffle",
+                        tint = if (playMode == PlayMode.SHUFFLE) ChampagneGold else ColdSilver,
+                        modifier = Modifier.size(19.dp)
+                    )
+                }
+
+                CassetteMechanicalKey(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    isLatched = playMode == PlayMode.REPEAT_ONE,
+                    ledColor = ChampagneGold,
+                    onClick = onToggleRepeat
+                ) {
+                    Icon(
+                        imageVector = if (playMode == PlayMode.REPEAT_ONE) Icons.Default.RepeatOne else Icons.Default.Repeat,
+                        contentDescription = "Repeat",
+                        tint = if (playMode == PlayMode.REPEAT_ONE) ChampagneGold else ColdSilver,
+                        modifier = Modifier.size(19.dp)
+                    )
+                }
+
+                CassetteMechanicalKey(
+                    modifier = Modifier.weight(0.85f).fillMaxWidth(),
+                    isLatched = false,
+                    ledColor = null,
+                    onClick = onToggleOrientation
+                ) {
+                    Icon(Icons.Default.ScreenRotation, contentDescription = "Portrait", tint = ColdSilver, modifier = Modifier.size(18.dp))
+                }
+            }
+
+            // TRUNG TÂM LANDSCAPE: KHUNG MÁY DAP VỚI BĂNG CASSETTE CỠ LỚN (TỶ LỆ CHUẨN BĂNG THẬT 1.58:1)
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .padding(horizontal = 10.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    // Gờ nút cứng trên đỉnh máy giống ảnh mẫu (1 nút đỏ + 3 nút đen)
+                    Row(
                         modifier = Modifier
-                            .fillMaxSize()
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(
-                                Brush.verticalGradient(
-                                    listOf(Color(0xFF32363F), Color(0xFF262A32), Color(0xFF1D2027))
-                                )
-                            )
-                            .border(1.dp, Color(0xFF484E5C), RoundedCornerShape(6.dp))
+                            .fillMaxWidth(0.76f)
+                            .padding(bottom = 0.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.Bottom
                     ) {
-                        // Đường viền rãnh khuôn đúc nhựa xung quanh mặt băng + 2 chấm đèn phản quang đỏ ở góc dưới
-                        Canvas(modifier = Modifier.fillMaxSize()) {
-                            val w = size.width
-                            val h = size.height
-
-                            // Viền chỉ khuôn đúc bên trong mặt băng
-                            drawRoundRect(
-                                color = Color.White.copy(alpha = 0.08f),
-                                topLeft = Offset(6.dp.toPx(), 6.dp.toPx()),
-                                size = Size(w - 12.dp.toPx(), h - 12.dp.toPx()),
-                                cornerRadius = CornerRadius(4.dp.toPx()),
-                                style = Stroke(width = 1.dp.toPx())
-                            )
-
-                            // 2 chấm tròn màu đỏ trầm nằm chìm ở 2 góc dưới bên ngoài đế hình thang (giống hệt ảnh mẫu)
-                            val redDotY = h * 0.90f
-                            drawCircle(
-                                brush = Brush.radialGradient(
-                                    colors = listOf(Color(0xFF991B1B).copy(alpha = 0.55f), Color.Transparent),
-                                    center = Offset(w * 0.12f, redDotY),
-                                    radius = 10.dp.toPx()
-                                ),
-                                radius = 10.dp.toPx(),
-                                center = Offset(w * 0.12f, redDotY)
-                            )
-                            drawCircle(
-                                brush = Brush.radialGradient(
-                                    colors = listOf(Color(0xFF991B1B).copy(alpha = 0.55f), Color.Transparent),
-                                    center = Offset(w * 0.88f, redDotY),
-                                    radius = 10.dp.toPx()
-                                ),
-                                radius = 10.dp.toPx(),
-                                center = Offset(w * 0.88f, redDotY)
-                            )
-                        }
-
-                        // 2 Ốc vít kim loại ở 2 góc dưới cùng của băng (giống hệt vị trí trong ảnh)
-                        CassetteCornerScrew(
-                            Modifier
-                                .align(Alignment.BottomStart)
-                                .padding(start = 8.dp, bottom = 8.dp)
-                        )
-                        CassetteCornerScrew(
-                            Modifier
-                                .align(Alignment.BottomEnd)
-                                .padding(end = 8.dp, bottom = 8.dp)
-                        )
-
-                        Column(
+                        Box(
                             modifier = Modifier
-                                .fillMaxSize()
-                                .padding(top = 6.dp, bottom = 0.dp),
-                            verticalArrangement = Arrangement.SpaceBetween,
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            // -----------------------------------------------------------------
-                            // A. THANH TRẠNG THÁI HUD TRÊN CÙNG (ĐÃ BỎ CHỮ "FAST-PC" THỪA)
-                            // Giữ: 🔊 56 | 🎧 | 001/035 bên trái  ---  🔀 | [NOR] | SD | 🔋 bên phải
-                            // -----------------------------------------------------------------
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(Color.Black.copy(alpha = 0.28f))
-                                    .padding(horizontal = 12.dp, vertical = 3.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(3.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.AutoMirrored.Filled.VolumeUp,
-                                            contentDescription = null,
-                                            tint = Color.White,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                        Text(
-                                            text = "$masterVolumePercent",
-                                            color = Color.White,
-                                            fontSize = 11.5.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            fontFamily = FontFamily.Monospace
-                                        )
-                                    }
-
-                                    Icon(
-                                        imageVector = if (audioOutput.isBluetooth) Icons.Default.BluetoothAudio else Icons.Default.Headphones,
-                                        contentDescription = null,
-                                        tint = Color.White,
-                                        modifier = Modifier.size(14.dp)
-                                    )
-
-                                    Text(
-                                        text = trackOrderStr,
-                                        color = Color.White,
-                                        fontSize = 11.5.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        fontFamily = FontFamily.Monospace,
-                                        modifier = Modifier.clickable { onOpenLibrary() }
-                                    )
-                                }
-
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Shuffle,
-                                        contentDescription = "Shuffle",
-                                        tint = if (playMode == PlayMode.SHUFFLE) EchoCyanSpec else Color.White.copy(alpha = 0.9f),
-                                        modifier = Modifier
-                                            .size(13.dp)
-                                            .clickable { onToggleShuffle() }
-                                    )
-
-                                    Box(
-                                        modifier = Modifier
-                                            .border(1.dp, Color.White, RoundedCornerShape(2.dp))
-                                            .clickable { onToggleRepeat() }
-                                            .padding(horizontal = 3.dp, vertical = 0.5.dp)
-                                    ) {
-                                        Text(
-                                            text = playMode.badgeCode,
-                                            color = Color.White,
-                                            fontSize = 8.5.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            fontFamily = FontFamily.Monospace
-                                        )
-                                    }
-
-                                    Icon(
-                                        imageVector = Icons.Default.SdStorage,
-                                        contentDescription = "Library",
-                                        tint = Color.White.copy(alpha = 0.9f),
-                                        modifier = Modifier
-                                            .size(13.dp)
-                                            .clickable { onOpenLibrary() }
-                                    )
-
-                                    // Biểu tượng Pin có 4 vạch bên trong giống hệt ảnh mẫu
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier.clickable { onOpenAudioLab() }
-                                    ) {
-                                        Row(
-                                            modifier = Modifier
-                                                .border(1.2.dp, Color.White, RoundedCornerShape(2.dp))
-                                                .padding(horizontal = 2.dp, vertical = 2.dp),
-                                            horizontalArrangement = Arrangement.spacedBy(1.2.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            val activeBars = ((audioOutput.batteryPercent + 15) / 25).coerceIn(1, 4)
-                                            for (b in 1..4) {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .width(2.5.dp)
-                                                        .height(6.dp)
-                                                        .background(if (b <= activeBars) Color.White else Color.White.copy(alpha = 0.2f))
-                                                )
-                                            }
-                                        }
-                                        Box(
-                                            modifier = Modifier
-                                                .width(1.8.dp)
-                                                .height(4.dp)
-                                                .background(Color.White)
-                                        )
-                                    }
-                                }
-                            }
-
-                            // -----------------------------------------------------------------
-                            // B. TÊN BÀI HÁT CHÍNH GIỮA PHÍA TRÊN CỬA SỔ BĂNG (Thay cho chữ BORN FOR MUSIC)
-                            // -----------------------------------------------------------------
-                            Text(
-                                text = trackTitleStr,
-                                color = Color.White,
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                textAlign = TextAlign.Center,
-                                letterSpacing = 0.5.sp,
-                                modifier = Modifier
-                                    .fillMaxWidth(0.88f)
-                                    .padding(vertical = 2.dp)
-                            )
-
-                            // -----------------------------------------------------------------
-                            // C. CỬA SỔ BĂNG HÌNH VIÊN THUỐC (STADIUM PILL WINDOW) GIỐNG HỆT ẢNH MẪU
-                            // - Có vòm cuộn băng đen mờ to/nhỏ thật bên dưới.
-                            // - 2 bánh răng trắng bạc đục 6 lỗ đen + lõi sao 6 cánh Đỏ Crimson.
-                            // - Cửa sổ thước đo ở giữa với các vạch chia trắng và kim đỏ.
-                            // -----------------------------------------------------------------
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth(0.68f)
-                                    .weight(1f)
-                                    .padding(vertical = 2.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Canvas(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .pointerInput(Unit) {
-                                            detectTapGestures { offset ->
-                                                when {
-                                                    offset.x < size.width * 0.33f -> onPrev()
-                                                    offset.x > size.width * 0.67f -> onNext()
-                                                    else -> onPlayPause()
-                                                }
-                                            }
-                                        }
-                                ) {
-                                    val w = size.width
-                                    val h = size.height
-                                    val centerY = h * 0.50f
-                                    val pillHeight = (h * 0.84f).coerceAtMost(w * 0.44f)
-                                    val pillTop = centerY - pillHeight / 2f
-                                    val pillCorner = pillHeight / 2f
-
-                                    val leftX = pillCorner * 0.98f
-                                    val rightX = w - pillCorner * 0.98f
-
-                                    // Tính bán kính thực của 2 cuộn băng từ theo định luật bảo toàn diện tích
-                                    val hubRadius = pillHeight * 0.38f
-                                    val minSpoolR = hubRadius * 1.06f
-                                    val maxSpoolR = pillHeight * 0.86f
-                                    val minArea = minSpoolR * minSpoolR
-                                    val maxArea = maxSpoolR * maxSpoolR
-
-                                    val leftSpoolR = sqrt(maxArea - progressFraction * (maxArea - minArea))
-                                    val rightSpoolR = sqrt(minArea + progressFraction * (maxArea - minArea))
-
-                                    val leftAngle = -((cumulativeTapeDistance * (maxSpoolR / leftSpoolR.coerceAtLeast(1f))) % 360f)
-                                    val rightAngle = -((cumulativeTapeDistance * (maxSpoolR / rightSpoolR.coerceAtLeast(1f))) % 360f)
-
-                                    // 1. Vẽ bóng vòm tối của 2 cuộn băng từ nhìn xuyên qua lớp vỏ bán trong suốt (giống hệt vầng đen tròn quanh 2 mắt băng trong ảnh)
-                                    drawCircle(
-                                        brush = Brush.radialGradient(
-                                            0.0f to Color(0xFF07080A),
-                                            0.78f to Color(0xFF0B0D11).copy(alpha = 0.92f),
-                                            0.94f to Color(0xFF14171E).copy(alpha = 0.65f),
-                                            1.0f to Color.Transparent,
-                                            center = Offset(leftX, centerY),
-                                            radius = leftSpoolR.coerceAtLeast(1f)
-                                        ),
-                                        radius = leftSpoolR,
-                                        center = Offset(leftX, centerY)
-                                    )
-
-                                    drawCircle(
-                                        brush = Brush.radialGradient(
-                                            0.0f to Color(0xFF07080A),
-                                            0.78f to Color(0xFF0B0D11).copy(alpha = 0.92f),
-                                            0.94f to Color(0xFF14171E).copy(alpha = 0.65f),
-                                            1.0f to Color.Transparent,
-                                            center = Offset(rightX, centerY),
-                                            radius = rightSpoolR.coerceAtLeast(1f)
-                                        ),
-                                        radius = rightSpoolR,
-                                        center = Offset(rightX, centerY)
-                                    )
-
-                                    // 2. Khung cửa sổ hình viên thuốc (Stadium Pill Bezel)
-                                    val pillPath = Path().apply {
-                                        addRoundRect(
-                                            androidx.compose.ui.geometry.RoundRect(
-                                                left = 0f,
-                                                top = pillTop,
-                                                right = w,
-                                                bottom = pillTop + pillHeight,
-                                                cornerRadius = CornerRadius(pillCorner, pillCorner)
-                                            )
-                                        )
-                                    }
-
-                                    // Nền trong cửa sổ viên thuốc
-                                    drawPath(
-                                        path = pillPath,
-                                        brush = Brush.verticalGradient(
-                                            colors = listOf(Color(0xFF171A21), Color(0xFF252932), Color(0xFF171A21)),
-                                            startY = pillTop,
-                                            endY = pillTop + pillHeight
-                                        )
-                                    )
-
-                                    // Cắt (Clip) bên trong cửa sổ viên thuốc để vẽ cuộn băng từ rõ nét và dây băng chạy ngang
-                                    clipPath(pillPath) {
-                                        listOf(
-                                            Triple(leftX, leftSpoolR, leftAngle),
-                                            Triple(rightX, rightSpoolR, rightAngle)
-                                        ).forEach { (cx, spoolR, angle) ->
-                                            // Cuộn dây từ màu đen nâu sâu bên trong cửa sổ kính
-                                            drawCircle(
-                                                brush = Brush.radialGradient(
-                                                    colors = listOf(Color(0xFF1F1614), Color(0xFF0D0A09), Color(0xFF1A1210)),
-                                                    center = Offset(cx, centerY),
-                                                    radius = spoolR.coerceAtLeast(1f)
-                                                ),
-                                                radius = spoolR,
-                                                center = Offset(cx, centerY)
-                                            )
-
-                                            // Các vòng lớp băng quấn đồng tâm
-                                            val thick = (spoolR - hubRadius).coerceAtLeast(0f)
-                                            val rings = (thick / 2.5.dp.toPx()).toInt().coerceIn(1, 16)
-                                            for (r in 1..rings) {
-                                                val rr = hubRadius + thick * (r.toFloat() / (rings + 1))
-                                                drawCircle(
-                                                    color = Color.White.copy(alpha = 0.08f),
-                                                    radius = rr,
-                                                    center = Offset(cx, centerY),
-                                                    style = Stroke(width = 0.7.dp.toPx())
-                                                )
-                                            }
-
-                                            // Vệt ánh sáng phản chiếu xoay theo cuộn băng
-                                            rotate(angle * 0.4f, pivot = Offset(cx, centerY)) {
-                                                drawLine(
-                                                    color = Color.White.copy(alpha = 0.14f),
-                                                    start = Offset(cx - spoolR, centerY),
-                                                    end = Offset(cx + spoolR, centerY),
-                                                    strokeWidth = 3.dp.toPx()
-                                                )
-                                            }
-
-                                            drawCircle(
-                                                color = Color(0xFF3D2C26),
-                                                radius = spoolR,
-                                                center = Offset(cx, centerY),
-                                                style = Stroke(width = 1.2.dp.toPx())
-                                            )
-                                        }
-
-                                        // Dải dây băng từ chạy ngang giữa 2 cuộn ở mép dưới cửa sổ
-                                        val tapeY = centerY + hubRadius * 0.75f
-                                        drawLine(
-                                            color = Color(0xFF3B2820),
-                                            start = Offset(leftX, tapeY),
-                                            end = Offset(rightX, tapeY),
-                                            strokeWidth = 2.4.dp.toPx()
-                                        )
-                                        val shimmerStep = 18.dp.toPx()
-                                        val shimmerShift = (cumulativeTapeDistance * 0.9f) % shimmerStep
-                                        var sx = leftX + shimmerShift
-                                        while (sx < rightX - 6.dp.toPx()) {
-                                            drawLine(
-                                                color = Color.White.copy(alpha = 0.35f),
-                                                start = Offset(sx, tapeY),
-                                                end = Offset(sx + 5.dp.toPx(), tapeY),
-                                                strokeWidth = 1.8.dp.toPx(),
-                                                cap = StrokeCap.Round
-                                            )
-                                            sx += shimmerStep
-                                        }
-                                    }
-
-                                    // 3. Khung thước đo chữ nhật ở giữa 2 bánh răng (giống hệt ảnh mẫu)
-                                    val scaleLeft = leftX + hubRadius * 1.05f
-                                    val scaleRight = rightX - hubRadius * 1.05f
-                                    val scaleHeight = pillHeight * 0.46f
-                                    val scaleTop = centerY - scaleHeight / 2f
-
-                                    if (scaleRight > scaleLeft + 10f) {
-                                        drawRoundRect(
-                                            color = Color(0xFF232730).copy(alpha = 0.92f),
-                                            topLeft = Offset(scaleLeft, scaleTop),
-                                            size = Size(scaleRight - scaleLeft, scaleHeight),
-                                            cornerRadius = CornerRadius(3.dp.toPx())
-                                        )
-                                        drawRoundRect(
-                                            color = Color(0xFF525A6B),
-                                            topLeft = Offset(scaleLeft, scaleTop),
-                                            size = Size(scaleRight - scaleLeft, scaleHeight),
-                                            cornerRadius = CornerRadius(3.dp.toPx()),
-                                            style = Stroke(width = 1.dp.toPx())
-                                        )
-
-                                        // Đường kẻ ngang & các vạch chia dọc màu trắng
-                                        drawLine(
-                                            color = Color.White.copy(alpha = 0.55f),
-                                            start = Offset(scaleLeft + 4.dp.toPx(), centerY),
-                                            end = Offset(scaleRight - 4.dp.toPx(), centerY),
-                                            strokeWidth = 0.9.dp.toPx()
-                                        )
-                                        val numTicks = 14
-                                        for (t in 0..numTicks) {
-                                            val tx = scaleLeft + 5.dp.toPx() + (scaleRight - scaleLeft - 10.dp.toPx()) * (t.toFloat() / numTicks)
-                                            val th = if (t % 7 == 0) 6.dp.toPx() else if (t % 2 == 0) 4.dp.toPx() else 2.2.dp.toPx()
-                                            drawLine(
-                                                color = Color.White.copy(alpha = 0.75f),
-                                                start = Offset(tx, centerY - th),
-                                                end = Offset(tx, centerY + th),
-                                                strokeWidth = 1.dp.toPx()
-                                            )
-                                        }
-
-                                        // Vạch kim đỏ ở giữa thước
-                                        val redIndicatorX = (scaleLeft + scaleRight) / 2f
-                                        drawLine(
-                                            color = EchoProgressRed,
-                                            start = Offset(redIndicatorX, scaleTop + 2.dp.toPx()),
-                                            end = Offset(redIndicatorX, scaleTop + scaleHeight - 2.dp.toPx()),
-                                            strokeWidth = 1.8.dp.toPx()
-                                        )
-                                    }
-
-                                    // 4. Vẽ 2 Bánh Răng Trắng Bạc + 6 Lỗ Đen + Lõi Đỏ Crimson giống hệt ảnh mẫu 100%
-                                    listOf(leftX to leftAngle, rightX to rightAngle).forEach { (cx, angle) ->
-                                        // Bóng đổ của bánh răng
-                                        drawCircle(
-                                            color = Color.Black.copy(alpha = 0.65f),
-                                            radius = hubRadius + 2.dp.toPx(),
-                                            center = Offset(cx, centerY + 1.5.dp.toPx())
-                                        )
-
-                                        // Vành ngoài màu xám bạc
-                                        drawCircle(
-                                            color = Color(0xFF94A3B8),
-                                            radius = hubRadius,
-                                            center = Offset(cx, centerY)
-                                        )
-
-                                        // Đĩa bánh răng màu trắng sáng
-                                        val whiteWheelR = hubRadius * 0.88f
-                                        drawCircle(
-                                            brush = Brush.radialGradient(
-                                                colors = listOf(Color.White, Color(0xFFE2E8F0)),
-                                                center = Offset(cx, centerY),
-                                                radius = whiteWheelR
-                                            ),
-                                            radius = whiteWheelR,
-                                            center = Offset(cx, centerY)
-                                        )
-
-                                        // Lõi màu Đỏ Crimson ở giữa
-                                        val redHubR = hubRadius * 0.50f
-                                        drawCircle(
-                                            color = EchoProgressRed,
-                                            radius = redHubR,
-                                            center = Offset(cx, centerY)
-                                        )
-
-                                        // Quay bánh răng: 6 lỗ tròn đen trên vành trắng + 6 nan hoa trắng chia lõi đỏ thành 6 múi
-                                        rotate(angle, pivot = Offset(cx, centerY)) {
-                                            for (spoke in 0 until 6) {
-                                                rotate(spoke * 60f, pivot = Offset(cx, centerY)) {
-                                                    // Nan hoa trắng từ tâm ra vành trắng
-                                                    drawLine(
-                                                        color = Color.White,
-                                                        start = Offset(cx, centerY - hubRadius * 0.18f),
-                                                        end = Offset(cx, centerY - whiteWheelR * 0.92f),
-                                                        strokeWidth = 2.2.dp.toPx(),
-                                                        cap = StrokeCap.Round
-                                                    )
-                                                }
-                                                // Lỗ tròn màu đen nằm xen kẽ ở góc +30 độ trên vành trắng (giống hệt ảnh mẫu!)
-                                                rotate(spoke * 60f + 30f, pivot = Offset(cx, centerY)) {
-                                                    drawCircle(
-                                                        color = Color(0xFF181B22),
-                                                        radius = hubRadius * 0.11f,
-                                                        center = Offset(cx, centerY - hubRadius * 0.68f)
-                                                    )
-                                                }
-                                            }
-                                        }
-
-                                        // Lỗ trục tâm màu đen viền trắng
-                                        drawCircle(
-                                            color = Color(0xFF14171D),
-                                            radius = hubRadius * 0.18f,
-                                            center = Offset(cx, centerY)
-                                        )
-                                        drawCircle(
-                                            color = Color.White,
-                                            radius = hubRadius * 0.18f,
-                                            center = Offset(cx, centerY),
-                                            style = Stroke(width = 1.2.dp.toPx())
-                                        )
-                                    }
-
-                                    // 5. Viền Bevel kim loại kép bao quanh cửa sổ viên thuốc (Stadium Pill Rim)
-                                    drawRoundRect(
-                                        color = Color(0xFF111318),
-                                        topLeft = Offset(0f, pillTop),
-                                        size = Size(w, pillHeight),
-                                        cornerRadius = CornerRadius(pillCorner, pillCorner),
-                                        style = Stroke(width = 3.5.dp.toPx())
-                                    )
-                                    drawRoundRect(
-                                        brush = Brush.verticalGradient(
-                                            listOf(Color(0xFF647084), Color(0xFF2D3340), Color(0xFF525B6E))
-                                        ),
-                                        topLeft = Offset(1.dp.toPx(), pillTop + 1.dp.toPx()),
-                                        size = Size(w - 2.dp.toPx(), pillHeight - 2.dp.toPx()),
-                                        cornerRadius = CornerRadius(pillCorner, pillCorner),
-                                        style = Stroke(width = 1.6.dp.toPx())
-                                    )
-                                }
-                            }
-
-                            // -----------------------------------------------------------------
-                            // D. HÀNG CA SĨ + THỜI GIAN + THANH TIẾN TRÌNH ĐỎ CÓ CON CHẠY TRẮNG ĐỨNG
-                            // Đã bỏ hoàn toàn chữ "FIIO" và "HiFi" thừa, chỉ giữ Ca sĩ & Thời gian!
-                            // -----------------------------------------------------------------
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth(0.84f)
-                                    .padding(bottom = 2.dp),
-                                verticalArrangement = Arrangement.spacedBy(2.dp)
-                            ) {
-                                // Hàng Ca sĩ (👤 Tên ca sĩ)
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(start = 24.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.PersonOutline,
-                                        contentDescription = null,
-                                        tint = Color.White,
-                                        modifier = Modifier.size(14.dp)
-                                    )
-                                    Text(
-                                        text = trackArtistStr,
-                                        color = Color.White,
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-
-                                // Hàng Thời gian: ▶ 0:00:46 bên trái  ---  0:03:46 bên phải
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = (if (isPlaying) "▶ " else "⏸ ") + formatTimeMs(posMs),
-                                        color = Color.White,
-                                        fontSize = 11.5.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        fontFamily = FontFamily.Monospace
-                                    )
-                                    Text(
-                                        text = formatTimeMs(durMs),
-                                        color = Color.White,
-                                        fontSize = 11.5.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        fontFamily = FontFamily.Monospace
-                                    )
-                                }
-
-                                // Thanh tiến trình màu đỏ mỏng kèm con chạy chữ nhật trắng đứng giống hệt ảnh mẫu (Cho phép chạm/kéo để tua)
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(14.dp)
-                                        .pointerInput(durMs) {
-                                            detectTapGestures { offset ->
-                                                val frac = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
-                                                onSeek((frac * durMs).toInt())
-                                            }
-                                        }
-                                        .pointerInput(durMs) {
-                                            detectHorizontalDragGestures { change, _ ->
-                                                change.consume()
-                                                val frac = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
-                                                onSeek((frac * durMs).toInt())
-                                            }
-                                        },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Canvas(modifier = Modifier.fillMaxSize()) {
-                                        val w = size.width
-                                        val cy = size.height / 2f
-                                        val thumbX = (w * progressFraction).coerceIn(2.dp.toPx(), w - 2.dp.toPx())
-
-                                        // Đoạn chưa chạy (màu xám tối)
-                                        drawLine(
-                                            color = Color.White.copy(alpha = 0.20f),
-                                            start = Offset(0f, cy),
-                                            end = Offset(w, cy),
-                                            strokeWidth = 2.5.dp.toPx(),
-                                            cap = StrokeCap.Round
-                                        )
-                                        // Đoạn đã chạy (màu đỏ tươi chuẩn ảnh mẫu)
-                                        drawLine(
-                                            color = EchoProgressRed,
-                                            start = Offset(0f, cy),
-                                            end = Offset(thumbX, cy),
-                                            strokeWidth = 2.5.dp.toPx(),
-                                            cap = StrokeCap.Round
-                                        )
-                                        // Con chạy hình chữ nhật trắng đứng (Vertical White Marker) giống hệt ảnh mẫu
-                                        drawRoundRect(
-                                            color = Color.White,
-                                            topLeft = Offset(thumbX - 2.dp.toPx(), cy - 4.5.dp.toPx()),
-                                            size = Size(4.dp.toPx(), 9.dp.toPx()),
-                                            cornerRadius = CornerRadius(1.dp.toPx())
-                                        )
-                                    }
-                                }
-                            }
-
-                            // -----------------------------------------------------------------
-                            // E. ĐẾ BĂNG HÌNH THANG VÁT CHÉO (TRAPEZOID HEAD SHIELD) GIỐNG HỆT ẢNH MẪU
-                            // Hiển thị: WAV | 192kHz | 24bit | 1536kbps   [SQ]   ❤️
-                            // -----------------------------------------------------------------
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth(0.76f)
-                                    .height(36.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Canvas(modifier = Modifier.fillMaxSize()) {
-                                    val w = size.width
-                                    val h = size.height
-                                    val topInset = w * 0.055f
-
-                                    val trapPath = Path().apply {
-                                        moveTo(topInset, 0f)
-                                        lineTo(w - topInset, 0f)
-                                        lineTo(w, h)
-                                        lineTo(0f, h)
-                                        close()
-                                    }
-
-                                    // Nền kim loại xám của đế hình thang
-                                    drawPath(
-                                        path = trapPath,
-                                        brush = Brush.verticalGradient(
-                                            listOf(Color(0xFF2C313B), Color(0xFF20242C))
-                                        )
-                                    )
-                                    // Viền vát sáng của đế hình thang
-                                    drawPath(
-                                        path = trapPath,
-                                        color = Color(0xFF565F72),
-                                        style = Stroke(width = 1.4.dp.toPx())
-                                    )
-
-                                    // Các lỗ cơ khí chữ nhật và tròn ở nửa dưới đế hình thang (giống hệt ảnh mẫu)
-                                    val holeY = h * 0.72f
-                                    // Lỗ tròn trái & phải
-                                    drawCircle(
-                                        color = Color(0xFF0B0D11),
-                                        radius = 4.dp.toPx(),
-                                        center = Offset(w * 0.10f, holeY)
-                                    )
-                                    drawCircle(
-                                        color = Color(0xFF0B0D11),
-                                        radius = 4.dp.toPx(),
-                                        center = Offset(w * 0.90f, holeY)
-                                    )
-                                    // Hốc chữ nhật cơ khí
-                                    drawRoundRect(
-                                        color = Color(0xFF0B0D11),
-                                        topLeft = Offset(w * 0.20f, holeY - 3.dp.toPx()),
-                                        size = Size(12.dp.toPx(), 6.dp.toPx()),
-                                        cornerRadius = CornerRadius(1.5.dp.toPx())
-                                    )
-                                    drawRoundRect(
-                                        color = Color(0xFF0B0D11),
-                                        topLeft = Offset(w * 0.80f - 12.dp.toPx(), holeY - 3.dp.toPx()),
-                                        size = Size(12.dp.toPx(), 6.dp.toPx()),
-                                        cornerRadius = CornerRadius(1.5.dp.toPx())
-                                    )
-                                }
-
-                                // Dòng thông số kỹ thuật màu xanh Cyan + [SQ] + ❤️ nằm ở nửa trên đế hình thang
-                                Row(
-                                    modifier = Modifier
-                                        .align(Alignment.TopCenter)
-                                        .padding(top = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
-                                ) {
-                                    Text(
-                                        text = specLineStr,
-                                        color = EchoCyanSpec,
-                                        fontSize = 9.5.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        fontFamily = FontFamily.Monospace,
-                                        maxLines = 1
-                                    )
-
-                                    Box(
-                                        modifier = Modifier
-                                            .border(1.dp, Color(0xFFA855F7), RoundedCornerShape(2.dp))
-                                            .padding(horizontal = 3.dp, vertical = 0.2.dp)
-                                    ) {
-                                        Text(
-                                            text = if (specLineStr.contains("MHz", true)) "DSD" else "SQ",
-                                            color = Color(0xFFD8B4FE),
-                                            fontSize = 7.5.sp,
-                                            fontWeight = FontWeight.ExtraBold,
-                                            fontFamily = FontFamily.Monospace
-                                        )
-                                    }
-
-                                    Icon(
-                                        imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                                        contentDescription = "Favorite",
-                                        tint = if (isFavorite) EchoProgressRed else Color.White.copy(alpha = 0.65f),
-                                        modifier = Modifier
-                                            .size(13.dp)
-                                            .clickable { onToggleFavorite() }
-                                    )
-                                }
-                            }
-                        }
+                                .width(52.dp)
+                                .height(7.dp)
+                                .clip(RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp))
+                                .background(Brush.verticalGradient(listOf(Color(0xFFEF4444), Color(0xFFB91C1C))))
+                                .clickable { onPlayPause() }
+                        )
+                        Box(
+                            modifier = Modifier
+                                .width(72.dp)
+                                .height(5.dp)
+                                .clip(RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp))
+                                .background(Brush.verticalGradient(listOf(Color(0xFF3A3F4B), Color(0xFF1B1E24))))
+                                .clickable { onPrev() }
+                        )
+                        Box(
+                            modifier = Modifier
+                                .width(50.dp)
+                                .height(5.dp)
+                                .clip(RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp))
+                                .background(Brush.verticalGradient(listOf(Color(0xFF3A3F4B), Color(0xFF1B1E24))))
+                                .clickable { onNext() }
+                        )
+                        Box(
+                            modifier = Modifier
+                                .width(50.dp)
+                                .height(5.dp)
+                                .clip(RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp))
+                                .background(Brush.verticalGradient(listOf(Color(0xFF3A3F4B), Color(0xFF1B1E24))))
+                                .clickable { onOpenAudioLab() }
+                        )
                     }
 
-                    // -----------------------------------------------------------------
-                    // LỚP KÍNH CƯỜNG LỰC PHẢN QUANG CHÉO TỪ TRÊN XUỐNG DƯỚI (DIAGONAL GLASS REFLECTION)
-                    // -----------------------------------------------------------------
-                    Canvas(modifier = Modifier.fillMaxSize()) {
-                        val w = size.width
-                        val h = size.height
-                        val glarePath = Path().apply {
-                            moveTo(w * 0.36f, -20f)
-                            lineTo(w * 1.05f, -20f)
-                            lineTo(w * 1.05f, h + 20f)
-                            lineTo(w * 0.48f, h + 20f)
-                            close()
-                        }
-                        drawPath(
-                            path = glarePath,
-                            brush = Brush.linearGradient(
-                                colors = listOf(
-                                    Color.White.copy(alpha = 0.08f),
-                                    Color.White.copy(alpha = 0.02f),
-                                    Color.Transparent
-                                ),
-                                start = Offset(w * 0.38f, 0f),
-                                end = Offset(w * 0.85f, h)
+                    // Hốc máy chứa cuốn băng Cassette tỷ lệ chuẩn 1.58:1 cỡ lớn
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .aspectRatio(1.58f, matchHeightConstraintsFirst = true)
+                            .shadow(24.dp, RoundedCornerShape(10.dp))
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(Color(0xFF282C34), Color(0xFF1A1D23), Color(0xFF111318))
+                                )
                             )
+                            .border(2.dp, Color(0xFF3E4452), RoundedCornerShape(10.dp))
+                            .padding(8.dp)
+                    ) {
+                        RetroVectorCassetteUnit(
+                            trackTitleStr = trackTitleStr,
+                            trackArtistStr = trackArtistStr,
+                            trackOrderStr = trackOrderStr,
+                            specLineStr = specLineStr,
+                            masterVolumePercent = masterVolumePercent,
+                            audioOutput = audioOutput,
+                            playMode = playMode,
+                            isFavorite = isFavorite,
+                            isPlaying = isPlaying,
+                            posMs = posMs,
+                            durMs = durMs,
+                            progressFraction = progressFraction,
+                            cumulativeTapeDistance = cumulativeTapeDistance,
+                            onSeek = onSeek,
+                            onPlayPause = onPlayPause,
+                            onPrev = onPrev,
+                            onNext = onNext,
+                            onToggleShuffle = onToggleShuffle,
+                            onToggleRepeat = onToggleRepeat,
+                            onToggleFavorite = onToggleFavorite,
+                            onOpenLibrary = onOpenLibrary,
+                            onOpenAudioLab = onOpenAudioLab
                         )
                     }
                 }
+            }
 
-                // 3. PHẦN CẰM MÁY VÁT NHÁM PHÍA DƯỚI MÀN HÌNH (ĐÃ BỎ HẾT CHỮ "SNOWSKY" VÀ "ECHO" THỪA!)
-                // Giữ đúng kết cấu bậc vát kim loại/nhựa nhám trống sạch sẽ như bạn yêu cầu
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(0.24f)
-                        .padding(horizontal = 18.dp, vertical = 6.dp)
-                        .clip(RoundedCornerShape(3.dp))
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(Color(0xFF1B1E24), Color(0xFF22262E), Color(0xFF191C22))
-                            )
-                        )
-                        .border(
-                            width = 1.dp,
-                            brush = Brush.verticalGradient(
-                                listOf(Color(0xFF101216), Color(0xFF323742))
-                            ),
-                            shape = RoundedCornerShape(3.dp)
-                        )
+            // Cột điều khiển chính bên Phải (Audio Lab, REW, PLAY lớn, FFWD)
+            Column(
+                modifier = Modifier
+                    .width(68.dp)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color(0xFF0E1016))
+                    .border(1.2.dp, Color(0xFF282E3B), RoundedCornerShape(14.dp))
+                    .padding(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                CassetteMechanicalKey(
+                    modifier = Modifier.weight(0.85f).fillMaxWidth(),
+                    isLatched = false,
+                    ledColor = ChampagneGold,
+                    onClick = onOpenAudioLab
                 ) {
-                    // Cho phép chạm nhẹ vào phần cằm máy nếu muốn mở nhanh Thư viện / Audio Lab / Xoay màn hình
-                    Row(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(horizontal = 16.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        IconButton(
-                            onClick = onOpenLibrary,
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.QueueMusic,
-                                contentDescription = "Library",
-                                tint = Color.White.copy(alpha = 0.28f),
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
+                    Icon(Icons.Default.Tune, contentDescription = "Audio Lab", tint = ChampagneGold, modifier = Modifier.size(19.dp))
+                }
 
-                        IconButton(
-                            onClick = onToggleOrientation,
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.ScreenRotation,
-                                contentDescription = "Rotate",
-                                tint = Color.White.copy(alpha = 0.22f),
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
+                CassetteMechanicalKey(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    isLatched = false,
+                    ledColor = null,
+                    onClick = onPrev
+                ) {
+                    Icon(Icons.Default.FastRewind, contentDescription = "Previous", tint = TextPure, modifier = Modifier.size(22.dp))
+                }
 
-                        IconButton(
-                            onClick = onOpenAudioLab,
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Tune,
-                                contentDescription = "Audio Lab",
-                                tint = Color.White.copy(alpha = 0.28f),
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                    }
+                CassetteMechanicalKey(
+                    modifier = Modifier.weight(1.45f).fillMaxWidth(),
+                    isLatched = isPlaying,
+                    isPrimaryGoldKey = true,
+                    ledColor = if (isPlaying) LedPlayGreen else EchoCrimsonRed,
+                    onClick = onPlayPause
+                ) {
+                    Icon(
+                        imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = "Play/Pause",
+                        tint = if (isPlaying) ChampagneGold else TextPure,
+                        modifier = Modifier.size(28.dp)
+                    )
+                }
+
+                CassetteMechanicalKey(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    isLatched = false,
+                    ledColor = null,
+                    onClick = onNext
+                ) {
+                    Icon(Icons.Default.FastForward, contentDescription = "Next", tint = TextPure, modifier = Modifier.size(22.dp))
                 }
             }
         }
+    } else {
+        // =====================================================================================
+        // BỐ CỤC PORTRAIT (CHẾ ĐỘ DỌC):
+        // - Khung máy DAP cân đối, bên trong là cuốn băng Cassette tỷ lệ chuẩn, bên dưới là bàn phím cơ
+        // =====================================================================================
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xFF08090C))
+                .padding(horizontal = 12.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.SpaceBetween,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // Gờ nút cứng trên đỉnh máy
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth(0.84f)
+                        .padding(bottom = 0.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Bottom
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .width(48.dp)
+                            .height(8.dp)
+                            .clip(RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp))
+                            .background(Brush.verticalGradient(listOf(Color(0xFFEF4444), Color(0xFFB91C1C))))
+                            .clickable { onPlayPause() }
+                    )
+                    Box(
+                        modifier = Modifier
+                            .width(70.dp)
+                            .height(6.dp)
+                            .clip(RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp))
+                            .background(Brush.verticalGradient(listOf(Color(0xFF3A3F4B), Color(0xFF1B1E24))))
+                            .clickable { onPrev() }
+                    )
+                    Box(
+                        modifier = Modifier
+                            .width(46.dp)
+                            .height(6.dp)
+                            .clip(RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp))
+                            .background(Brush.verticalGradient(listOf(Color(0xFF3A3F4B), Color(0xFF1B1E24))))
+                            .clickable { onNext() }
+                    )
+                    Box(
+                        modifier = Modifier
+                            .width(46.dp)
+                            .height(6.dp)
+                            .clip(RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp))
+                            .background(Brush.verticalGradient(listOf(Color(0xFF3A3F4B), Color(0xFF1B1E24))))
+                            .clickable { onOpenLibrary() }
+                    )
+                    Box(
+                        modifier = Modifier
+                            .width(46.dp)
+                            .height(6.dp)
+                            .clip(RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp))
+                            .background(Brush.verticalGradient(listOf(Color(0xFF3A3F4B), Color(0xFF1B1E24))))
+                            .clickable { onOpenAudioLab() }
+                    )
+                }
 
-        // Ở chế độ dọc (Portrait), giữ bàn phím vật lý phía dưới để thao tác một tay tiện lợi
-        if (!isLandscape) {
+                // Khung thân máy DAP ở chế độ dọc
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .shadow(24.dp, RoundedCornerShape(8.dp))
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color(0xFF2B2F37), Color(0xFF1E2128), Color(0xFF15171C))
+                            )
+                        )
+                        .border(
+                            width = 2.dp,
+                            brush = Brush.linearGradient(
+                                colors = listOf(Color(0xFF474E5C), Color(0xFF252830), Color(0xFF121418))
+                            ),
+                            shape = RoundedCornerShape(8.dp)
+                        )
+                ) {
+                    // Màn hình kính đen chứa Cassette
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(0.82f)
+                            .padding(start = 14.dp, end = 14.dp, top = 14.dp, bottom = 4.dp)
+                            .clip(RoundedCornerShape(5.dp))
+                            .background(DapGlassBezel)
+                            .border(1.5.dp, Color(0xFF14161B), RoundedCornerShape(5.dp))
+                            .padding(10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        RetroVectorCassetteUnit(
+                            trackTitleStr = trackTitleStr,
+                            trackArtistStr = trackArtistStr,
+                            trackOrderStr = trackOrderStr,
+                            specLineStr = specLineStr,
+                            masterVolumePercent = masterVolumePercent,
+                            audioOutput = audioOutput,
+                            playMode = playMode,
+                            isFavorite = isFavorite,
+                            isPlaying = isPlaying,
+                            posMs = posMs,
+                            durMs = durMs,
+                            progressFraction = progressFraction,
+                            cumulativeTapeDistance = cumulativeTapeDistance,
+                            onSeek = onSeek,
+                            onPlayPause = onPlayPause,
+                            onPrev = onPrev,
+                            onNext = onNext,
+                            onToggleShuffle = onToggleShuffle,
+                            onToggleRepeat = onToggleRepeat,
+                            onToggleFavorite = onToggleFavorite,
+                            onOpenLibrary = onOpenLibrary,
+                            onOpenAudioLab = onOpenAudioLab
+                        )
+                    }
+
+                    // Cằm máy vát kim loại sạch sẽ (tích hợp 3 nút truy cập nhanh Library / Rotate / Audio Lab)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(0.18f)
+                            .padding(horizontal = 14.dp, vertical = 6.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(Color(0xFF1B1E24), Color(0xFF22262E), Color(0xFF181B20))
+                                )
+                            )
+                            .border(
+                                width = 1.dp,
+                                brush = Brush.verticalGradient(
+                                    listOf(Color(0xFF101216), Color(0xFF323742))
+                                ),
+                                shape = RoundedCornerShape(4.dp)
+                            )
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = 18.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            IconButton(onClick = onOpenLibrary, modifier = Modifier.size(34.dp)) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.QueueMusic,
+                                    contentDescription = "Library",
+                                    tint = ColdSilver.copy(alpha = 0.65f),
+                                    modifier = Modifier.size(19.dp)
+                                )
+                            }
+
+                            IconButton(onClick = onToggleOrientation, modifier = Modifier.size(34.dp)) {
+                                Icon(
+                                    imageVector = Icons.Default.ScreenRotation,
+                                    contentDescription = "Landscape",
+                                    tint = ColdSilver.copy(alpha = 0.55f),
+                                    modifier = Modifier.size(17.dp)
+                                )
+                            }
+
+                            IconButton(onClick = onOpenAudioLab, modifier = Modifier.size(34.dp)) {
+                                Icon(
+                                    imageVector = Icons.Default.Tune,
+                                    contentDescription = "Audio Lab",
+                                    tint = ChampagneGold.copy(alpha = 0.75f),
+                                    modifier = Modifier.size(19.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             Spacer(modifier = Modifier.height(10.dp))
+
             CassetteMechanicalPianoKeyDeck(
                 isPlaying = isPlaying,
                 playMode = playMode,
@@ -2790,11 +2246,894 @@ fun ExactReferenceCassetteScreen(
     }
 }
 
+/**
+ * =============================================================================================
+ * BỘ KHUNG BĂNG CASSETTE RETRO VECTOR CHÂN THỰC (LẤY CẢM HỨNG TỪ VECTOR CASSETTE CỔ ĐIỂN + HIỆN ĐẠI)
+ * - Có gờ nổi khuôn đúc, nhãn dán vát góc (Corner-Cut Label), sọc màu Retro, 5 ốc vít cơ khí,
+ *   bánh răng có 6 mấu kẹp băng (Spline Teeth), và cuộn băng từ chạy thực tế từ Trái sang Phải.
+ * =============================================================================================
+ */
+@Composable
+fun RetroVectorCassetteUnit(
+    trackTitleStr: String,
+    trackArtistStr: String,
+    trackOrderStr: String,
+    specLineStr: String,
+    masterVolumePercent: Int,
+    audioOutput: AudioOutputState,
+    playMode: PlayMode,
+    isFavorite: Boolean,
+    isPlaying: Boolean,
+    posMs: Int,
+    durMs: Int,
+    progressFraction: Float,
+    cumulativeTapeDistance: Float,
+    onSeek: (Int) -> Unit,
+    onPlayPause: () -> Unit,
+    onPrev: () -> Unit,
+    onNext: () -> Unit,
+    onToggleShuffle: () -> Unit,
+    onToggleRepeat: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onOpenLibrary: () -> Unit,
+    onOpenAudioLab: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .shadow(12.dp, RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(10.dp))
+            .background(
+                Brush.linearGradient(
+                    colors = listOf(Color(0xFF353A45), Color(0xFF262A33), Color(0xFF1B1E25)),
+                    start = Offset(0f, 0f),
+                    end = Offset(900f, 700f)
+                )
+            )
+            .border(
+                width = 1.6.dp,
+                brush = Brush.linearGradient(
+                    colors = listOf(Color(0xFF60687A), Color(0xFF333844), Color(0xFF191C22))
+                ),
+                shape = RoundedCornerShape(10.dp)
+            )
+    ) {
+        // Vẽ các chi tiết vỏ băng Cassette chuẩn Vector Retro:
+        // - Rãnh khuôn đúc vát góc (Champfered Outer Groove)
+        // - 2 ngàm lõm bên hông băng (Side Grip Notches)
+        // - Gờ nhãn băng vát chéo 4 góc (Corner-Cut Retro Label Plate) + 3 đường sọc màu Retro
+        // - 2 chấm đèn phản quang đỏ chìm ở 2 góc dưới
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val w = size.width
+            val h = size.height
+
+            // 1. Đường highlight ánh sáng trên đỉnh vỏ băng
+            drawLine(
+                color = Color.White.copy(alpha = 0.22f),
+                start = Offset(14.dp.toPx(), 1.dp.toPx()),
+                end = Offset(w - 14.dp.toPx(), 1.dp.toPx()),
+                strokeWidth = 1.2.dp.toPx()
+            )
+
+            // 2. Đường gờ khuôn đúc bao quanh mặt băng
+            drawRoundRect(
+                color = Color.Black.copy(alpha = 0.45f),
+                topLeft = Offset(7.dp.toPx(), 7.dp.toPx()),
+                size = Size(w - 14.dp.toPx(), h - 14.dp.toPx()),
+                cornerRadius = CornerRadius(7.dp.toPx()),
+                style = Stroke(width = 1.5.dp.toPx())
+            )
+            drawRoundRect(
+                color = Color.White.copy(alpha = 0.08f),
+                topLeft = Offset(8.dp.toPx(), 8.dp.toPx()),
+                size = Size(w - 16.dp.toPx(), h - 16.dp.toPx()),
+                cornerRadius = CornerRadius(6.dp.toPx()),
+                style = Stroke(width = 0.9.dp.toPx())
+            )
+
+            // 3. Khung nhãn băng vát góc (Retro Corner-Cut Label Area) giống file Vector
+            val lblLeft = w * 0.055f
+            val lblRight = w * 0.945f
+            val lblTop = h * 0.13f
+            val lblBottom = h * 0.81f
+            val cut = 12.dp.toPx()
+
+            val labelPath = Path().apply {
+                moveTo(lblLeft + cut, lblTop)
+                lineTo(lblRight - cut, lblTop)
+                lineTo(lblRight, lblTop + cut)
+                lineTo(lblRight, lblBottom - cut * 0.6f)
+                lineTo(lblRight - cut * 0.6f, lblBottom)
+                lineTo(lblLeft + cut * 0.6f, lblBottom)
+                lineTo(lblLeft, lblBottom - cut * 0.6f)
+                lineTo(lblLeft, lblTop + cut)
+                close()
+            }
+
+            drawPath(
+                path = labelPath,
+                brush = Brush.verticalGradient(
+                    colors = listOf(Color(0xFF222630), Color(0xFF2B303C), Color(0xFF1E222B)),
+                    startY = lblTop,
+                    endY = lblBottom
+                )
+            )
+
+            // 3 sọc màu Retro mảnh chạy ngang phần dưới nhãn băng (Lấy cảm hứng từ vector cassette cổ điển)
+            clipPath(labelPath) {
+                val stripeY = lblBottom - 26.dp.toPx()
+                drawRect(
+                    color = RetroStripeOrange.copy(alpha = 0.22f),
+                    topLeft = Offset(lblLeft, stripeY),
+                    size = Size(lblRight - lblLeft, 2.5.dp.toPx())
+                )
+                drawRect(
+                    color = RetroStripeGold.copy(alpha = 0.18f),
+                    topLeft = Offset(lblLeft, stripeY + 3.5.dp.toPx()),
+                    size = Size(lblRight - lblLeft, 2.dp.toPx())
+                )
+                drawRect(
+                    color = RetroStripeTeal.copy(alpha = 0.18f),
+                    topLeft = Offset(lblLeft, stripeY + 6.5.dp.toPx()),
+                    size = Size(lblRight - lblLeft, 2.dp.toPx())
+                )
+            }
+
+            drawPath(
+                path = labelPath,
+                color = Color(0xFF495163),
+                style = Stroke(width = 1.1.dp.toPx())
+            )
+
+            // 4. Hai chấm đèn phản quang đỏ chìm ở 2 góc dưới ngoài đế hình thang
+            val redDotY = h * 0.90f
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(Color(0xFFB91C1C).copy(alpha = 0.60f), Color.Transparent),
+                    center = Offset(w * 0.11f, redDotY),
+                    radius = 11.dp.toPx()
+                ),
+                radius = 11.dp.toPx(),
+                center = Offset(w * 0.11f, redDotY)
+            )
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(Color(0xFFB91C1C).copy(alpha = 0.60f), Color.Transparent),
+                    center = Offset(w * 0.89f, redDotY),
+                    radius = 11.dp.toPx()
+                ),
+                radius = 11.dp.toPx(),
+                center = Offset(w * 0.89f, redDotY)
+            )
+        }
+
+        // 4 Ốc vít cơ khí ở 4 góc mặt băng (Chuẩn thiết kế băng Cassette 5-screw vector)
+        CassetteCornerScrew(Modifier.align(Alignment.TopStart).padding(10.dp))
+        CassetteCornerScrew(Modifier.align(Alignment.TopEnd).padding(10.dp))
+        CassetteCornerScrew(Modifier.align(Alignment.BottomStart).padding(10.dp))
+        CassetteCornerScrew(Modifier.align(Alignment.BottomEnd).padding(10.dp))
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = 6.dp, bottom = 0.dp),
+            verticalArrangement = Arrangement.SpaceBetween,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // -----------------------------------------------------------------
+            // A. THANH TRẠNG THÁI HUD TRÊN CÙNG (🔊 56 | 🎧 | 001/035 --- 🔀 | [NOR] | SD | 🔋)
+            // -----------------------------------------------------------------
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth(0.90f)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color.Black.copy(alpha = 0.35f))
+                    .padding(horizontal = 10.dp, vertical = 3.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = "$masterVolumePercent",
+                            color = Color.White,
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+
+                    Icon(
+                        imageVector = if (audioOutput.isBluetooth) Icons.Default.BluetoothAudio else Icons.Default.Headphones,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(14.dp)
+                    )
+
+                    Text(
+                        text = trackOrderStr,
+                        color = Color.White,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.clickable { onOpenLibrary() }
+                    )
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Shuffle,
+                        contentDescription = "Shuffle",
+                        tint = if (playMode == PlayMode.SHUFFLE) EchoCyanSpec else Color.White.copy(alpha = 0.9f),
+                        modifier = Modifier
+                            .size(13.dp)
+                            .clickable { onToggleShuffle() }
+                    )
+
+                    Box(
+                        modifier = Modifier
+                            .border(1.dp, Color.White, RoundedCornerShape(2.dp))
+                            .clickable { onToggleRepeat() }
+                            .padding(horizontal = 3.dp, vertical = 0.5.dp)
+                    ) {
+                        Text(
+                            text = playMode.badgeCode,
+                            color = Color.White,
+                            fontSize = 8.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+
+                    Icon(
+                        imageVector = Icons.Default.SdStorage,
+                        contentDescription = "Library",
+                        tint = Color.White.copy(alpha = 0.9f),
+                        modifier = Modifier
+                            .size(13.dp)
+                            .clickable { onOpenLibrary() }
+                    )
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.clickable { onOpenAudioLab() }
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .border(1.2.dp, Color.White, RoundedCornerShape(2.dp))
+                                .padding(horizontal = 2.dp, vertical = 2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(1.2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            val activeBars = ((audioOutput.batteryPercent + 15) / 25).coerceIn(1, 4)
+                            for (b in 1..4) {
+                                Box(
+                                    modifier = Modifier
+                                        .width(2.5.dp)
+                                        .height(6.dp)
+                                        .background(if (b <= activeBars) Color.White else Color.White.copy(alpha = 0.2f))
+                                )
+                            }
+                        }
+                        Box(
+                            modifier = Modifier
+                                .width(1.8.dp)
+                                .height(4.dp)
+                                .background(Color.White)
+                        )
+                    }
+                }
+            }
+
+            // -----------------------------------------------------------------
+            // B. TÊN BÀI HÁT TRÊN NHÃN BĂNG CASSETTE
+            // -----------------------------------------------------------------
+            Text(
+                text = trackTitleStr,
+                color = Color.White,
+                fontSize = 15.5.sp,
+                fontWeight = FontWeight.ExtraBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
+                letterSpacing = 0.5.sp,
+                modifier = Modifier
+                    .fillMaxWidth(0.84f)
+                    .padding(vertical = 1.dp)
+            )
+
+            // -----------------------------------------------------------------
+            // C. CỬA SỔ CASSETTE TRUNG TÂM LẤY CẢM HỨNG TỪ VECTOR RETRO + ẢNH THAM CHIẾU
+            // - Cuộn băng từ to/nhỏ thực tế theo thời gian bài hát (Trái đầy -> Phải đầy).
+            // - 2 trục bánh răng bạc đục 6 lỗ tròn đen + 6 răng cưa kẹp băng (Spline Teeth) + lõi Đỏ Crimson.
+            // - Thước đo lượng băng ở giữa với vạch kim đỏ.
+            // -----------------------------------------------------------------
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.74f)
+                    .weight(1f)
+                    .padding(vertical = 2.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(Unit) {
+                            detectTapGestures { offset ->
+                                when {
+                                    offset.x < size.width * 0.33f -> onPrev()
+                                    offset.x > size.width * 0.67f -> onNext()
+                                    else -> onPlayPause()
+                                }
+                            }
+                        }
+                ) {
+                    val w = size.width
+                    val h = size.height
+                    val centerY = h * 0.50f
+                    val pillHeight = (h * 0.88f).coerceAtMost(w * 0.45f)
+                    val pillTop = centerY - pillHeight / 2f
+                    val pillCorner = pillHeight / 2f
+
+                    val leftX = pillCorner * 0.98f
+                    val rightX = w - pillCorner * 0.98f
+
+                    val hubRadius = pillHeight * 0.38f
+                    val minSpoolR = hubRadius * 1.06f
+                    val maxSpoolR = pillHeight * 0.88f
+                    val minArea = minSpoolR * minSpoolR
+                    val maxArea = maxSpoolR * maxSpoolR
+
+                    val leftSpoolR = sqrt(maxArea - progressFraction * (maxArea - minArea))
+                    val rightSpoolR = sqrt(minArea + progressFraction * (maxArea - minArea))
+
+                    val leftAngle = -((cumulativeTapeDistance * (maxSpoolR / leftSpoolR.coerceAtLeast(1f))) % 360f)
+                    val rightAngle = -((cumulativeTapeDistance * (maxSpoolR / rightSpoolR.coerceAtLeast(1f))) % 360f)
+
+                    // 1. Vầng bóng của 2 cuộn băng từ nhìn xuyên qua lớp nhựa mờ của vỏ băng
+                    drawCircle(
+                        brush = Brush.radialGradient(
+                            0.0f to Color(0xFF060709),
+                            0.76f to Color(0xFF0A0C10).copy(alpha = 0.92f),
+                            0.94f to Color(0xFF151820).copy(alpha = 0.65f),
+                            1.0f to Color.Transparent,
+                            center = Offset(leftX, centerY),
+                            radius = leftSpoolR.coerceAtLeast(1f)
+                        ),
+                        radius = leftSpoolR,
+                        center = Offset(leftX, centerY)
+                    )
+
+                    drawCircle(
+                        brush = Brush.radialGradient(
+                            0.0f to Color(0xFF060709),
+                            0.76f to Color(0xFF0A0C10).copy(alpha = 0.92f),
+                            0.94f to Color(0xFF151820).copy(alpha = 0.65f),
+                            1.0f to Color.Transparent,
+                            center = Offset(rightX, centerY),
+                            radius = rightSpoolR.coerceAtLeast(1f)
+                        ),
+                        radius = rightSpoolR,
+                        center = Offset(rightX, centerY)
+                    )
+
+                    // 2. Đường viền cửa sổ hình viên thuốc (Stadium Pill Window)
+                    val pillPath = Path().apply {
+                        addRoundRect(
+                            RoundRect(
+                                left = 0f,
+                                top = pillTop,
+                                right = w,
+                                bottom = pillTop + pillHeight,
+                                cornerRadius = CornerRadius(pillCorner, pillCorner)
+                            )
+                        )
+                    }
+
+                    drawPath(
+                        path = pillPath,
+                        brush = Brush.verticalGradient(
+                            colors = listOf(Color(0xFF111319), Color(0xFF21252E), Color(0xFF111319)),
+                            startY = pillTop,
+                            endY = pillTop + pillHeight
+                        )
+                    )
+
+                    // 3. Vẽ chi tiết lớp băng từ quấn bên trong cửa sổ kính
+                    clipPath(pillPath) {
+                        listOf(
+                            Triple(leftX, leftSpoolR, leftAngle),
+                            Triple(rightX, rightSpoolR, rightAngle)
+                        ).forEach { (cx, spoolR, angle) ->
+                            // Bóng đổ của cuộn băng
+                            drawCircle(
+                                color = Color.Black.copy(alpha = 0.7f),
+                                radius = spoolR + 3.dp.toPx(),
+                                center = Offset(cx + 2.dp.toPx(), centerY + 2.dp.toPx())
+                            )
+
+                            // Nền cuộn băng từ màu nâu đen oxit sắt
+                            drawCircle(
+                                brush = Brush.radialGradient(
+                                    colors = listOf(Color(0xFF2B1E1A), Color(0xFF140D0B), Color(0xFF241815)),
+                                    center = Offset(cx, centerY),
+                                    radius = spoolR.coerceAtLeast(1f)
+                                ),
+                                radius = spoolR,
+                                center = Offset(cx, centerY)
+                            )
+
+                            // Hiệu ứng ánh sáng cánh quạt phản xạ trên bề mặt cuộn băng khi xoay
+                            rotate(angle * 0.4f - 25f, pivot = Offset(cx, centerY)) {
+                                drawCircle(
+                                    brush = Brush.sweepGradient(
+                                        0.00f to Color.Transparent,
+                                        0.15f to Color(0xFF6E4B3E).copy(alpha = 0.38f),
+                                        0.30f to Color.Transparent,
+                                        0.50f to Color.Transparent,
+                                        0.65f to Color(0xFF6E4B3E).copy(alpha = 0.38f),
+                                        0.80f to Color.Transparent,
+                                        1.00f to Color.Transparent,
+                                        center = Offset(cx, centerY)
+                                    ),
+                                    radius = spoolR,
+                                    center = Offset(cx, centerY)
+                                )
+                            }
+
+                            // Các vòng rãnh băng quấn đồng tâm
+                            val thick = (spoolR - hubRadius).coerceAtLeast(0f)
+                            val rings = (thick / 2.2.dp.toPx()).toInt().coerceIn(2, 18)
+                            for (r in 1..rings) {
+                                val rr = hubRadius + thick * (r.toFloat() / (rings + 1))
+                                drawCircle(
+                                    color = if (r % 3 == 0) Color.White.copy(alpha = 0.11f) else Color.Black.copy(alpha = 0.45f),
+                                    radius = rr,
+                                    center = Offset(cx, centerY),
+                                    style = Stroke(width = 0.8.dp.toPx())
+                                )
+                            }
+
+                            drawCircle(
+                                color = Color(0xFF4A342B),
+                                radius = spoolR,
+                                center = Offset(cx, centerY),
+                                style = Stroke(width = 1.4.dp.toPx())
+                            )
+                        }
+
+                        // Dây băng từ chạy tiếp tuyến giữa hai cuộn ở đáy cửa sổ
+                        val tapeY = centerY + hubRadius * 0.78f
+                        drawLine(
+                            color = Color(0xFF4D342B),
+                            start = Offset(leftX, tapeY),
+                            end = Offset(rightX, tapeY),
+                            strokeWidth = 2.6.dp.toPx()
+                        )
+                        val shimmerStep = 18.dp.toPx()
+                        val shimmerShift = (cumulativeTapeDistance * 0.95f) % shimmerStep
+                        var sx = leftX + shimmerShift
+                        while (sx < rightX - 6.dp.toPx()) {
+                            drawLine(
+                                color = ChampagneGold.copy(alpha = 0.55f),
+                                start = Offset(sx, tapeY),
+                                end = Offset(sx + 6.dp.toPx(), tapeY),
+                                strokeWidth = 2.dp.toPx(),
+                                cap = StrokeCap.Round
+                            )
+                            sx += shimmerStep
+                        }
+                    }
+
+                    // 4. Khung thước đo chữ nhật ở giữa 2 bánh răng
+                    val scaleLeft = leftX + hubRadius * 1.06f
+                    val scaleRight = rightX - hubRadius * 1.06f
+                    val scaleHeight = pillHeight * 0.48f
+                    val scaleTop = centerY - scaleHeight / 2f
+
+                    if (scaleRight > scaleLeft + 10f) {
+                        drawRoundRect(
+                            color = Color(0xFF1F232C).copy(alpha = 0.94f),
+                            topLeft = Offset(scaleLeft, scaleTop),
+                            size = Size(scaleRight - scaleLeft, scaleHeight),
+                            cornerRadius = CornerRadius(3.5.dp.toPx())
+                        )
+                        drawRoundRect(
+                            color = Color(0xFF5A6376),
+                            topLeft = Offset(scaleLeft, scaleTop),
+                            size = Size(scaleRight - scaleLeft, scaleHeight),
+                            cornerRadius = CornerRadius(3.5.dp.toPx()),
+                            style = Stroke(width = 1.1.dp.toPx())
+                        )
+
+                        drawLine(
+                            color = Color.White.copy(alpha = 0.55f),
+                            start = Offset(scaleLeft + 4.dp.toPx(), centerY),
+                            end = Offset(scaleRight - 4.dp.toPx(), centerY),
+                            strokeWidth = 0.9.dp.toPx()
+                        )
+                        val numTicks = 14
+                        for (t in 0..numTicks) {
+                            val tx = scaleLeft + 5.dp.toPx() + (scaleRight - scaleLeft - 10.dp.toPx()) * (t.toFloat() / numTicks)
+                            val th = if (t % 7 == 0) 6.5.dp.toPx() else if (t % 2 == 0) 4.2.dp.toPx() else 2.4.dp.toPx()
+                            drawLine(
+                                color = Color.White.copy(alpha = 0.80f),
+                                start = Offset(tx, centerY - th),
+                                end = Offset(tx, centerY + th),
+                                strokeWidth = 1.dp.toPx()
+                            )
+                        }
+
+                        // Vạch kim đỏ ở giữa thước
+                        val redIndicatorX = (scaleLeft + scaleRight) / 2f
+                        drawLine(
+                            color = EchoProgressRed,
+                            start = Offset(redIndicatorX, scaleTop + 2.dp.toPx()),
+                            end = Offset(redIndicatorX, scaleTop + scaleHeight - 2.dp.toPx()),
+                            strokeWidth = 2.dp.toPx()
+                        )
+                    }
+
+                    // 5. Vẽ 2 Bánh Răng Cassette chuẩn Vector Retro + Ảnh mẫu:
+                    // (Vành bạc + Đĩa trắng đục 6 lỗ đen + Lõi Đỏ Crimson + 6 mấu kẹp băng Spline Teeth)
+                    listOf(leftX to leftAngle, rightX to rightAngle).forEach { (cx, angle) ->
+                        drawCircle(
+                            color = Color.Black.copy(alpha = 0.70f),
+                            radius = hubRadius + 2.5.dp.toPx(),
+                            center = Offset(cx + 1.dp.toPx(), centerY + 2.dp.toPx())
+                        )
+
+                        drawCircle(
+                            brush = Brush.linearGradient(
+                                colors = listOf(Color.White, Color(0xFF94A3B8)),
+                                start = Offset(cx - hubRadius, centerY - hubRadius),
+                                end = Offset(cx + hubRadius, centerY + hubRadius)
+                            ),
+                            radius = hubRadius,
+                            center = Offset(cx, centerY)
+                        )
+
+                        val whiteWheelR = hubRadius * 0.88f
+                        drawCircle(
+                            brush = Brush.radialGradient(
+                                colors = listOf(Color.White, Color(0xFFE2E8F0)),
+                                center = Offset(cx, centerY),
+                                radius = whiteWheelR
+                            ),
+                            radius = whiteWheelR,
+                            center = Offset(cx, centerY)
+                        )
+
+                        val redHubR = hubRadius * 0.52f
+                        drawCircle(
+                            brush = Brush.radialGradient(
+                                colors = listOf(Color(0xFFFB7185), EchoProgressRed, Color(0xFF991B1B)),
+                                center = Offset(cx, centerY),
+                                radius = redHubR
+                            ),
+                            radius = redHubR,
+                            center = Offset(cx, centerY)
+                        )
+
+                        val centerHoleR = hubRadius * 0.22f
+                        rotate(angle, pivot = Offset(cx, centerY)) {
+                            for (spoke in 0 until 6) {
+                                rotate(spoke * 60f, pivot = Offset(cx, centerY)) {
+                                    // Nan hoa trắng chia lõi đỏ thành 6 cánh quạt
+                                    drawLine(
+                                        color = Color.White,
+                                        start = Offset(cx, centerY - centerHoleR),
+                                        end = Offset(cx, centerY - whiteWheelR * 0.92f),
+                                        strokeWidth = 2.4.dp.toPx(),
+                                        cap = StrokeCap.Round
+                                    )
+                                }
+                                // 6 lỗ tròn màu đen nằm xen kẽ trên vành trắng
+                                rotate(spoke * 60f + 30f, pivot = Offset(cx, centerY)) {
+                                    drawCircle(
+                                        color = Color(0xFF14171E),
+                                        radius = hubRadius * 0.115f,
+                                        center = Offset(cx, centerY - hubRadius * 0.69f)
+                                    )
+                                }
+                            }
+                        }
+
+                        // Lỗ trục tâm + 6 răng cưa kẹp trục (Vector Spline Teeth)
+                        drawCircle(
+                            color = Color(0xFF101218),
+                            radius = centerHoleR,
+                            center = Offset(cx, centerY)
+                        )
+                        drawCircle(
+                            color = Color.White,
+                            radius = centerHoleR,
+                            center = Offset(cx, centerY),
+                            style = Stroke(width = 1.3.dp.toPx())
+                        )
+                        rotate(angle, pivot = Offset(cx, centerY)) {
+                            for (tooth in 0 until 6) {
+                                rotate(tooth * 60f, pivot = Offset(cx, centerY)) {
+                                    drawLine(
+                                        color = Color.White,
+                                        start = Offset(cx, centerY - centerHoleR),
+                                        end = Offset(cx, centerY - centerHoleR * 0.62f),
+                                        strokeWidth = 1.8.dp.toPx()
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // 6. Viền Bevel 3D bao quanh cửa sổ viên thuốc + Ánh kính phản chiếu
+                    drawRoundRect(
+                        color = Color(0xFF0E1015),
+                        topLeft = Offset(0f, pillTop),
+                        size = Size(w, pillHeight),
+                        cornerRadius = CornerRadius(pillCorner, pillCorner),
+                        style = Stroke(width = 3.8.dp.toPx())
+                    )
+                    drawRoundRect(
+                        brush = Brush.verticalGradient(
+                            listOf(Color(0xFF707C91), Color(0xFF2D3340), Color(0xFF5A6478))
+                        ),
+                        topLeft = Offset(1.dp.toPx(), pillTop + 1.dp.toPx()),
+                        size = Size(w - 2.dp.toPx(), pillHeight - 2.dp.toPx()),
+                        cornerRadius = CornerRadius(pillCorner, pillCorner),
+                        style = Stroke(width = 1.8.dp.toPx())
+                    )
+                }
+            }
+
+            // -----------------------------------------------------------------
+            // D. HÀNG CA SĨ + THỜI GIAN + THANH TIẾN TRÌNH ĐỎ CÓ CON CHẠY TRẮNG ĐỨNG
+            // -----------------------------------------------------------------
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth(0.84f)
+                    .padding(bottom = 2.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 20.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PersonOutline,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Text(
+                        text = trackArtistStr,
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = (if (isPlaying) "▶ " else "⏸ ") + formatTimeMs(posMs),
+                        color = Color.White,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Text(
+                        text = formatTimeMs(durMs),
+                        color = Color.White,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(14.dp)
+                        .pointerInput(durMs) {
+                            detectTapGestures { offset ->
+                                val frac = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
+                                onSeek((frac * durMs).toInt())
+                            }
+                        }
+                        .pointerInput(durMs) {
+                            detectHorizontalDragGestures { change, _ ->
+                                change.consume()
+                                val frac = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
+                                onSeek((frac * durMs).toInt())
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val w = size.width
+                        val cy = size.height / 2f
+                        val thumbX = (w * progressFraction).coerceIn(2.dp.toPx(), w - 2.dp.toPx())
+
+                        drawLine(
+                            color = Color.White.copy(alpha = 0.22f),
+                            start = Offset(0f, cy),
+                            end = Offset(w, cy),
+                            strokeWidth = 2.6.dp.toPx(),
+                            cap = StrokeCap.Round
+                        )
+                        drawLine(
+                            color = EchoProgressRed,
+                            start = Offset(0f, cy),
+                            end = Offset(thumbX, cy),
+                            strokeWidth = 2.6.dp.toPx(),
+                            cap = StrokeCap.Round
+                        )
+                        drawRoundRect(
+                            color = Color.White,
+                            topLeft = Offset(thumbX - 2.dp.toPx(), cy - 4.5.dp.toPx()),
+                            size = Size(4.dp.toPx(), 9.dp.toPx()),
+                            cornerRadius = CornerRadius(1.dp.toPx())
+                        )
+                    }
+                }
+            }
+
+            // -----------------------------------------------------------------
+            // E. ĐẾ BĂNG HÌNH THANG VÁT CHÉO (TRAPEZOID HEAD SHIELD) KÈM 4 LỖ CAPSTAN & THÔNG SỐ CYAN
+            // -----------------------------------------------------------------
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.76f)
+                    .height(36.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val w = size.width
+                    val h = size.height
+                    val topInset = w * 0.055f
+
+                    val trapPath = Path().apply {
+                        moveTo(topInset, 0f)
+                        lineTo(w - topInset, 0f)
+                        lineTo(w, h)
+                        lineTo(0f, h)
+                        close()
+                    }
+
+                    drawPath(
+                        path = trapPath,
+                        brush = Brush.verticalGradient(
+                            listOf(Color(0xFF323743), Color(0xFF20242C))
+                        )
+                    )
+                    drawPath(
+                        path = trapPath,
+                        color = Color(0xFF5A6478),
+                        style = Stroke(width = 1.4.dp.toPx())
+                    )
+
+                    val holeY = h * 0.74f
+                    drawCircle(
+                        color = Color(0xFF0A0C10),
+                        radius = 4.2.dp.toPx(),
+                        center = Offset(w * 0.10f, holeY)
+                    )
+                    drawCircle(
+                        color = Color(0xFF0A0C10),
+                        radius = 4.2.dp.toPx(),
+                        center = Offset(w * 0.90f, holeY)
+                    )
+                    drawRoundRect(
+                        color = Color(0xFF0A0C10),
+                        topLeft = Offset(w * 0.21f, holeY - 3.dp.toPx()),
+                        size = Size(12.dp.toPx(), 6.dp.toPx()),
+                        cornerRadius = CornerRadius(1.5.dp.toPx())
+                    )
+                    drawRoundRect(
+                        color = Color(0xFF0A0C10),
+                        topLeft = Offset(w * 0.79f - 12.dp.toPx(), holeY - 3.dp.toPx()),
+                        size = Size(12.dp.toPx(), 6.dp.toPx()),
+                        cornerRadius = CornerRadius(1.5.dp.toPx())
+                    )
+                }
+
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Text(
+                        text = specLineStr,
+                        color = EchoCyanSpec,
+                        fontSize = 9.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1
+                    )
+
+                    Box(
+                        modifier = Modifier
+                            .border(1.dp, Color(0xFFA855F7), RoundedCornerShape(2.dp))
+                            .padding(horizontal = 3.dp, vertical = 0.2.dp)
+                    ) {
+                        Text(
+                            text = if (specLineStr.contains("MHz", true)) "DSD" else "SQ",
+                            color = Color(0xFFD8B4FE),
+                            fontSize = 7.5.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+
+                    Icon(
+                        imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                        contentDescription = "Favorite",
+                        tint = if (isFavorite) EchoProgressRed else Color.White.copy(alpha = 0.65f),
+                        modifier = Modifier
+                            .size(13.dp)
+                            .clickable { onToggleFavorite() }
+                    )
+                }
+            }
+        }
+
+        // Lớp kính phản quang chéo từ trên xuống dưới giống ảnh chụp máy thật
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val w = size.width
+            val h = size.height
+            val glarePath = Path().apply {
+                moveTo(w * 0.38f, -10f)
+                lineTo(w * 1.02f, -10f)
+                lineTo(w * 1.02f, h + 10f)
+                lineTo(w * 0.50f, h + 10f)
+                close()
+            }
+            drawPath(
+                path = glarePath,
+                brush = Brush.linearGradient(
+                    colors = listOf(
+                        Color.White.copy(alpha = 0.075f),
+                        Color.White.copy(alpha = 0.02f),
+                        Color.Transparent
+                    ),
+                    start = Offset(w * 0.40f, 0f),
+                    end = Offset(w * 0.85f, h)
+                )
+            )
+        }
+    }
+}
+
 @Composable
 fun CassetteCornerScrew(modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
-            .size(8.dp)
+            .size(8.5.dp)
             .shadow(2.dp, CircleShape)
             .clip(CircleShape)
             .background(
@@ -2933,12 +3272,12 @@ fun CassetteMechanicalKey(
 
     val isDepressed = isPressed || isLatched
     val topInsetDp by animateDpAsState(
-        targetValue = if (isDepressed) 4.dp else 0.dp,
+        targetValue = if (isDepressed) 3.dp else 0.dp,
         animationSpec = tween(durationMillis = 90),
         label = "key_depress_offset"
     )
     val bottomLipDp by animateDpAsState(
-        targetValue = if (isDepressed) 1.dp else 4.dp,
+        targetValue = if (isDepressed) 1.dp else 3.5.dp,
         animationSpec = tween(durationMillis = 90),
         label = "key_bottom_lip"
     )
@@ -2977,7 +3316,7 @@ fun CassetteMechanicalKey(
                     indication = null,
                     onClick = onClick
                 )
-                .padding(vertical = 5.dp, horizontal = 4.dp)
+                .padding(vertical = 4.dp, horizontal = 4.dp)
         ) {
             if (!isDepressed) {
                 Box(
@@ -3010,13 +3349,13 @@ fun CassetteMechanicalKey(
                 Column(verticalArrangement = Arrangement.spacedBy(1.5.dp)) {
                     Box(
                         modifier = Modifier
-                            .width(22.dp)
+                            .width(20.dp)
                             .height(1.dp)
                             .background(Color.Black.copy(alpha = 0.65f))
                     )
                     Box(
                         modifier = Modifier
-                            .width(22.dp)
+                            .width(20.dp)
                             .height(1.dp)
                             .background(Color.White.copy(alpha = 0.12f))
                     )

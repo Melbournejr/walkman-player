@@ -8,8 +8,8 @@ plugins {
 // =========================================================================
 // CHỈ CẦN ĐỔI HẬU TỐ PHIÊN BẢN Ở DÒNG NÀY CHO CÁC BẢN CẢI TIẾN TIẾP THEO:
 // =========================================================================
-val walkmanVersion = "11.2.0"
-val walkmanVersionCode = 1120
+val walkmanVersion = "11.3.0"
+val walkmanVersionCode = 1130
 val githubRepoSlug = "Melbournejr/walkman-player"
 
 val fixedKeystoreFile = file("walkman-permanent.jks")
@@ -97,4 +97,5 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
 }
+
 

@@ -15,30 +15,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Fetch Prebuilt FFmpeg 6.0 Android arm64-v8a Libraries & C Headers
-        run: |
-          set -e
-          mkdir -p app/src/main/jniLibs/arm64-v8a
-          mkdir -p app/src/main/cpp/include
-          
-          echo "Downloading Prebuilt FFmpeg Android arm64-v8a shared libraries & headers..."
-          curl -L --fail --retry 3 -o /tmp/ffmpeg-android.tar.bz2 "https://sourceforge.net/projects/avbuild/files/android/ffmpeg-6.0-android-clang-lite.tar.bz2/download"
-          mkdir -p /tmp/ffmpeg_extracted
-          tar -xjf /tmp/ffmpeg-android.tar.bz2 -C /tmp/ffmpeg_extracted
-          
-          INC_DIR=$(find /tmp/ffmpeg_extracted -type d -name "include" | head -n 1)
-          LIB_DIR=$(find /tmp/ffmpeg_extracted -type d -path "*/arm64-v8a" | head -n 1)
-          
-          cp -r "$INC_DIR"/* app/src/main/cpp/include/
-          cp -P "$LIB_DIR"/libavcodec.so* app/src/main/jniLibs/arm64-v8a/libavcodec.so
-          cp -P "$LIB_DIR"/libavformat.so* app/src/main/jniLibs/arm64-v8a/libavformat.so
-          cp -P "$LIB_DIR"/libswresample.so* app/src/main/jniLibs/arm64-v8a/libswresample.so
-          cp -P "$LIB_DIR"/libavutil.so* app/src/main/jniLibs/arm64-v8a/libavutil.so
-          
-          echo "Verified FFmpeg C Headers and arm64-v8a Shared Libraries:"
-          ls -lh app/src/main/jniLibs/arm64-v8a/
-          ls -lh app/src/main/cpp/include/
-
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -46,10 +22,78 @@ jobs:
           distribution: 'temurin'
 
       - name: Setup Android NDK & CMake
+        id: setup_ndk
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r26b
           cmake-version: 3.22.1
+
+      - name: Cache Compiled FFmpeg 6.0 Android arm64-v8a
+        id: cache_ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: |
+            app/src/main/jniLibs/arm64-v8a
+            app/src/main/cpp/include
+          key: ffmpeg-6.0-android-arm64-dsd-v1
+
+      - name: Build FFmpeg 6.0 Native Libraries (arm64-v8a) from Official GitHub Source
+        if: steps.cache_ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          echo "Cloning official FFmpeg n6.0 source from GitHub..."
+          git clone --depth 1 --branch n6.0 https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg-src
+
+          TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
+          API=26
+          PREFIX="/tmp/ffmpeg-build"
+
+          cd /tmp/ffmpeg-src
+          ./configure \
+            --prefix="$PREFIX" \
+            --enable-cross-compile \
+            --target-os=android \
+            --arch=aarch64 \
+            --cpu=armv8-a \
+            --cc="$TOOLCHAIN/bin/aarch64-linux-android${API}-clang" \
+            --cxx="$TOOLCHAIN/bin/aarch64-linux-android${API}-clang++" \
+            --ar="$TOOLCHAIN/bin/llvm-ar" \
+            --nm="$TOOLCHAIN/bin/llvm-nm" \
+            --ranlib="$TOOLCHAIN/bin/llvm-ranlib" \
+            --strip="$TOOLCHAIN/bin/llvm-strip" \
+            --enable-shared \
+            --disable-static \
+            --disable-programs \
+            --disable-doc \
+            --disable-avdevice \
+            --disable-swscale \
+            --disable-postproc \
+            --disable-avfilter \
+            --disable-network \
+            --disable-everything \
+            --enable-avutil \
+            --enable-swresample \
+            --enable-avcodec \
+            --enable-avformat \
+            --enable-protocol=file,pipe \
+            --enable-demuxer=dsf,iff,wav,flac,mp3,aac,ogg,mov \
+            --enable-decoder=dsd_lsbf,dsd_msbf,dsd_lsbf_planar,dsd_msbf_planar,dst,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,flac,mp3,aac \
+            --extra-cflags="-O3 -fPIC -march=armv8-a+simd"
+
+          make -j$(nproc)
+          make install
+
+          mkdir -p "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
+          mkdir -p "$GITHUB_WORKSPACE/app/src/main/cpp/include"
+
+          cp -r "$PREFIX/include/"* "$GITHUB_WORKSPACE/app/src/main/cpp/include/"
+          cp -L "$PREFIX/lib/libavutil.so" "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libavutil.so"
+          cp -L "$PREFIX/lib/libswresample.so" "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libswresample.so"
+          cp -L "$PREFIX/lib/libavcodec.so" "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libavcodec.so"
+          cp -L "$PREFIX/lib/libavformat.so" "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libavformat.so"
+
+          echo "Successfully compiled FFmpeg 6.0 arm64-v8a shared libraries:"
+          ls -lh "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/"
 
       - name: Setup Gradle 8.4
         uses: gradle/actions/setup-gradle@v3
@@ -77,10 +121,10 @@ jobs:
           tag_name: v${{ steps.extract_ver.outputs.version }}
           name: Walkman ${{ steps.extract_ver.outputs.version }}
           body: |
-            ### Walkman ${{ steps.extract_ver.outputs.version }} True FFmpeg C/C++ JNI Release
-            - Biên dịch và liên kết trực tiếp (Native CMake Link) với bộ thư viện C của **FFmpeg 6.0 (`libavformat.so`, `libavcodec.so`, `libswresample.so`, `libavutil.so` arm64-v8a)**.
-            - Giải mã phần cứng DSD64/128/256 & DST bằng `avcodec_receive_frame()` + `swr_convert()` sang 32-bit Float PCM.
-            - Tái cấu trúc toàn bộ DSP sang **64-bit Double Precision Biquad Cascade**: Cắt sub-sonic 20Hz & mud-cut 210Hz cho dải Bass gọn, chắc, dứt khoát; nâng dải Mid 1.65kHz ngọt và rõ nét; tách lớp không gian Mid/Side chính xác.
+            ### Walkman ${{ steps.extract_ver.outputs.version }} True FFmpeg 6.0 C/C++ NDK Build
+            - Biên dịch trực tiếp từ mã nguồn chính thức **FFmpeg 6.0 (`github.com/FFmpeg/FFmpeg`)** bằng Android NDK r26b Clang cho kiến trúc `arm64-v8a`.
+            - Liên kết C/C++ JNI trực tiếp với `libavformat.so`, `libavcodec.so`, `libswresample.so`, `libavutil.so` (Hỗ trợ giải mã phần cứng DSD64/128/256 & nén DST sang 32-bit Float).
+            - Hệ thống Mastering Biquad 64-bit: Bass gọn sâu, Mid ngọt rõ nét và tách lớp nhạc cụ chuẩn xác.
           files: app/build/outputs/apk/debug/*.apk
           draft: false
           prerelease: false

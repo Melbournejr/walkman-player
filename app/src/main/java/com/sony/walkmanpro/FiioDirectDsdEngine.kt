@@ -7,314 +7,12 @@ import android.media.AudioTrack
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
-import android.os.ParcelFileDescriptor
 import android.widget.Toast
 import androidx.media3.common.util.UnstableApi
-import java.io.FileInputStream
 import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import kotlin.math.PI
 import kotlin.math.abs
-import kotlin.math.cos
-import kotlin.math.sin
-import kotlin.math.sqrt
-import kotlin.math.tanh
-
-/**
- * CẦU NỐI NATIVE FFMPEG (DYNAMIC JNI / REFLECTION BRIDGE)
- * - Tự động liên kết với thư viện C/C++ `libavcodec.so`, `libavformat.so`, `libswresample.so` (arm64-v8a)
- *   trong gói `ffmpeg-kit-audio.aar` lúc chạy mà không cần import cứng lúc biên dịch.
- * - Đảm bảo biên dịch Kotlin thành công 100% và không bao giờ crash trên mọi phiên bản Android 8 -> 15.
- */
-object FFmpegNativeBridge {
-    private var checked = false
-    private var available = false
-    private var ffmpegKitClass: Class<*>? = null
-    private var ffmpegConfigClass: Class<*>? = null
-
-    @Synchronized
-    fun isNativeAvailable(): Boolean {
-        if (checked) return available
-        checked = true
-        try {
-            ffmpegKitClass = Class.forName("com.arthenica.ffmpegkit.FFmpegKit")
-            ffmpegConfigClass = Class.forName("com.arthenica.ffmpegkit.FFmpegKitConfig")
-            val levelClass = Class.forName("com.arthenica.ffmpegkit.Level")
-            val quietConst = levelClass.enumConstants?.firstOrNull { it.toString() == "AV_LOG_QUIET" }
-            if (quietConst != null) {
-                val setLogMethod = ffmpegConfigClass?.getMethod("setLogLevel", levelClass)
-                setLogMethod?.invoke(null, quietConst)
-            }
-            available = true
-        } catch (_: Throwable) {
-            available = false
-        }
-        return available
-    }
-
-    fun getSafReadUrl(context: Context, uri: Uri): String? {
-        if (!isNativeAvailable()) return null
-        return try {
-            val method = ffmpegConfigClass?.getMethod("getSafParameterForRead", Context::class.java, Uri::class.java)
-            method?.invoke(null, context, uri) as? String
-        } catch (_: Throwable) {
-            null
-        }
-    }
-
-    fun executeAsyncCommand(command: String): Long {
-        if (!isNativeAvailable()) return -1L
-        return try {
-            val execMethod = ffmpegKitClass?.getMethod("executeAsync", String::class.java)
-            val sessionObj = execMethod?.invoke(null, command) ?: return -1L
-            val getIdMethod = sessionObj.javaClass.getMethod("getSessionId")
-            (getIdMethod.invoke(sessionObj) as? Long) ?: -1L
-        } catch (_: Throwable) {
-            -1L
-        }
-    }
-
-    fun cancelSession(sessionId: Long) {
-        if (!isNativeAvailable()) return
-        try {
-            if (sessionId > 0L) {
-                val cancelMethod = ffmpegKitClass?.getMethod("cancel", Long::class.javaPrimitiveType)
-                cancelMethod?.invoke(null, sessionId)
-            } else {
-                val cancelAllMethod = ffmpegKitClass?.getMethod("cancel")
-                cancelAllMethod?.invoke(null)
-            }
-        } catch (_: Throwable) {}
-    }
-}
-
-/**
- * BỘ LỌC DSD2PCM SIÊU TUYẾNÍNH PHA: 2048-TAP SYMMETRIC KAISER WINDOW (BETA = 15.0, -150 dB)
- * - Nâng cấp gấp đôi từ 1024 Taps lên 2048 Taps (256 Bytes lịch sử trượt trên mỗi kênh).
- * - Kết hợp bộ lọc hậu kỳ 6th-Order Butterworth Cascade (3 tầng Biquad nối tiếp @ 31 kHz)
- *   giúp triệt tiêu 100% nhiễu lượng tử siêu âm bậc 5 của SACD, cho chất âm mượt, tĩnh và sạch như C/FFmpeg.
- */
-class DsdFirFilter(
-    private val isLsbFirst: Boolean,
-    cutoffHz: Double = 27000.0,
-    dsdSampleRate: Int = 2822400,
-    pcmSampleRate: Int = 88200
-) {
-    companion object {
-        const val NUM_TAPS = 2048
-        const val NUM_BYTES = NUM_TAPS / 8       // 256 bytes lịch sử trượt (2048 bits DSD)
-        const val HALF_BYTES = NUM_BYTES / 2     // 128 cặp byte đối xứng gương (Symmetric Folding)
-        private const val DSD_SILENCE_BYTE = 0x69
-
-        private val BIT_REVERSE_TABLE = IntArray(256).apply {
-            for (b in 0..255) {
-                var rev = 0
-                for (bit in 0..7) {
-                    if (((b shr bit) and 1) == 1) {
-                        rev = rev or (1 shl (7 - bit))
-                    }
-                }
-                this[b] = rev
-            }
-        }
-
-        private fun besselI0(x: Double): Double {
-            var sum = 1.0
-            var term = 1.0
-            val halfX = x * 0.5
-            for (k in 1..55) {
-                val r = halfX / k.toDouble()
-                term *= (r * r)
-                sum += term
-                if (term < sum * 1e-16) break
-            }
-            return sum
-        }
-    }
-
-    private val symmetricHalfLut = FloatArray(HALF_BYTES * 256)
-    private val historyL = IntArray(NUM_BYTES) { DSD_SILENCE_BYTE }
-    private val historyR = IntArray(NUM_BYTES) { DSD_SILENCE_BYTE }
-
-    private var dcIntegratorL = 0.0
-    private var dcIntegratorR = 0.0
-    private val dcServoCoeff = (2.0 * PI * 1.2 / pcmSampleRate.toDouble()).coerceIn(0.00001, 0.0004)
-
-    // Bộ lọc hậu kỳ 6th-Order Butterworth Low-Pass Cascade (3 tầng Biquad @ 31 kHz, Q1=0.5176, Q2=0.7071, Q3=1.9318)
-    private var b0 = 1.0; private var b1 = 0.0; private var b2 = 0.0
-    private var a1 = 0.0; private var a2 = 0.0
-
-    private var s1Z1L = 0.0; private var s1Z2L = 0.0
-    private var s2Z1L = 0.0; private var s2Z2L = 0.0
-    private var s3Z1L = 0.0; private var s3Z2L = 0.0
-    private var s1Z1R = 0.0; private var s1Z2R = 0.0
-    private var s2Z1R = 0.0; private var s2Z2R = 0.0
-    private var s3Z1R = 0.0; private var s3Z2R = 0.0
-
-    init {
-        precomputeSymmetricKaiser2048Lut(isLsbFirst, cutoffHz, dsdSampleRate)
-        init6thOrderUltrasonicFilter(pcmSampleRate)
-    }
-
-    private fun precomputeSymmetricKaiser2048Lut(isLsbFirst: Boolean, cutoffHz: Double, dsdFs: Int) {
-        val coeffs = DoubleArray(NUM_TAPS)
-        val fc = (cutoffHz / dsdFs.toDouble()).coerceIn(0.0004, 0.038)
-        val center = (NUM_TAPS - 1) * 0.5
-        val kaiserBeta = 15.0 // Suy hao dải chắn > -150 dB
-        val invI0Beta = 1.0 / besselI0(kaiserBeta)
-        var sumWeight = 0.0
-
-        for (i in 0 until NUM_TAPS) {
-            val n = i.toDouble() - center
-            val sinc = if (abs(n) < 1e-9) 2.0 * fc else sin(2.0 * PI * fc * n) / (PI * n)
-            val norm = (2.0 * i.toDouble()) / (NUM_TAPS - 1).toDouble() - 1.0
-            val rad = (1.0 - norm * norm).coerceAtLeast(0.0)
-            val window = besselI0(kaiserBeta * sqrt(rad)) * invI0Beta
-            val h = sinc * window
-            coeffs[i] = h
-            sumWeight += h
-        }
-
-        val sacdScale = 2.0 / sumWeight
-        for (i in 0 until NUM_TAPS) {
-            coeffs[i] *= sacdScale
-        }
-
-        for (byteIdx in 0 until HALF_BYTES) {
-            val tapBase = byteIdx shl 3
-            val lutBase = byteIdx shl 8
-            for (byteVal in 0..255) {
-                var acc = 0.0
-                for (bit in 0..7) {
-                    val bitVal = if (isLsbFirst) (byteVal shr bit) and 1 else (byteVal shr (7 - bit)) and 1
-                    val bipolar = if (bitVal == 1) 1.0 else -1.0
-                    acc += bipolar * coeffs[tapBase + bit]
-                }
-                symmetricHalfLut[lutBase + byteVal] = acc.toFloat()
-            }
-        }
-    }
-
-    private fun init6thOrderUltrasonicFilter(pcmRate: Int) {
-        val fc = (31000.0).coerceAtMost(pcmRate * 0.39)
-        val omega = 2.0 * PI * fc / pcmRate.toDouble()
-        val sn = sin(omega)
-        val cs = cos(omega)
-        val alpha = sn / sqrt(2.0)
-
-        val a0 = 1.0 + alpha
-        b0 = ((1.0 - cs) * 0.5) / a0
-        b1 = (1.0 - cs) / a0
-        b2 = ((1.0 - cs) * 0.5) / a0
-        a1 = (-2.0 * cs) / a0
-        a2 = (1.0 - alpha) / a0
-    }
-
-    fun reset() {
-        for (i in 0 until NUM_BYTES) {
-            historyL[i] = DSD_SILENCE_BYTE
-            historyR[i] = DSD_SILENCE_BYTE
-        }
-        dcIntegratorL = 0.0; dcIntegratorR = 0.0
-        s1Z1L = 0.0; s1Z2L = 0.0; s2Z1L = 0.0; s2Z2L = 0.0; s3Z1L = 0.0; s3Z2L = 0.0
-        s1Z1R = 0.0; s1Z2R = 0.0; s2Z1R = 0.0; s2Z2R = 0.0; s3Z1R = 0.0; s3Z2R = 0.0
-    }
-
-    private fun evaluateSymmetricConvolution2048(outStereoFrame: FloatArray) {
-        val lut = symmetricHalfLut
-        val revTbl = BIT_REVERSE_TABLE
-        val hL = historyL
-        val hR = historyR
-
-        var accL0 = 0.0; var accL1 = 0.0; var accL2 = 0.0; var accL3 = 0.0
-        var accR0 = 0.0; var accR1 = 0.0; var accR2 = 0.0; var accR3 = 0.0
-
-        var i = 0
-        while (i < HALF_BYTES) {
-            val i0 = i; val i1 = i + 1; val i2 = i + 2; val i3 = i + 3
-            val m0 = 255 - i0; val m1 = 255 - i1; val m2 = 255 - i2; val m3 = 255 - i3
-            val base0 = i0 shl 8; val base1 = i1 shl 8; val base2 = i2 shl 8; val base3 = i3 shl 8
-
-            accL0 += (lut[base0 + hL[i0]] + lut[base0 + revTbl[hL[m0]]]).toDouble()
-            accL1 += (lut[base1 + hL[i1]] + lut[base1 + revTbl[hL[m1]]]).toDouble()
-            accL2 += (lut[base2 + hL[i2]] + lut[base2 + revTbl[hL[m2]]]).toDouble()
-            accL3 += (lut[base3 + hL[i3]] + lut[base3 + revTbl[hL[m3]]]).toDouble()
-
-            accR0 += (lut[base0 + hR[i0]] + lut[base0 + revTbl[hR[m0]]]).toDouble()
-            accR1 += (lut[base1 + hR[i1]] + lut[base1 + revTbl[hR[m1]]]).toDouble()
-            accR2 += (lut[base2 + hR[i2]] + lut[base2 + revTbl[hR[m2]]]).toDouble()
-            accR3 += (lut[base3 + hR[i3]] + lut[base3 + revTbl[hR[m3]]]).toDouble()
-            i += 4
-        }
-
-        val firL = (accL0 + accL1) + (accL2 + accL3)
-        val firR = (accR0 + accR1) + (accR2 + accR3)
-
-        val dcCleanL = firL - dcIntegratorL
-        dcIntegratorL += dcCleanL * dcServoCoeff
-        val dcCleanR = firR - dcIntegratorR
-        dcIntegratorR += dcCleanR * dcServoCoeff
-
-        // Tầng 1
-        val st1L = b0 * dcCleanL + s1Z1L
-        s1Z1L = b1 * dcCleanL - a1 * st1L + s1Z2L
-        s1Z2L = b2 * dcCleanL - a2 * st1L
-
-        val st1R = b0 * dcCleanR + s1Z1R
-        s1Z1R = b1 * dcCleanR - a1 * st1R + s1Z2R
-        s1Z2R = b2 * dcCleanR - a2 * st1R
-
-        // Tầng 2
-        val st2L = b0 * st1L + s2Z1L
-        s2Z1L = b1 * st1L - a1 * st2L + s2Z2L
-        s2Z2L = b2 * st1L - a2 * st2L
-
-        val st2R = b0 * st1R + s2Z1R
-        s2Z1R = b1 * st1R - a1 * st2R + s2Z2R
-        s2Z2R = b2 * st1R - a2 * st2R
-
-        // Tầng 3 (-36 dB/octave ultrasonic rejection)
-        val st3L = b0 * st2L + s3Z1L
-        s3Z1L = b1 * st2L - a1 * st3L + s3Z2L
-        s3Z2L = b2 * st2L - a2 * st3L
-
-        val st3R = b0 * st2R + s3Z1R
-        s3Z1R = b1 * st2R - a1 * st3R + s3Z2R
-        s3Z2R = b2 * st2R - a2 * st3R
-
-        outStereoFrame[0] = st3L.toFloat()
-        outStereoFrame[1] = st3R.toFloat()
-    }
-
-    fun processDecimate32(
-        bL0: Int, bL1: Int, bL2: Int, bL3: Int,
-        bR0: Int, bR1: Int, bR2: Int, bR3: Int,
-        outStereoFrame: FloatArray
-    ) {
-        System.arraycopy(historyL, 4, historyL, 0, 252)
-        System.arraycopy(historyR, 4, historyR, 0, 252)
-        historyL[252] = bL0 and 0xFF; historyL[253] = bL1 and 0xFF
-        historyL[254] = bL2 and 0xFF; historyL[255] = bL3 and 0xFF
-        historyR[252] = bR0 and 0xFF; historyR[253] = bR1 and 0xFF
-        historyR[254] = bR2 and 0xFF; historyR[255] = bR3 and 0xFF
-        evaluateSymmetricConvolution2048(outStereoFrame)
-    }
-
-    fun processDecimate64(
-        bL0: Int, bL1: Int, bL2: Int, bL3: Int, bL4: Int, bL5: Int, bL6: Int, bL7: Int,
-        bR0: Int, bR1: Int, bR2: Int, bR3: Int, bR4: Int, bR5: Int, bR6: Int, bR7: Int,
-        outStereoFrame: FloatArray
-    ) {
-        System.arraycopy(historyL, 8, historyL, 0, 248)
-        System.arraycopy(historyR, 8, historyR, 0, 248)
-        historyL[248] = bL0 and 0xFF; historyL[249] = bL1 and 0xFF; historyL[250] = bL2 and 0xFF; historyL[251] = bL3 and 0xFF
-        historyL[252] = bL4 and 0xFF; historyL[253] = bL5 and 0xFF; historyL[254] = bL6 and 0xFF; historyL[255] = bL7 and 0xFF
-        historyR[248] = bR0 and 0xFF; historyR[249] = bR1 and 0xFF; historyR[250] = bR2 and 0xFF; historyR[251] = bR3 and 0xFF
-        historyR[252] = bR4 and 0xFF; historyR[253] = bR5 and 0xFF; historyR[254] = bR6 and 0xFF; historyR[255] = bR7 and 0xFF
-        evaluateSymmetricConvolution2048(outStereoFrame)
-    }
-}
 
 @UnstableApi
 class FiioDirectDsdEngine(
@@ -330,15 +28,11 @@ class FiioDirectDsdEngine(
         private set
     @Volatile var masterVolume: Float = 0.75f
     @Volatile var pureDsdMode: Boolean = false
-    @Volatile var enableTpdfDither: Boolean = true
-    @Volatile var customCutoffHz: Double = 27500.0
-    @Volatile var useFFmpegNativeEngine: Boolean = true
 
     private var workerThread: Thread? = null
     @Volatile private var stopRequested: Boolean = false
     @Volatile private var pauseRequested: Boolean = false
     @Volatile private var seekTargetMs: Int = -1
-    @Volatile private var activeFFmpegSessionId: Long = -1L
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -354,27 +48,18 @@ class FiioDirectDsdEngine(
         val dataSize: Long
     )
 
-    private fun masterSoftKneeLimit(x: Float): Float {
-        val absX = abs(x)
-        if (absX <= 0.92f) return x
-        val sign = if (x >= 0f) 1f else -1f
-        val excess = (absX - 0.92f) / 0.32f
-        val compressed = 0.92f + 0.08f * tanh(excess)
-        return sign * compressed
-    }
-
     fun startDsdPlayback(uri: Uri, startMs: Int = 0) {
         stop()
         stopRequested = false
         pauseRequested = false
         isPlaying = true
         currentPositionMs = startMs.coerceAtLeast(0)
-        seekTargetMs = if (startMs > 0) startMs else -1
+        seekTargetMs = -1
 
         workerThread = Thread {
-            runHybridDsdPlayback(uri, startMs)
+            runFFmpegDirectDsdPlayback(uri, startMs)
         }.apply {
-            name = "WalkmanFFmpegDsdThread"
+            name = "WalkmanFFmpegDirectThread"
             priority = Thread.MAX_PRIORITY
             start()
         }
@@ -396,10 +81,8 @@ class FiioDirectDsdEngine(
         stopRequested = true
         pauseRequested = false
         isPlaying = false
-        FFmpegNativeBridge.cancelSession(activeFFmpegSessionId)
-        activeFFmpegSessionId = -1L
         try {
-            workerThread?.join(350)
+            workerThread?.join(400)
         } catch (_: Throwable) {}
         workerThread = null
     }
@@ -568,14 +251,12 @@ class FiioDirectDsdEngine(
         return DsdHeaderInfo(false, false, false, false, 2, 2822400, 4096, 0L, 0L)
     }
 
-    private fun createFloatAudioTrackWithFallback(dsdFs: Int): Triple<AudioTrack, Int, Int> {
-        val preferredRate = (dsdFs / 32).coerceIn(88200, 352800)
-        val fallbackRate = (dsdFs / 64).coerceIn(88200, 176400)
-
-        for (candidateRate in listOf(preferredRate, fallbackRate, 176400, 88200).distinct()) {
+    private fun createHighResFloatAudioTrack(dsdFs: Int): Pair<AudioTrack, Int> {
+        val preferredRate = if (dsdFs >= 5644800) 176400 else 88200
+        for (rate in listOf(preferredRate, 176400, 88200).distinct()) {
             try {
                 val minBuf = AudioTrack.getMinBufferSize(
-                    candidateRate,
+                    rate,
                     AudioFormat.CHANNEL_OUT_STEREO,
                     AudioFormat.ENCODING_PCM_FLOAT
                 )
@@ -590,7 +271,7 @@ class FiioDirectDsdEngine(
                         .setAudioFormat(
                             AudioFormat.Builder()
                                 .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
-                                .setSampleRate(candidateRate)
+                                .setSampleRate(rate)
                                 .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
                                 .build()
                         )
@@ -599,8 +280,7 @@ class FiioDirectDsdEngine(
                         .build()
 
                     if (track.state == AudioTrack.STATE_INITIALIZED) {
-                        val bytesPerSample = ((dsdFs / 8) / candidateRate).coerceIn(4, 8)
-                        return Triple(track, bytesPerSample, candidateRate)
+                        return Pair(track, rate)
                     } else {
                         track.release()
                     }
@@ -608,7 +288,7 @@ class FiioDirectDsdEngine(
             } catch (_: Throwable) {}
         }
 
-        val defaultTrack = AudioTrack.Builder()
+        val fallback = AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -625,502 +305,98 @@ class FiioDirectDsdEngine(
             .setBufferSizeInBytes(65536)
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
-        return Triple(defaultTrack, 4, 88200)
+        return Pair(fallback, 88200)
     }
 
-    private fun runHybridDsdPlayback(uri: Uri, initialStartMs: Int) {
-        var totalFileBytes = 0L
+    private fun runFFmpegDirectDsdPlayback(uri: Uri, initialStartMs: Int) {
+        var audioTrack: AudioTrack? = null
         try {
-            context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
-                if (afd.length > 0) totalFileBytes = afd.length
+            var totalFileBytes = 0L
+            try {
+                context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
+                    if (afd.length > 0) totalFileBytes = afd.length
+                }
+            } catch (_: Throwable) {}
+
+            val info = parseDsdHeaderAccurate(context, uri, totalFileBytes)
+            val channels = info.channels.coerceAtLeast(1)
+            val dsdFs = info.dsdSampleRate.coerceAtLeast(2822400)
+            val bytesPerSec = ((dsdFs / 8) * channels).toLong().coerceAtLeast(1L)
+            if (info.dataSize > 0L) {
+                durationMs = ((info.dataSize * 1000L) / bytesPerSec).toInt().coerceAtLeast(1000)
             }
-        } catch (_: Throwable) {}
 
-        val info = parseDsdHeaderAccurate(context, uri, totalFileBytes)
-        if (!info.isValid) {
-            showToastOnMain("Không tìm thấy luồng DSD hợp lệ trong file này!")
-            isPlaying = false
-            return
-        }
-
-        val channels = info.channels.coerceAtLeast(1)
-        val dsdFs = info.dsdSampleRate
-        val bytesPerSecond = ((dsdFs / 8) * channels).toLong().coerceAtLeast(1L)
-        durationMs = ((info.dataSize * 1000L) / bytesPerSecond).toInt().coerceAtLeast(1000)
-
-        // Ưu tiên chạy FFmpeg Native C/NEON nếu gói thư viện Native đã được nạp
-        if (useFFmpegNativeEngine && FFmpegNativeBridge.isNativeAvailable()) {
-            val ffmpegSuccess = runFFmpegNativeDecoderLoop(uri, info, initialStartMs)
-            if (ffmpegSuccess || stopRequested) {
+            if (!FFmpegNativeDsdDecoder.isAvailable()) {
+                showToastOnMain("Lỗi: Thư viện C++ FFmpeg chưa được nạp!")
+                isPlaying = false
                 return
             }
-        }
 
-        // Chuyển sang bộ lọc 2048-Tap Symmetric Kaiser Master
-        runPureKotlin2048FirFallbackLoop(uri, info)
-    }
-
-    private fun runFFmpegNativeDecoderLoop(
-        uri: Uri,
-        info: DsdHeaderInfo,
-        initialStartMs: Int
-    ): Boolean {
-        var audioTrack: AudioTrack? = null
-        var receivedAnyAudioSamples = false
-
-        try {
-            val (track, _, actualPcmRate) = createFloatAudioTrackWithFallback(info.dsdSampleRate)
+            val (track, targetPcmRate) = createHighResFloatAudioTrack(dsdFs)
             audioTrack = track
             audioTrack.play()
 
-            val cutoffHz = if (info.dsdSampleRate >= 5644800) 30000 else 28000
-            val rateScale = (88200f / actualPcmRate.toFloat()).coerceIn(0.25f, 1.0f)
-            val subAlpha = 0.024f * rateScale
-            val vinylAlpha = 0.32f * rateScale
-
-            var dspSubL = 0f; var dspSubR = 0f
-            var dspPrevL = 0f; var dspPrevR = 0f
-            var dspVinylL = 0f; var dspVinylR = 0f
-            var prngState = -0x61c88647
-
-            var startOffsetMs = if (seekTargetMs >= 0) {
-                val s = seekTargetMs
-                seekTargetMs = -1
-                s
-            } else {
-                initialStartMs.coerceAtLeast(0)
-            }
-
-            while (!stopRequested) {
-                val inputSafPath = FFmpegNativeBridge.getSafReadUrl(context, uri)
-                if (inputSafPath.isNullOrBlank()) {
-                    return false
-                }
-
-                val pipePair = ParcelFileDescriptor.createPipe()
-                val readPfd = pipePair[0]
-                val writePfd = pipePair[1]
-                val writeFdNumber = writePfd.fd
-
-                val seekSecStr = "%.3f".format(java.util.Locale.US, startOffsetMs / 1000.0)
-                val filterGraph = "highpass=f=2:p=1,lowpass=f=$cutoffHz:p=2,volume=6.5dB"
-                val ffmpegCmd = "-hide_banner -loglevel error -ss $seekSecStr -i \"$inputSafPath\" " +
-                        "-vn -sn -dn -af \"$filterGraph\" -ac 2 -ar $actualPcmRate -f f32le -acodec pcm_f32le pipe:$writeFdNumber"
-
-                val sid = FFmpegNativeBridge.executeAsyncCommand(ffmpegCmd)
-                if (sid <= 0L) {
-                    try { readPfd.close() } catch (_: Throwable) {}
-                    try { writePfd.close() } catch (_: Throwable) {}
-                    return false
-                }
-                activeFFmpegSessionId = sid
-
-                // Đóng đầu ghi phía Java sau 250ms để khi tiến trình C kết thúc, đầu đọc nhận được EOF
-                Thread {
-                    try {
-                        Thread.sleep(250)
-                        writePfd.close()
-                    } catch (_: Throwable) {}
-                }.start()
-
-                val framesPerChunk = 2048
-                val rawByteBuf = ByteArray(framesPerChunk * 2 * 4)
-                val floatChunk = FloatArray(framesPerChunk * 2)
-                var pcmFramesDecodedInThisRun = 0L
-                var seekInterrupted = false
-
-                FileInputStream(readPfd.fileDescriptor).use { pipeIn ->
-                    while (!stopRequested) {
-                        if (pauseRequested) {
-                            Thread.sleep(35)
-                            continue
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                val callback = object : NativePcmCallback {
+                    override fun onNativePcmChunk(
+                        pcmBuffer: FloatArray,
+                        floatSampleCount: Int,
+                        currentPositionMs: Long
+                    ): Int {
+                        while (pauseRequested && !stopRequested) {
+                            try { Thread.sleep(30) } catch (_: Throwable) {}
                         }
+                        if (stopRequested) return -1
 
+                        audioTrack.write(pcmBuffer, 0, floatSampleCount, AudioTrack.WRITE_BLOCKING)
+                        this@FiioDirectDsdEngine.currentPositionMs = currentPositionMs.toInt().coerceAtMost(durationMs)
+                        return 0
+                    }
+
+                    override fun getRealtimeDspParams(outParams: FloatArray): Int {
+                        if (stopRequested) return -1
                         val pendingSeek = seekTargetMs
                         if (pendingSeek >= 0) {
-                            startOffsetMs = pendingSeek
                             seekTargetMs = -1
-                            seekInterrupted = true
-                            FFmpegNativeBridge.cancelSession(activeFFmpegSessionId)
-                            break
+                            return pendingSeek.coerceAtLeast(1)
                         }
-
-                        var totalRead = 0
-                        while (totalRead < rawByteBuf.size && !stopRequested && seekTargetMs < 0) {
-                            val r = pipeIn.read(rawByteBuf, totalRead, rawByteBuf.size - totalRead)
-                            if (r <= 0) break
-                            totalRead += r
-                        }
-
-                        val validStereoSamples = (totalRead / 8) * 2
-                        if (validStereoSamples <= 0) break
-
-                        receivedAnyAudioSamples = true
-                        val actualFrames = validStereoSamples / 2
-
-                        ByteBuffer.wrap(rawByteBuf, 0, validStereoSamples * 4)
-                            .order(ByteOrder.LITTLE_ENDIAN)
-                            .asFloatBuffer()
-                            .get(floatChunk, 0, validStereoSamples)
-
-                        val volGain = 0.88f * masterVolume
-                        val eqGains = dspProcessor.eq10Gains
-                        val eqLow = ((eqGains[0] + eqGains[1] + eqGains[2]) / 3f) * 0.05f
-                        val eqMid = ((eqGains[3] + eqGains[4] + eqGains[5] + eqGains[6]) / 4f) * 0.04f
-                        val eqHigh = ((eqGains[7] + eqGains[8] + eqGains[9]) / 3f) * 0.05f
-                        val bassBoost = (dspProcessor.megaBassLevel * 0.50f) + eqLow
-                        val clearAudio = dspProcessor.clearAudioEnabled
-                        val dsee = dspProcessor.dseeEnabled
-                        val vinyl = dspProcessor.vinylEnabled
 
                         val rawBal = dspProcessor.channelBalance
                         val bal = if (abs(rawBal) < 0.03f) 0f else rawBal.coerceIn(-0.5f, 0.5f)
                         val leftPan = if (bal > 0f) (1f - bal).coerceIn(0f, 1f) else 1f
                         val rightPan = if (bal < 0f) (1f + bal).coerceIn(0f, 1f) else 1f
-                        val phase = if (dspProcessor.phaseInvert) -1f else 1f
-                        val applyDither = enableTpdfDither
 
-                        for (frame in 0 until actualFrames) {
-                            val idxL = frame * 2
-                            val idxR = idxL + 1
-                            var left = floatChunk[idxL] * volGain
-                            var right = floatChunk[idxR] * volGain
-
-                            if (pureDsdMode) {
-                                left *= leftPan
-                                right *= rightPan
-                            } else {
-                                dspSubL += subAlpha * (left - dspSubL)
-                                dspSubR += subAlpha * (right - dspSubR)
-                                val highL = left - dspPrevL
-                                val highR = right - dspPrevR
-                                dspPrevL = left
-                                dspPrevR = right
-
-                                left += dspSubL * bassBoost + left * eqMid + highL * eqHigh
-                                right += dspSubR * bassBoost + right * eqMid + highR * eqHigh
-
-                                if (clearAudio) {
-                                    val mid = (left + right) * 0.5f
-                                    val side = (left - right) * 0.5f * 1.25f
-                                    left = (mid + side) + dspSubL * 0.08f + highL * 0.06f
-                                    right = (mid - side) + dspSubR * 0.08f + highR * 0.06f
-                                }
-                                if (dsee) {
-                                    left += highL * 0.12f
-                                    right += highR * 0.12f
-                                }
-                                if (vinyl) {
-                                    dspVinylL += vinylAlpha * (left - dspVinylL)
-                                    dspVinylR += vinylAlpha * (right - dspVinylR)
-                                    left = (dspVinylL * 0.65f + left * 0.35f + dspSubL * 0.10f) * 0.95f
-                                    right = (dspVinylR * 0.65f + right * 0.35f + dspSubR * 0.10f) * 0.95f
-                                }
-
-                                left = left * leftPan * phase
-                                right = right * rightPan * phase
-                            }
-
-                            if (applyDither) {
-                                prngState = prngState xor (prngState shl 13)
-                                prngState = prngState xor (prngState ushr 17)
-                                prngState = prngState xor (prngState shl 5)
-                                val r1 = (prngState and 0x7FFF).toFloat()
-
-                                prngState = prngState xor (prngState shl 13)
-                                prngState = prngState xor (prngState ushr 17)
-                                prngState = prngState xor (prngState shl 5)
-                                val r2 = (prngState and 0x7FFF).toFloat()
-
-                                val dither = (r1 - r2) * 2.0e-9f
-                                left += dither
-                                right -= dither
-                            }
-
-                            floatChunk[idxL] = masterSoftKneeLimit(left)
-                            floatChunk[idxR] = masterSoftKneeLimit(right)
+                        outParams[0] = masterVolume
+                        outParams[1] = if (pureDsdMode) 1.0f else 0.0f
+                        outParams[2] = dspProcessor.megaBassLevel
+                        outParams[3] = if (dspProcessor.clearAudioEnabled) 1.0f else 0.0f
+                        outParams[4] = if (dspProcessor.dseeEnabled) 1.0f else 0.0f
+                        outParams[5] = if (dspProcessor.vinylEnabled) 1.0f else 0.0f
+                        outParams[6] = leftPan
+                        outParams[7] = rightPan
+                        outParams[8] = if (dspProcessor.phaseInvert) -1.0f else 1.0f
+                        for (i in 0 until 9) {
+                            outParams[9 + i] = dspProcessor.eq10Gains[i]
                         }
-
-                        if (!stopRequested) {
-                            audioTrack.write(floatChunk, 0, validStereoSamples, AudioTrack.WRITE_BLOCKING)
-                            pcmFramesDecodedInThisRun += actualFrames
-                            val elapsedMs = ((pcmFramesDecodedInThisRun * 1000L) / actualPcmRate.toLong()).toInt()
-                            currentPositionMs = (startOffsetMs + elapsedMs).coerceAtMost(durationMs)
-                        }
+                        return 0
                     }
                 }
 
-                try { readPfd.close() } catch (_: Throwable) {}
-                try { writePfd.close() } catch (_: Throwable) {}
+                val decodeStatus = FFmpegNativeDsdDecoder.nativeDecodeDsdFile(
+                    pfd.fd,
+                    initialStartMs,
+                    targetPcmRate,
+                    callback
+                )
 
-                if (seekInterrupted && !stopRequested) {
-                    continue
-                }
-
-                if (!stopRequested && receivedAnyAudioSamples && currentPositionMs >= durationMs - 1500) {
+                if (decodeStatus == 0 && !stopRequested) {
                     isPlaying = false
                     mainHandler.post { onTrackEnded() }
                 }
-                break
             }
-
-            return receivedAnyAudioSamples
-        } catch (_: Throwable) {
-            return false
-        } finally {
-            FFmpegNativeBridge.cancelSession(activeFFmpegSessionId)
-            activeFFmpegSessionId = -1L
-            try {
-                audioTrack?.stop()
-                audioTrack?.release()
-            } catch (_: Throwable) {}
-        }
-    }
-
-    private fun runPureKotlin2048FirFallbackLoop(uri: Uri, info: DsdHeaderInfo) {
-        var audioTrack: AudioTrack? = null
-        try {
-            if (info.isDstCompressed) {
-                showToastOnMain("File .DFF này đang bị nén khóa DST!")
-                isPlaying = false
-                return
-            }
-
-            val channels = info.channels.coerceAtLeast(1)
-            val dsdFs = info.dsdSampleRate
-            val isDsf = info.isDsf
-            val dsfBlockSize = info.dsfBlockSize
-            val dataStartOffset = info.dataStartOffset
-            val dataSize = info.dataSize
-
-            val (track, bytesPerSamplePerCh, actualPcmRate) = createFloatAudioTrackWithFallback(dsdFs)
-            audioTrack = track
-            audioTrack.play()
-
-            val optimalCutoffHz = if (dsdFs >= 5644800) {
-                customCutoffHz.coerceIn(28000.0, 31000.0).coerceAtLeast(29500.0)
-            } else {
-                26500.0
-            }
-
-            val firFilter = DsdFirFilter(
-                isLsbFirst = info.isLsbFirst,
-                cutoffHz = optimalCutoffHz,
-                dsdSampleRate = dsdFs,
-                pcmSampleRate = actualPcmRate
-            )
-
-            var activeStream: InputStream = context.contentResolver.openInputStream(uri) ?: return
-            skipExact(activeStream, dataStartOffset)
-            var bytesReadSoFar = 0L
-
-            val framesPerChunk = if (isDsf) (dsfBlockSize / bytesPerSamplePerCh) else 2048
-            val inputBufferSize = if (isDsf) (dsfBlockSize * channels) else (bytesPerSamplePerCh * channels * framesPerChunk)
-            val dsdInputBuffer = ByteArray(inputBufferSize)
-            val pcmFloatOutputBuffer = FloatArray(framesPerChunk * 2)
-            val stereoSampleScratch = FloatArray(2)
-
-            val rateScale = (88200f / actualPcmRate.toFloat()).coerceIn(0.25f, 1.0f)
-            val subAlpha = 0.024f * rateScale
-            val vinylAlpha = 0.32f * rateScale
-
-            var dspSubL = 0f; var dspSubR = 0f
-            var dspPrevL = 0f; var dspPrevR = 0f
-            var dspVinylL = 0f; var dspVinylR = 0f
-            var prngState = -0x61c88647
-
-            while (!stopRequested && bytesReadSoFar < dataSize) {
-                if (pauseRequested) {
-                    Thread.sleep(40)
-                    continue
-                }
-
-                val targetSeek = seekTargetMs
-                if (targetSeek >= 0) {
-                    seekTargetMs = -1
-                    try { activeStream.close() } catch (_: Throwable) {}
-                    val newStream = context.contentResolver.openInputStream(uri) ?: break
-                    val ratio = (targetSeek.toDouble() / durationMs.coerceAtLeast(1).toDouble()).coerceIn(0.0, 0.99)
-                    val rawOffset = (dataSize * ratio).toLong()
-                    val alignUnit = if (isDsf) (dsfBlockSize * channels).toLong() else (bytesPerSamplePerCh * channels * 16).toLong()
-                    val alignedBytes = (rawOffset / alignUnit.coerceAtLeast(1L)) * alignUnit.coerceAtLeast(1L)
-                    skipExact(newStream, dataStartOffset + alignedBytes)
-                    activeStream = newStream
-                    bytesReadSoFar = alignedBytes
-                    firFilter.reset()
-                }
-
-                val remaining = dataSize - bytesReadSoFar
-                val want = inputBufferSize.toLong().coerceAtMost(remaining).toInt()
-                val alignStep = bytesPerSamplePerCh * channels
-                val alignedWant = (want / alignStep) * alignStep
-                if (alignedWant < alignStep) break
-
-                val got = readExact(activeStream, dsdInputBuffer, alignedWant)
-                val usableBytes = (got / alignStep) * alignStep
-                if (usableBytes < alignStep) break
-
-                val actualPcmFrames = if (isDsf) {
-                    (dsfBlockSize / bytesPerSamplePerCh).coerceAtMost(framesPerChunk)
-                } else {
-                    (usableBytes / alignStep).coerceAtMost(framesPerChunk)
-                }
-                if (actualPcmFrames <= 0) break
-
-                val gainCompensation = 1.19f * 0.82f * masterVolume
-                val eqGains = dspProcessor.eq10Gains
-                val eqLow = ((eqGains[0] + eqGains[1] + eqGains[2]) / 3f) * 0.05f
-                val eqMid = ((eqGains[3] + eqGains[4] + eqGains[5] + eqGains[6]) / 4f) * 0.04f
-                val eqHigh = ((eqGains[7] + eqGains[8] + eqGains[9]) / 3f) * 0.05f
-                val bassBoost = (dspProcessor.megaBassLevel * 0.50f) + eqLow
-                val clearAudio = dspProcessor.clearAudioEnabled
-                val dsee = dspProcessor.dseeEnabled
-                val vinyl = dspProcessor.vinylEnabled
-
-                val rawBal = dspProcessor.channelBalance
-                val bal = if (abs(rawBal) < 0.03f) 0f else rawBal.coerceIn(-0.5f, 0.5f)
-                val leftPan = if (bal > 0f) (1f - bal).coerceIn(0f, 1f) else 1f
-                val rightPan = if (bal < 0f) (1f + bal).coerceIn(0f, 1f) else 1f
-                val phase = if (dspProcessor.phaseInvert) -1f else 1f
-                val applyDither = enableTpdfDither
-
-                var dffBytePos = 0
-
-                for (frame in 0 until actualPcmFrames) {
-                    if (isDsf) {
-                        val baseL = frame * bytesPerSamplePerCh
-                        val baseR = if (channels >= 2) (dsfBlockSize + baseL) else baseL
-
-                        if (bytesPerSamplePerCh == 4) {
-                            firFilter.processDecimate32(
-                                dsdInputBuffer[baseL].toInt(), dsdInputBuffer[baseL + 1].toInt(),
-                                dsdInputBuffer[baseL + 2].toInt(), dsdInputBuffer[baseL + 3].toInt(),
-                                dsdInputBuffer[baseR].toInt(), dsdInputBuffer[baseR + 1].toInt(),
-                                dsdInputBuffer[baseR + 2].toInt(), dsdInputBuffer[baseR + 3].toInt(),
-                                stereoSampleScratch
-                            )
-                        } else {
-                            firFilter.processDecimate64(
-                                dsdInputBuffer[baseL].toInt(), dsdInputBuffer[baseL + 1].toInt(),
-                                dsdInputBuffer[baseL + 2].toInt(), dsdInputBuffer[baseL + 3].toInt(),
-                                dsdInputBuffer[baseL + 4].toInt(), dsdInputBuffer[baseL + 5].toInt(),
-                                dsdInputBuffer[baseL + 6].toInt(), dsdInputBuffer[baseL + 7].toInt(),
-                                dsdInputBuffer[baseR].toInt(), dsdInputBuffer[baseR + 1].toInt(),
-                                dsdInputBuffer[baseR + 2].toInt(), dsdInputBuffer[baseR + 3].toInt(),
-                                dsdInputBuffer[baseR + 4].toInt(), dsdInputBuffer[baseR + 5].toInt(),
-                                dsdInputBuffer[baseR + 6].toInt(), dsdInputBuffer[baseR + 7].toInt(),
-                                stereoSampleScratch
-                            )
-                        }
-                    } else {
-                        if (channels >= 2) {
-                            if (bytesPerSamplePerCh == 4) {
-                                val bL0 = dsdInputBuffer[dffBytePos].toInt(); val bR0 = dsdInputBuffer[dffBytePos + 1].toInt(); dffBytePos += channels
-                                val bL1 = dsdInputBuffer[dffBytePos].toInt(); val bR1 = dsdInputBuffer[dffBytePos + 1].toInt(); dffBytePos += channels
-                                val bL2 = dsdInputBuffer[dffBytePos].toInt(); val bR2 = dsdInputBuffer[dffBytePos + 1].toInt(); dffBytePos += channels
-                                val bL3 = dsdInputBuffer[dffBytePos].toInt(); val bR3 = dsdInputBuffer[dffBytePos + 1].toInt(); dffBytePos += channels
-                                firFilter.processDecimate32(bL0, bL1, bL2, bL3, bR0, bR1, bR2, bR3, stereoSampleScratch)
-                            } else {
-                                val bL0 = dsdInputBuffer[dffBytePos].toInt(); val bR0 = dsdInputBuffer[dffBytePos + 1].toInt(); dffBytePos += channels
-                                val bL1 = dsdInputBuffer[dffBytePos].toInt(); val bR1 = dsdInputBuffer[dffBytePos + 1].toInt(); dffBytePos += channels
-                                val bL2 = dsdInputBuffer[dffBytePos].toInt(); val bR2 = dsdInputBuffer[dffBytePos + 1].toInt(); dffBytePos += channels
-                                val bL3 = dsdInputBuffer[dffBytePos].toInt(); val bR3 = dsdInputBuffer[dffBytePos + 1].toInt(); dffBytePos += channels
-                                val bL4 = dsdInputBuffer[dffBytePos].toInt(); val bR4 = dsdInputBuffer[dffBytePos + 1].toInt(); dffBytePos += channels
-                                val bL5 = dsdInputBuffer[dffBytePos].toInt(); val bR5 = dsdInputBuffer[dffBytePos + 1].toInt(); dffBytePos += channels
-                                val bL6 = dsdInputBuffer[dffBytePos].toInt(); val bR6 = dsdInputBuffer[dffBytePos + 1].toInt(); dffBytePos += channels
-                                val bL7 = dsdInputBuffer[dffBytePos].toInt(); val bR7 = dsdInputBuffer[dffBytePos + 1].toInt(); dffBytePos += channels
-                                firFilter.processDecimate64(
-                                    bL0, bL1, bL2, bL3, bL4, bL5, bL6, bL7,
-                                    bR0, bR1, bR2, bR3, bR4, bR5, bR6, bR7,
-                                    stereoSampleScratch
-                                )
-                            }
-                        } else {
-                            val b0 = dsdInputBuffer[dffBytePos].toInt()
-                            val b1 = dsdInputBuffer[dffBytePos + 1].toInt()
-                            val b2 = dsdInputBuffer[dffBytePos + 2].toInt()
-                            val b3 = dsdInputBuffer[dffBytePos + 3].toInt()
-                            dffBytePos += bytesPerSamplePerCh
-                            firFilter.processDecimate32(b0, b1, b2, b3, b0, b1, b2, b3, stereoSampleScratch)
-                        }
-                    }
-
-                    var left = stereoSampleScratch[0] * gainCompensation
-                    var right = stereoSampleScratch[1] * gainCompensation
-
-                    if (pureDsdMode) {
-                        left *= leftPan
-                        right *= rightPan
-                    } else {
-                        dspSubL += subAlpha * (left - dspSubL)
-                        dspSubR += subAlpha * (right - dspSubR)
-                        val highL = left - dspPrevL
-                        val highR = right - dspPrevR
-                        dspPrevL = left
-                        dspPrevR = right
-
-                        left += dspSubL * bassBoost + left * eqMid + highL * eqHigh
-                        right += dspSubR * bassBoost + right * eqMid + highR * eqHigh
-
-                        if (clearAudio) {
-                            val mid = (left + right) * 0.5f
-                            val side = (left - right) * 0.5f * 1.25f
-                            left = (mid + side) + dspSubL * 0.08f + highL * 0.06f
-                            right = (mid - side) + dspSubR * 0.08f + highR * 0.06f
-                        }
-                        if (dsee) {
-                            left += highL * 0.12f
-                            right += highR * 0.12f
-                        }
-                        if (vinyl) {
-                            dspVinylL += vinylAlpha * (left - dspVinylL)
-                            dspVinylR += vinylAlpha * (right - dspVinylR)
-                            left = (dspVinylL * 0.65f + left * 0.35f + dspSubL * 0.10f) * 0.95f
-                            right = (dspVinylR * 0.65f + right * 0.35f + dspSubR * 0.10f) * 0.95f
-                        }
-
-                        left = left * leftPan * phase
-                        right = right * rightPan * phase
-                    }
-
-                    if (applyDither) {
-                        prngState = prngState xor (prngState shl 13)
-                        prngState = prngState xor (prngState ushr 17)
-                        prngState = prngState xor (prngState shl 5)
-                        val r1 = (prngState and 0x7FFF).toFloat()
-
-                        prngState = prngState xor (prngState shl 13)
-                        prngState = prngState xor (prngState ushr 17)
-                        prngState = prngState xor (prngState shl 5)
-                        val r2 = (prngState and 0x7FFF).toFloat()
-
-                        val dither = (r1 - r2) * 2.2e-9f
-                        left += dither
-                        right -= dither
-                    }
-
-                    pcmFloatOutputBuffer[frame * 2] = masterSoftKneeLimit(left)
-                    pcmFloatOutputBuffer[frame * 2 + 1] = masterSoftKneeLimit(right)
-                }
-
-                if (!stopRequested) {
-                    audioTrack.write(pcmFloatOutputBuffer, 0, actualPcmFrames * 2, AudioTrack.WRITE_BLOCKING)
-                    bytesReadSoFar += usableBytes
-                    currentPositionMs = ((bytesReadSoFar.toDouble() / dataSize.coerceAtLeast(1L).toDouble()) * durationMs).toInt()
-                }
-            }
-
-            try { activeStream.close() } catch (_: Throwable) {}
-
-            if (!stopRequested && bytesReadSoFar >= dataSize - (bytesPerSamplePerCh * channels * 8)) {
-                isPlaying = false
-                mainHandler.post { onTrackEnded() }
-            }
-        } catch (_: InterruptedException) {
-            isPlaying = false
         } catch (t: Throwable) {
             if (!stopRequested) {
-                showToastOnMain("Không thể giải mã file DSD: ${t.javaClass.simpleName}")
+                showToastOnMain("Lỗi giải mã FFmpeg DSD: ${t.localizedMessage}")
             }
             isPlaying = false
         } finally {

@@ -15,11 +15,29 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download Prebuilt FFmpeg Audio Native AAR (arm64-v8a)
+      - name: Fetch Prebuilt FFmpeg 6.0 Android arm64-v8a Libraries & C Headers
         run: |
-          mkdir -p app/libs
-          curl -L --fail --retry 3 -o app/libs/ffmpeg-kit-audio.aar "https://github.com/arthenica/ffmpeg-kit/releases/download/v6.0-2.LTS/ffmpeg-kit-audio-6.0-2.LTS.aar" || rm -f app/libs/ffmpeg-kit-audio.aar
-          ls -lh app/libs/
+          set -e
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          mkdir -p app/src/main/cpp/include
+          
+          echo "Downloading Prebuilt FFmpeg Android arm64-v8a shared libraries & headers..."
+          curl -L --fail --retry 3 -o /tmp/ffmpeg-android.tar.bz2 "https://sourceforge.net/projects/avbuild/files/android/ffmpeg-6.0-android-clang-lite.tar.bz2/download"
+          mkdir -p /tmp/ffmpeg_extracted
+          tar -xjf /tmp/ffmpeg-android.tar.bz2 -C /tmp/ffmpeg_extracted
+          
+          INC_DIR=$(find /tmp/ffmpeg_extracted -type d -name "include" | head -n 1)
+          LIB_DIR=$(find /tmp/ffmpeg_extracted -type d -path "*/arm64-v8a" | head -n 1)
+          
+          cp -r "$INC_DIR"/* app/src/main/cpp/include/
+          cp -P "$LIB_DIR"/libavcodec.so* app/src/main/jniLibs/arm64-v8a/libavcodec.so
+          cp -P "$LIB_DIR"/libavformat.so* app/src/main/jniLibs/arm64-v8a/libavformat.so
+          cp -P "$LIB_DIR"/libswresample.so* app/src/main/jniLibs/arm64-v8a/libswresample.so
+          cp -P "$LIB_DIR"/libavutil.so* app/src/main/jniLibs/arm64-v8a/libavutil.so
+          
+          echo "Verified FFmpeg C Headers and arm64-v8a Shared Libraries:"
+          ls -lh app/src/main/jniLibs/arm64-v8a/
+          ls -lh app/src/main/cpp/include/
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -27,12 +45,18 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      - name: Setup Android NDK & CMake
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26b
+          cmake-version: 3.22.1
+
       - name: Setup Gradle 8.4
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: '8.4'
 
-      - name: Assemble Debug APK
+      - name: Assemble Debug APK with True FFmpeg C/C++ JNI Engine
         run: gradle assembleDebug --no-daemon
 
       - name: Upload Walkman Pro APK
@@ -53,9 +77,10 @@ jobs:
           tag_name: v${{ steps.extract_ver.outputs.version }}
           name: Walkman ${{ steps.extract_ver.outputs.version }}
           body: |
-            ### Walkman ${{ steps.extract_ver.outputs.version }} OTA Release
-            - Tích hợp Prebuilt FFmpeg Native DSD Decoder (`libavcodec`/`libavformat` `arm64-v8a`) qua Dynamic Reflection Bridge + 2048-Tap Kaiser Ultra-Linear Phase (-150dB) + 6th-Order Ultrasonic Cascade.
-            - Bố cục dải nút Vector 3D hàng ngang dưới Cassette khi xoay ngang màn hình.
+            ### Walkman ${{ steps.extract_ver.outputs.version }} True FFmpeg C/C++ JNI Release
+            - Biên dịch và liên kết trực tiếp (Native CMake Link) với bộ thư viện C của **FFmpeg 6.0 (`libavformat.so`, `libavcodec.so`, `libswresample.so`, `libavutil.so` arm64-v8a)**.
+            - Giải mã phần cứng DSD64/128/256 & DST bằng `avcodec_receive_frame()` + `swr_convert()` sang 32-bit Float PCM.
+            - Tái cấu trúc toàn bộ DSP sang **64-bit Double Precision Biquad Cascade**: Cắt sub-sonic 20Hz & mud-cut 210Hz cho dải Bass gọn, chắc, dứt khoát; nâng dải Mid 1.65kHz ngọt và rõ nét; tách lớp không gian Mid/Side chính xác.
           files: app/build/outputs/apk/debug/*.apk
           draft: false
           prerelease: false

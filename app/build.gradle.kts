@@ -5,11 +5,8 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// =========================================================================
-// PHIÊN BẢN 11.6.1: FFMPEG NATIVE ARM64-V8A BRIDGE + 2048-TAP ULTRA KAISER
-// =========================================================================
-val walkmanVersion = "11.6.1"
-val walkmanVersionCode = 1161
+val walkmanVersion = "11.8.0"
+val walkmanVersionCode = 1180
 val githubRepoSlug = "Melbournejr/walkman-player"
 
 val fixedKeystoreFile = file("walkman-permanent.jks")
@@ -47,6 +44,20 @@ android {
 
         ndk {
             abiFilters += listOf("arm64-v8a")
+        }
+
+        externalNativeBuild {
+            cmake {
+                cppFlags += "-std=c++17 -O3 -ffast-math"
+                arguments += "-DANDROID_STL=c++_shared"
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
         }
     }
 
@@ -103,10 +114,6 @@ android {
 }
 
 dependencies {
-    // Tự động nạp gói Prebuilt FFmpeg Native (.aar) trong thư mục app/libs
-    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar", "*.aar"))))
-    implementation("com.arthenica:smart-exception-java:0.2.1")
-
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.media:media:1.7.0")
     implementation("androidx.activity:activity-compose:1.8.2")

@@ -6,10 +6,10 @@ plugins {
 }
 
 // =========================================================================
-// PHIÊN BẢN 11.6.0: TÍCH HỢP FFMPEG NATIVE DSD DECODER (ARM64-V8A)
+// PHIÊN BẢN 11.6.1: FFMPEG NATIVE ARM64-V8A BRIDGE + 2048-TAP ULTRA KAISER
 // =========================================================================
-val walkmanVersion = "11.6.0"
-val walkmanVersionCode = 1160
+val walkmanVersion = "11.6.1"
+val walkmanVersionCode = 1161
 val githubRepoSlug = "Melbournejr/walkman-player"
 
 val fixedKeystoreFile = file("walkman-permanent.jks")
@@ -45,7 +45,6 @@ android {
         buildConfigField("String", "GITHUB_REPO", "\"$githubRepoSlug\"")
         buildConfigField("String", "VERSION_NAME", "\"$walkmanVersion\"")
 
-        // Tối ưu hóa Native Libraries cho kiến trúc 64-bit ARMv8 (Snapdragon 8 Gen 3)
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -70,7 +69,6 @@ android {
         }
     }
 
-    // Cấu hình đóng gói thư viện C/C++ (.so) của FFmpeg an toàn trên Android 8 -> Android 15
     packaging {
         jniLibs {
             useLegacyPackaging = true
@@ -105,6 +103,10 @@ android {
 }
 
 dependencies {
+    // Tự động nạp gói Prebuilt FFmpeg Native (.aar) trong thư mục app/libs
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar", "*.aar"))))
+    implementation("com.arthenica:smart-exception-java:0.2.1")
+
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.media:media:1.7.0")
     implementation("androidx.activity:activity-compose:1.8.2")
@@ -112,10 +114,6 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.2.1")
     implementation("androidx.media3:media3-common:1.2.1")
     implementation("androidx.media3:media3-session:1.2.1")
-
-    // Tích hợp Prebuilt FFmpeg Audio Native Library (libavcodec, libavformat, libavfilter, libswresample)
-    implementation("com.antonkarpenko:ffmpeg-kit-audio:1.0.2")
-
     implementation(platform("androidx.compose:compose-bom:2024.02.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")

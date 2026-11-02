@@ -6,10 +6,10 @@ plugins {
 }
 
 // =========================================================================
-// CHỈ CẦN ĐỔI HẬU TỐ PHIÊN BẢN Ở DÒNG NÀY CHO CÁC BẢN CẢI TIẾN TIẾP THEO:
+// PHIÊN BẢN 11.6.0: TÍCH HỢP FFMPEG NATIVE DSD DECODER (ARM64-V8A)
 // =========================================================================
-val walkmanVersion = "11.5.0"
-val walkmanVersionCode = 1150
+val walkmanVersion = "11.6.0"
+val walkmanVersionCode = 1160
 val githubRepoSlug = "Melbournejr/walkman-player"
 
 val fixedKeystoreFile = file("walkman-permanent.jks")
@@ -44,6 +44,11 @@ android {
         versionName = walkmanVersion
         buildConfigField("String", "GITHUB_REPO", "\"$githubRepoSlug\"")
         buildConfigField("String", "VERSION_NAME", "\"$walkmanVersion\"")
+
+        // Tối ưu hóa Native Libraries cho kiến trúc 64-bit ARMv8 (Snapdragon 8 Gen 3)
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     signingConfigs {
@@ -62,6 +67,21 @@ android {
             if (fixedKeystoreFile.exists()) {
                 signingConfig = signingConfigs.getByName("permanentSignature")
             }
+        }
+    }
+
+    // Cấu hình đóng gói thư viện C/C++ (.so) của FFmpeg an toàn trên Android 8 -> Android 15
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+            pickFirsts += setOf(
+                "**/libavcodec.so",
+                "**/libavformat.so",
+                "**/libavfilter.so",
+                "**/libavutil.so",
+                "**/libswresample.so",
+                "**/libc++_shared.so"
+            )
         }
     }
 
@@ -92,12 +112,12 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.2.1")
     implementation("androidx.media3:media3-common:1.2.1")
     implementation("androidx.media3:media3-session:1.2.1")
+
+    // Tích hợp Prebuilt FFmpeg Audio Native Library (libavcodec, libavformat, libavfilter, libswresample)
+    implementation("com.antonkarpenko:ffmpeg-kit-audio:1.0.2")
+
     implementation(platform("androidx.compose:compose-bom:2024.02.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
 }
-
-
-
-

@@ -31,345 +31,191 @@ import java.nio.ByteOrder
 import kotlin.math.tanh
 
 // BỘ XỬ LÝ DSP BẢN 7.0/9.0 NGUYÊN BẢN
+
 @UnstableApi
-class SonyRealTimeDspProcessor : BaseAudioProcessor() {
+class SonyRealTimeDspProcessor : androidx.media3.common.audio.BaseAudioProcessor() {
+    @Volatile var megaBassLevel: Float = 0.45f
     @Volatile var vinylEnabled: Boolean = true
     @Volatile var clearAudioEnabled: Boolean = true
     @Volatile var dseeEnabled: Boolean = true
-    @Volatile var megaBassLevel: Float = 0.45f
-    @Volatile var eq10Gains = FloatArray(10) { 0f }
-    @Volatile var channelBalance: Float = 0f
+    @Volatile var channelBalance: Float = 0.0f
     @Volatile var phaseInvert: Boolean = false
+    val eq10Gains = FloatArray(10) { 0f }
 
-    private var lowPassL = 0f
-    private var lowPassR = 0f
-    private var subBassL = 0f
-    private var subBassR = 0f
-    private var prevSampleL = 0f
-    private var prevSampleR = 0f
+    private class StereoBiquad {
+        var b0 = 1.0; var b1 = 0.0; var b2 = 0.0
+        var a1 = 0.0; var a2 = 0.0
+        var z1L = 0.0; var z2L = 0.0
+        var z1R = 0.0; var z2R = 0.0
 
-    override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
-        return if (inputAudioFormat.encoding == C.ENCODING_PCM_16BIT && inputAudioFormat.channelCount == 2) {
-            inputAudioFormat
-        } else {
-            AudioProcessor.AudioFormat.NOT_SET
+        fun reset() {
+            z1L = 0.0; z2L = 0.0; z1R = 0.0; z2R = 0.0
+        }
+
+        fun setHighPass(fs: Double, f0: Double, q: Double) {
+            val w0 = 2.0 * kotlin.math.PI * f0 / fs
+            val cosw0 = kotlin.math.cos(w0)
+            val alpha = kotlin.math.sin(w0) / (2.0 * q)
+            val a0 = 1.0 + alpha
+            b0 = ((1.0 + cosw0) * 0.5) / a0
+            b1 = -(1.0 + cosw0) / a0
+            b2 = ((1.0 + cosw0) * 0.5) / a0
+            a1 = (-2.0 * cosw0) / a0
+            a2 = (1.0 - alpha) / a0
+        }
+
+        fun setPeaking(fs: Double, f0: Double, q: Double, gainDb: Double) {
+            if (kotlin.math.abs(gainDb) < 0.05) {
+                b0 = 1.0; b1 = 0.0; b2 = 0.0; a1 = 0.0; a2 = 0.0
+                return
+            }
+            val a = Math.pow(10.0, gainDb / 40.0)
+            val w0 = 2.0 * kotlin.math.PI * f0 / fs
+            val cosw0 = kotlin.math.cos(w0)
+            val alpha = kotlin.math.sin(w0) / (2.0 * q)
+            val a0 = 1.0 + alpha / a
+            b0 = (1.0 + alpha * a) / a0
+            b1 = (-2.0 * cosw0) / a0
+            b2 = (1.0 - alpha * a) / a0
+            a1 = (-2.0 * cosw0) / a0
+            a2 = (1.0 - alpha / a) / a0
+        }
+
+        fun processL(x: Double): Double {
+            val y = b0 * x + z1L
+            z1L = b1 * x - a1 * y + z2L
+            z2L = b2 * x - a2 * y
+            return y
+        }
+
+        fun processR(x: Double): Double {
+            val y = b0 * x + z1R
+            z1R = b1 * x - a1 * y + z2R
+            z2R = b2 * x - a2 * y
+            return y
         }
     }
 
-    override fun queueInput(inputBuffer: ByteBuffer) {
+    private val subsonicHp = StereoBiquad()
+    private val mudCutEq = StereoBiquad()
+    private val tightBassEq = StereoBiquad()
+    private val sweetVocalEq = StereoBiquad()
+    private val airLayerEq = StereoBiquad()
+
+    override fun onConfigure(inputAudioFormat: androidx.media3.common.audio.AudioProcessor.AudioFormat): androidx.media3.common.audio.AudioProcessor.AudioFormat {
+        if (inputAudioFormat.encoding != androidx.media3.common.C.ENCODING_PCM_16BIT &&
+            inputAudioFormat.encoding != androidx.media3.common.C.ENCODING_PCM_FLOAT
+        ) {
+            return androidx.media3.common.audio.AudioProcessor.AudioFormat.NOT_SET
+        }
+        val fs = inputAudioFormat.sampleRate.toDouble().coerceAtLeast(44100.0)
+        subsonicHp.setHighPass(fs, 20.0, 0.7071)
+        return inputAudioFormat
+    }
+
+    override fun onFlush() {
+        subsonicHp.reset()
+        mudCutEq.reset()
+        tightBassEq.reset()
+        sweetVocalEq.reset()
+        airLayerEq.reset()
+    }
+
+    override fun queueInput(inputBuffer: java.nio.ByteBuffer) {
         val remaining = inputBuffer.remaining()
         if (remaining == 0) return
 
-        val outputBuffer = replaceOutputBuffer(remaining)
-        outputBuffer.order(ByteOrder.LITTLE_ENDIAN)
-        inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
+        val fs = inputAudioFormat.sampleRate.toDouble().coerceAtLeast(44100.0)
+        val ch = inputAudioFormat.channelCount.coerceAtLeast(1)
 
-        val preGain = 0.78f
-        val eqLowGain = ((eq10Gains[0] + eq10Gains[1] + eq10Gains[2]) / 3f) * 0.05f
-        val eqMidGain = ((eq10Gains[3] + eq10Gains[4] + eq10Gains[5] + eq10Gains[6]) / 4f) * 0.04f
-        val eqHighGain = ((eq10Gains[7] + eq10Gains[8] + eq10Gains[9]) / 3f) * 0.05f
-        val totalBassBoost = (megaBassLevel * 0.55f) + eqLowGain
+        val eqLow = (eq10Gains[0] + eq10Gains[1]).toDouble() * 0.5
+        val eqMid = (eq10Gains[4] + eq10Gains[5] + eq10Gains[6]).toDouble() / 3.0
+        val eqHigh = (eq10Gains[8] + eq10Gains[9]).toDouble() * 0.5
 
-        // Khóa tâm cân bằng tuyệt đối (Dead-zone +/- 0.03f) chống lệch âm lượng trái/phải
-        val cleanBal = if (kotlin.math.abs(channelBalance) < 0.03f) 0f else channelBalance.coerceIn(-0.5f, 0.5f)
-        val leftPanGain = if (cleanBal > 0f) (1f - cleanBal).coerceIn(0f, 1f) else 1f
-        val rightPanGain = if (cleanBal < 0f) (1f + cleanBal).coerceIn(0f, 1f) else 1f
-        val phaseSign = if (phaseInvert) -1f else 1f
+        tightBassEq.setPeaking(fs, 60.0, 1.15, (megaBassLevel * 5.5) + (eqLow * 0.6))
+        mudCutEq.setPeaking(fs, 210.0, 1.40, if (clearAudioEnabled) -1.8 else -0.8)
+        sweetVocalEq.setPeaking(fs, 1650.0, 0.80, (if (clearAudioEnabled) 1.8 else 0.5) + (eqMid * 0.6))
+        airLayerEq.setPeaking(fs, 11500.0, 0.90, (if (dseeEnabled) 2.4 else 0.4) + (eqHigh * 0.6))
 
-        while (inputBuffer.remaining() >= 4) {
-            var left = (inputBuffer.short / 32768f) * preGain
-            var right = (inputBuffer.short / 32768f) * preGain
+        val bal = if (kotlin.math.abs(channelBalance) < 0.03f) 0f else channelBalance.coerceIn(-0.5f, 0.5f)
+        val leftPan = if (bal > 0f) (1.0 - bal).coerceIn(0.0, 1.0) else 1.0
+        val rightPan = if (bal < 0f) (1.0 + bal).coerceIn(0.0, 1.0) else 1.0
+        val phase = if (phaseInvert) -1.0 else 1.0
 
-            subBassL += 0.045f * (left - subBassL)
-            subBassR += 0.045f * (right - subBassR)
-            val highL = left - prevSampleL
-            val highR = right - prevSampleR
-            prevSampleL = left
-            prevSampleR = right
+        val outBuffer = replaceOutputBuffer(remaining).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        inputBuffer.order(java.nio.ByteOrder.LITTLE_ENDIAN)
 
-            left += subBassL * totalBassBoost + left * eqMidGain + highL * eqHighGain
-            right += subBassR * totalBassBoost + right * eqMidGain + highR * eqHighGain
+        if (inputAudioFormat.encoding == androidx.media3.common.C.ENCODING_PCM_16BIT) {
+            while (inputBuffer.remaining() >= ch * 2) {
+                var L = inputBuffer.short.toDouble() / 32768.0
+                var R = if (ch >= 2) inputBuffer.short.toDouble() / 32768.0 else L
+                for (c in 2 until ch) inputBuffer.short
 
-            if (clearAudioEnabled) {
-                val mid = (left + right) * 0.5f
-                val side = (left - right) * 0.5f
-                val wideSide = side * 1.28f
-                left = (mid + wideSide) + subBassL * 0.10f + highL * 0.08f
-                right = (mid - wideSide) + subBassR * 0.10f + highR * 0.08f
+                L = subsonicHp.processL(L)
+                R = subsonicHp.processR(R)
+                L = mudCutEq.processL(L)
+                R = mudCutEq.processR(R)
+                L = tightBassEq.processL(L)
+                R = tightBassEq.processR(R)
+                L = sweetVocalEq.processL(L)
+                R = sweetVocalEq.processR(R)
+                L = airLayerEq.processL(L)
+                R = airLayerEq.processR(R)
+
+                if (clearAudioEnabled) {
+                    val mid = (L + R) * 0.5
+                    val side = (L - R) * 0.5 * 1.16
+                    L = mid + side
+                    R = mid - side
+                }
+
+                L = L * leftPan * phase * 0.92
+                R = R * rightPan * phase * 0.92
+
+                if (kotlin.math.abs(L) > 0.95) L = (if (L > 0) 1.0 else -1.0) * (0.95 + 0.05 * kotlin.math.tanh((kotlin.math.abs(L) - 0.95) / 0.05))
+                if (kotlin.math.abs(R) > 0.95) R = (if (R > 0) 1.0 else -1.0) * (0.95 + 0.05 * kotlin.math.tanh((kotlin.math.abs(R) - 0.95) / 0.05))
+
+                val sL = (L * 32767.0).toInt().coerceIn(-32768, 32767).toShort()
+                val sR = (R * 32767.0).toInt().coerceIn(-32768, 32767).toShort()
+                outBuffer.putShort(sL)
+                if (ch >= 2) outBuffer.putShort(sR)
+                for (c in 2 until ch) outBuffer.putShort(0)
             }
+        } else {
+            while (inputBuffer.remaining() >= ch * 4) {
+                var L = inputBuffer.float.toDouble()
+                var R = if (ch >= 2) inputBuffer.float.toDouble() else L
+                for (c in 2 until ch) inputBuffer.float
 
-            if (dseeEnabled) {
-                left += highL * 0.15f
-                right += highR * 0.15f
+                L = subsonicHp.processL(L)
+                R = subsonicHp.processR(R)
+                L = mudCutEq.processL(L)
+                R = mudCutEq.processR(R)
+                L = tightBassEq.processL(L)
+                R = tightBassEq.processR(R)
+                L = sweetVocalEq.processL(L)
+                R = sweetVocalEq.processR(R)
+                L = airLayerEq.processL(L)
+                R = airLayerEq.processR(R)
+
+                if (clearAudioEnabled) {
+                    val mid = (L + R) * 0.5
+                    val side = (L - R) * 0.5 * 1.16
+                    L = mid + side
+                    R = mid - side
+                }
+
+                L = L * leftPan * phase * 0.92
+                R = R * rightPan * phase * 0.92
+
+                if (kotlin.math.abs(L) > 0.95) L = (if (L > 0) 1.0 else -1.0) * (0.95 + 0.05 * kotlin.math.tanh((kotlin.math.abs(L) - 0.95) / 0.05))
+                if (kotlin.math.abs(R) > 0.95) R = (if (R > 0) 1.0 else -1.0) * (0.95 + 0.05 * kotlin.math.tanh((kotlin.math.abs(R) - 0.95) / 0.05))
+
+                outBuffer.putFloat(L.toFloat())
+                if (ch >= 2) outBuffer.putFloat(R.toFloat())
+                for (c in 2 until ch) outBuffer.putFloat(0f)
             }
-
-            if (vinylEnabled) {
-                lowPassL += 0.35f * (left - lowPassL)
-                lowPassR += 0.35f * (right - lowPassR)
-                left = (lowPassL * 0.65f + left * 0.35f) + subBassL * 0.12f
-                right = (lowPassR * 0.65f + right * 0.35f) + subBassR * 0.12f
-                left = tanh(left * 1.05f) * 0.92f
-                right = tanh(right * 1.05f) * 0.92f
-            } else {
-                left = tanh(left) * 0.95f
-                right = tanh(right) * 0.95f
-            }
-
-            left = left * leftPanGain * phaseSign
-            right = right * rightPanGain * phaseSign
-
-            val outL = (left * 32767f).toInt().coerceIn(-32768, 32767).toShort()
-            val outR = (right * 32767f).toInt().coerceIn(-32768, 32767).toShort()
-            outputBuffer.putShort(outL)
-            outputBuffer.putShort(outR)
         }
-        outputBuffer.flip()
+        outBuffer.flip()
     }
 }
-
-class WalkmanNotificationReceiver : BroadcastReceiver() {
-    override fun onReceive(context: Context?, intent: Intent?) {
-        when (intent?.action) {
-            "com.sony.walkmanpro.ACTION_PLAY_PAUSE" -> MainActivity.onExternalCommand?.invoke("PLAY_PAUSE")
-            "com.sony.walkmanpro.ACTION_NEXT" -> MainActivity.onExternalCommand?.invoke("NEXT")
-            "com.sony.walkmanpro.ACTION_PREV" -> MainActivity.onExternalCommand?.invoke("PREV")
-        }
-    }
-}
-
-class WalkmanMediaSessionService : MediaSessionService() {
-    private var wakeLock: PowerManager.WakeLock? = null
-
-    companion object {
-        const val CHANNEL_ID = "walkman_playback_channel"
-        const val NOTIF_ID = 7001
-        var mediaSessionCompat: MediaSessionCompat? = null
-        var activeServiceInstance: WalkmanMediaSessionService? = null
-
-        private var lastTitle: String = "Sony Walkman Signature"
-        private var lastArtist: String = "Hi-Res Audio Player"
-        private var lastPlaying: Boolean = false
-        private var lastPosMs: Long = 0L
-        private var lastDurMs: Long = 1000L
-
-        fun updateNowPlayingNotification(
-            context: Context,
-            title: String,
-            artist: String,
-            isPlaying: Boolean,
-            posMs: Long,
-            durMs: Long,
-            onCommand: (String) -> Unit
-        ) {
-            lastTitle = title
-            lastArtist = artist
-            lastPlaying = isPlaying
-            lastPosMs = posMs
-            lastDurMs = durMs
-
-            ensureChannel(context)
-
-            if (mediaSessionCompat == null) {
-                mediaSessionCompat = MediaSessionCompat(context.applicationContext, "SonyWalkmanSession").apply {
-                    isActive = true
-                    setCallback(object : MediaSessionCompat.Callback() {
-                        override fun onPlay() = onCommand("PLAY_PAUSE")
-                        override fun onPause() = onCommand("PLAY_PAUSE")
-                        override fun onSkipToNext() = onCommand("NEXT")
-                        override fun onSkipToPrevious() = onCommand("PREV")
-                        override fun onSeekTo(pos: Long) = onCommand("SEEK:$pos")
-                    })
-                }
-            }
-
-            val notification = buildMediaNotification(context, title, artist, isPlaying, posMs, durMs)
-
-            // Kích hoạt chuẩn Foreground Service để hệ thống Android/HyperOS tuyệt đối không đóng app khi thoát ra màn hình chính
-            val srv = activeServiceInstance
-            if (srv != null) {
-                srv.promoteToForeground(notification, isPlaying)
-            } else {
-                try {
-                    val serviceIntent = Intent(context.applicationContext, WalkmanMediaSessionService::class.java)
-                    ContextCompat.startForegroundService(context.applicationContext, serviceIntent)
-                } catch (_: Exception) {}
-                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                nm.notify(NOTIF_ID, notification)
-            }
-        }
-
-        private fun ensureChannel(context: Context) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                val chan = NotificationChannel(
-                    CHANNEL_ID,
-                    "Walkman Playback Controls",
-                    NotificationManager.IMPORTANCE_LOW
-                ).apply {
-                    description = "Duy trì phát nhạc nền Walkman và điều khiển trên thanh trạng thái"
-                    setShowBadge(false)
-                }
-                nm.createNotificationChannel(chan)
-            }
-        }
-
-        fun buildMediaNotification(
-            context: Context,
-            title: String,
-            artist: String,
-            isPlaying: Boolean,
-            posMs: Long,
-            durMs: Long
-        ): Notification {
-            val artBitmap = createWalkmanCoverArt()
-            val metadata = MediaMetadataCompat.Builder()
-                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
-                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
-                .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, "Sony Walkman Signature")
-                .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durMs.coerceAtLeast(1000L))
-                .putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artBitmap)
-                .build()
-            mediaSessionCompat?.setMetadata(metadata)
-
-            val state = PlaybackStateCompat.Builder()
-                .setActions(
-                    PlaybackStateCompat.ACTION_PLAY or
-                            PlaybackStateCompat.ACTION_PAUSE or
-                            PlaybackStateCompat.ACTION_PLAY_PAUSE or
-                            PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
-                            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
-                            PlaybackStateCompat.ACTION_SEEK_TO
-                )
-                .setState(
-                    if (isPlaying) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED,
-                    posMs,
-                    if (isPlaying) 1.0f else 0f
-                )
-                .build()
-            mediaSessionCompat?.setPlaybackState(state)
-
-            val openIntent = PendingIntent.getActivity(
-                context, 0,
-                Intent(context, MainActivity::class.java),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-            val prevIntent = PendingIntent.getBroadcast(
-                context, 1,
-                Intent("com.sony.walkmanpro.ACTION_PREV").setPackage(context.packageName),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-            val playIntent = PendingIntent.getBroadcast(
-                context, 2,
-                Intent("com.sony.walkmanpro.ACTION_PLAY_PAUSE").setPackage(context.packageName),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-            val nextIntent = PendingIntent.getBroadcast(
-                context, 3,
-                Intent("com.sony.walkmanpro.ACTION_NEXT").setPackage(context.packageName),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-
-            return NotificationCompat.Builder(context, CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_media_play)
-                .setContentTitle(title)
-                .setContentText(artist)
-                .setSubText("Walkman Hi-Res")
-                .setLargeIcon(artBitmap)
-                .setContentIntent(openIntent)
-                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                .setOngoing(true)
-                .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-                .addAction(android.R.drawable.ic_media_previous, "Previous", prevIntent)
-                .addAction(
-                    if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
-                    if (isPlaying) "Pause" else "Play",
-                    playIntent
-                )
-                .addAction(android.R.drawable.ic_media_next, "Next", nextIntent)
-                .setStyle(
-                    MediaNotificationCompat.MediaStyle()
-                        .setMediaSession(mediaSessionCompat?.sessionToken)
-                        .setShowActionsInCompactView(0, 1, 2)
-                )
-                .build()
-        }
-
-        private fun createWalkmanCoverArt(): Bitmap {
-            val bmp = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(bmp)
-            val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-            paint.color = Color.parseColor("#181307")
-            canvas.drawRect(0f, 0f, 256f, 256f, paint)
-            paint.color = Color.parseColor("#EAB308")
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = 14f
-            canvas.drawCircle(128f, 128f, 92f, paint)
-            paint.style = Paint.Style.FILL
-            paint.textSize = 95f
-            paint.textAlign = Paint.Align.CENTER
-            canvas.drawText("W", 128f, 162f, paint)
-            return bmp
-        }
-    }
-
-    override fun onCreate() {
-        super.onCreate()
-        activeServiceInstance = this
-        ensureChannel(this)
-        acquireAudioWakeLock()
-        val initialNotif = buildMediaNotification(this, lastTitle, lastArtist, lastPlaying, lastPosMs, lastDurMs)
-        promoteToForeground(initialNotif, true)
-    }
-
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        activeServiceInstance = this
-        ensureChannel(this)
-        val notif = buildMediaNotification(this, lastTitle, lastArtist, lastPlaying, lastPosMs, lastDurMs)
-        promoteToForeground(notif, lastPlaying)
-        return START_STICKY
-    }
-
-    fun promoteToForeground(notification: Notification, isPlaying: Boolean) {
-        try {
-            if (isPlaying) acquireAudioWakeLock()
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
-            } else {
-                startForeground(NOTIF_ID, notification)
-            }
-        } catch (_: Exception) {
-            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.notify(NOTIF_ID, notification)
-        }
-    }
-
-    private fun acquireAudioWakeLock() {
-        try {
-            if (wakeLock == null) {
-                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WalkmanPro::AudioPlaybackWakeLock").apply {
-                    setReferenceCounted(false)
-                }
-            }
-            if (wakeLock?.isHeld == false) {
-                wakeLock?.acquire(6 * 60 * 60 * 1000L) // Giữ CPU âm thanh suốt 6 tiếng liên tục
-            }
-        } catch (_: Exception) {}
-    }
-
-    override fun onTaskRemoved(rootIntent: Intent?) {
-        // Giữ nhạc tiếp tục phát ngay cả khi vuốt đa nhiệm hoặc thoát ra màn hình chính
-        super.onTaskRemoved(rootIntent)
-    }
-
-    override fun onDestroy() {
-        activeServiceInstance = null
-        try {
-            if (wakeLock?.isHeld == true) wakeLock?.release()
-        } catch (_: Exception) {}
-        super.onDestroy()
-    }
-
-    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = null
-}
-

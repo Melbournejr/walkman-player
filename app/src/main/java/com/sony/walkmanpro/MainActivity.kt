@@ -376,8 +376,9 @@ class MainActivity : ComponentActivity() {
         val prefs = getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
         masterVolume = prefs.getFloat("dsp_master_vol", 0.75f)
         pureDsdEnabled = prefs.getBoolean("dsp_pure_dsd_mode", false)
-        sharedDsdEngine?.pureDsdMode = pureDsdEnabled; sharedDspProcessor.pureDirectBypass = pureDsdEnabled
-        sharedDspProcessor.megaBassLevel = prefs.getFloat("dsp_bass", 0.45f)
+        sharedDsdEngine?.pureDsdMode = pureDsdEnabled
+        sharedDspProcessor.pureDirectBypass = pureDsdEnabled; sharedDspProcessor.pureDirectBypass = pureDsdEnabled
+        sharedDspProcessor.megaBassLevel = prefs.getFloat("dsp_bass", 0.25f)
         sharedDspProcessor.vinylEnabled = prefs.getBoolean("dsp_vinyl", true)
         sharedDspProcessor.clearAudioEnabled = prefs.getBoolean("dsp_clear_audio", true)
         sharedDspProcessor.dseeEnabled = prefs.getBoolean("dsp_dsee", true)
@@ -431,7 +432,8 @@ class MainActivity : ComponentActivity() {
             if (isDsdTrack(track)) {
                 isDsdModeActive = true
                 sharedExoPlayer?.pause()
-                sharedDsdEngine?.pureDsdMode = pureDsdEnabled; sharedDspProcessor.pureDirectBypass = pureDsdEnabled
+                sharedDsdEngine?.pureDsdMode = pureDsdEnabled
+        sharedDspProcessor.pureDirectBypass = pureDsdEnabled; sharedDspProcessor.pureDirectBypass = pureDsdEnabled
                 sharedDsdEngine?.masterVolume = (masterVolume * sleepFadeMultiplier).coerceIn(0f, 1f)
                 sharedDsdEngine?.startDsdPlayback(track.uri, startMs.toInt())
             } else {
@@ -513,7 +515,8 @@ class MainActivity : ComponentActivity() {
 
     private fun updatePureDsdMode(enabled: Boolean) {
         pureDsdEnabled = enabled
-        sharedDsdEngine?.pureDsdMode = enabled; sharedDspProcessor.pureDirectBypass = enabled
+        sharedDsdEngine?.pureDsdMode = enabled
+        sharedDspProcessor.pureDirectBypass = enabled; sharedDspProcessor.pureDirectBypass = enabled
         getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
             .edit().putBoolean("dsp_pure_dsd_mode", enabled).apply()
     }
@@ -1028,7 +1031,7 @@ fun SnowskyEchoDapApp(
     val dspPrefs = context.getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
     var masterVol by remember { mutableStateOf(dspPrefs.getFloat("dsp_master_vol", 0.75f)) }
     var pureDsdMode by remember { mutableStateOf(dspPrefs.getBoolean("dsp_pure_dsd_mode", false)) }
-    var megaBass by remember { mutableStateOf(dspPrefs.getFloat("dsp_bass", 0.45f)) }
+    var megaBass by remember { mutableStateOf(dspPrefs.getFloat("dsp_bass", 0.25f)) }
     var vinylProcessor by remember { mutableStateOf(dspPrefs.getBoolean("dsp_vinyl", true)) }
     var clearAudioPlus by remember { mutableStateOf(dspPrefs.getBoolean("dsp_clear_audio", true)) }
     var dseeUltimate by remember { mutableStateOf(dspPrefs.getBoolean("dsp_dsee", true)) }
@@ -1044,16 +1047,16 @@ fun SnowskyEchoDapApp(
 
     val eq10Bands = remember {
         mutableStateListOf(
-            dspPrefs.getFloat("dsp_eq_0", 2.0f),
-            dspPrefs.getFloat("dsp_eq_1", 1.5f),
-            dspPrefs.getFloat("dsp_eq_2", 1.0f),
+            dspPrefs.getFloat("dsp_eq_0", 0.0f),
+            dspPrefs.getFloat("dsp_eq_1", 0.0f),
+            dspPrefs.getFloat("dsp_eq_2", 0.0f),
             dspPrefs.getFloat("dsp_eq_3", 0.0f),
             dspPrefs.getFloat("dsp_eq_4", 0.0f),
-            dspPrefs.getFloat("dsp_eq_5", 1.0f),
-            dspPrefs.getFloat("dsp_eq_6", 2.0f),
-            dspPrefs.getFloat("dsp_eq_7", 3.0f),
-            dspPrefs.getFloat("dsp_eq_8", 2.5f),
-            dspPrefs.getFloat("dsp_eq_9", 3.5f)
+            dspPrefs.getFloat("dsp_eq_5", 0.0f),
+            dspPrefs.getFloat("dsp_eq_6", 0.0f),
+            dspPrefs.getFloat("dsp_eq_7", 0.0f),
+            dspPrefs.getFloat("dsp_eq_8", 0.0f),
+            dspPrefs.getFloat("dsp_eq_9", 0.0f)
         )
     }
 
@@ -4219,4 +4222,5 @@ fun SignatureLibraryScreen(
         }
     }
 }
+
 

@@ -336,6 +336,7 @@ class MainActivity : ComponentActivity() {
                 enableAudioTrackPlaybackParams: Boolean
             ): AudioSink {
                 return DefaultAudioSink.Builder(context)
+                    .setEnableFloatOutput(true)
                     .setAudioProcessors(arrayOf(sharedDspProcessor))
                     .build()
             }
@@ -375,7 +376,7 @@ class MainActivity : ComponentActivity() {
         val prefs = getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
         masterVolume = prefs.getFloat("dsp_master_vol", 0.75f)
         pureDsdEnabled = prefs.getBoolean("dsp_pure_dsd_mode", false)
-        sharedDsdEngine?.pureDsdMode = pureDsdEnabled
+        sharedDsdEngine?.pureDsdMode = pureDsdEnabled; sharedDspProcessor.pureDirectBypass = pureDsdEnabled
         sharedDspProcessor.megaBassLevel = prefs.getFloat("dsp_bass", 0.45f)
         sharedDspProcessor.vinylEnabled = prefs.getBoolean("dsp_vinyl", true)
         sharedDspProcessor.clearAudioEnabled = prefs.getBoolean("dsp_clear_audio", true)
@@ -430,7 +431,7 @@ class MainActivity : ComponentActivity() {
             if (isDsdTrack(track)) {
                 isDsdModeActive = true
                 sharedExoPlayer?.pause()
-                sharedDsdEngine?.pureDsdMode = pureDsdEnabled
+                sharedDsdEngine?.pureDsdMode = pureDsdEnabled; sharedDspProcessor.pureDirectBypass = pureDsdEnabled
                 sharedDsdEngine?.masterVolume = (masterVolume * sleepFadeMultiplier).coerceIn(0f, 1f)
                 sharedDsdEngine?.startDsdPlayback(track.uri, startMs.toInt())
             } else {
@@ -512,7 +513,7 @@ class MainActivity : ComponentActivity() {
 
     private fun updatePureDsdMode(enabled: Boolean) {
         pureDsdEnabled = enabled
-        sharedDsdEngine?.pureDsdMode = enabled
+        sharedDsdEngine?.pureDsdMode = enabled; sharedDspProcessor.pureDirectBypass = enabled
         getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
             .edit().putBoolean("dsp_pure_dsd_mode", enabled).apply()
     }
@@ -4218,3 +4219,4 @@ fun SignatureLibraryScreen(
         }
     }
 }
+

@@ -26,14 +26,23 @@ import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.pow
 import kotlin.math.sin
+import kotlin.math.sqrt
 import kotlin.math.tanh
 
 /**
- * 1. BỘ XỬ LÝ DSP 64-BIT DOUBLE PRECISION BIQUAD CASCADE CHO EXOPLAYER (PCM/FLAC/WAV)
- * Cắt sạch tần số ù nền <20Hz, khử đục 210Hz, tăng độ gọn cho Bass (60Hz) và làm ngọt dải Mid (1.65kHz).
+ * 1. BỘ XỬ LÝ DSP THỜI GIAN THỰC 64-BIT DOUBLE PRECISION CHO EXOPLAYER (PCM 16-BIT / 24-BIT / 32-BIT / FLOAT)
+ * - Áp dụng trực tiếp lên luồng PCM trước khi ra AudioTrack:
+ *   + Pure DSD Mode (Bypass 100% toàn bộ DSP khi bật)
+ *   + 10-Band Graphic Equalizer độc lập (31Hz .. 16kHz)
+ *   + Mega Bass (Low-Shelf 55Hz + Punch 90Hz + Mud-Cut 230Hz)
+ *   + Clear Audio+ (Stereo Mid/Side 1.38x + Contour Bass/Vocal/Air)
+ *   + DSEE (High-Frequency Harmonic Exciter + 8.5kHz Air Shelf)
+ *   + Vinyl Processor (Even-Order Tube/Analog Warmth + 165Hz Body + 13kHz Soft Roll-off)
+ *   + Channel Balance & Phase Invert 180°
  */
 @UnstableApi
 class SonyRealTimeDspProcessor : BaseAudioProcessor() {
+    @Volatile var pureDirectBypass: Boolean = false
     @Volatile var megaBassLevel: Float = 0.45f
     @Volatile var vinylEnabled: Boolean = true
     @Volatile var clearAudioEnabled: Boolean = true
@@ -41,6 +50,12 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
     @Volatile var channelBalance: Float = 0.0f
     @Volatile var phaseInvert: Boolean = false
     val eq10Gains = FloatArray(10) { 0f }
+
+    companion object {
+        private val EQ10_FREQS = doubleArrayOf(
+            31.0, 62.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0
+        )
+    }
 
     private class StereoBiquad {
         var b0 = 1.0; var b1 = 0.0; var b2 = 0.0
@@ -52,7 +67,12 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
             z1L = 0.0; z2L = 0.0; z1R = 0.0; z2R = 0.0
         }
 
+        fun setBypass() {
+            b0 = 1.0; b1 = 0.0; b2 = 0.0; a1 = 0.0; a2 = 0.0
+        }
+
         fun setHighPass(fs: Double, f0: Double, q: Double) {
+            if (f0 <= 0.0 || f0 >= fs * 0.48) { setBypass(); return }
             val w0 = 2.0 * PI * f0 / fs
             val cosw0 = cos(w0)
             val alpha = sin(w0) / (2.0 * q)
@@ -65,8 +85,8 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
         }
 
         fun setPeaking(fs: Double, f0: Double, q: Double, gainDb: Double) {
-            if (abs(gainDb) < 0.05) {
-                b0 = 1.0; b1 = 0.0; b2 = 0.0; a1 = 0.0; a2 = 0.0
+            if (abs(gainDb) < 0.03 || f0 <= 0.0 || f0 >= fs * 0.48) {
+                setBypass()
                 return
             }
             val a = 10.0.pow(gainDb / 40.0)
@@ -79,6 +99,42 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
             b2 = (1.0 - alpha * a) / a0
             a1 = (-2.0 * cosw0) / a0
             a2 = (1.0 - alpha / a) / a0
+        }
+
+        fun setLowShelf(fs: Double, f0: Double, q: Double, gainDb: Double) {
+            if (abs(gainDb) < 0.03 || f0 <= 0.0 || f0 >= fs * 0.48) {
+                setBypass()
+                return
+            }
+            val a = 10.0.pow(gainDb / 40.0)
+            val w0 = 2.0 * PI * f0 / fs
+            val cosw0 = cos(w0)
+            val alpha = sin(w0) / (2.0 * q)
+            val twoSqrtAAlpha = 2.0 * sqrt(a) * alpha
+            val a0 = (a + 1.0) + (a - 1.0) * cosw0 + twoSqrtAAlpha
+            b0 = (a * ((a + 1.0) - (a - 1.0) * cosw0 + twoSqrtAAlpha)) / a0
+            b1 = (2.0 * a * ((a - 1.0) - (a + 1.0) * cosw0)) / a0
+            b2 = (a * ((a + 1.0) - (a - 1.0) * cosw0 - twoSqrtAAlpha)) / a0
+            a1 = (-2.0 * ((a - 1.0) + (a + 1.0) * cosw0)) / a0
+            a2 = ((a + 1.0) + (a - 1.0) * cosw0 - twoSqrtAAlpha) / a0
+        }
+
+        fun setHighShelf(fs: Double, f0: Double, q: Double, gainDb: Double) {
+            if (abs(gainDb) < 0.03 || f0 <= 0.0 || f0 >= fs * 0.48) {
+                setBypass()
+                return
+            }
+            val a = 10.0.pow(gainDb / 40.0)
+            val w0 = 2.0 * PI * f0 / fs
+            val cosw0 = cos(w0)
+            val alpha = sin(w0) / (2.0 * q)
+            val twoSqrtAAlpha = 2.0 * sqrt(a) * alpha
+            val a0 = (a + 1.0) - (a - 1.0) * cosw0 + twoSqrtAAlpha
+            b0 = (a * ((a + 1.0) + (a - 1.0) * cosw0 + twoSqrtAAlpha)) / a0
+            b1 = (-2.0 * a * ((a - 1.0) + (a + 1.0) * cosw0)) / a0
+            b2 = (a * ((a + 1.0) + (a - 1.0) * cosw0 - twoSqrtAAlpha)) / a0
+            a1 = (2.0 * ((a - 1.0) - (a + 1.0) * cosw0)) / a0
+            a2 = ((a + 1.0) - (a - 1.0) * cosw0 - twoSqrtAAlpha) / a0
         }
 
         fun processL(x: Double): Double {
@@ -97,28 +153,196 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
     }
 
     private val subsonicHp = StereoBiquad()
-    private val mudCutEq = StereoBiquad()
-    private val tightBassEq = StereoBiquad()
-    private val sweetVocalEq = StereoBiquad()
-    private val airLayerEq = StereoBiquad()
+    private val eqBands = Array(10) { StereoBiquad() }
 
+    private val megaBassSubShelf = StereoBiquad()
+    private val megaBassPunchPeak = StereoBiquad()
+    private val megaBassMudCut = StereoBiquad()
+
+    private val clearBassFilter = StereoBiquad()
+    private val clearVocalFilter = StereoBiquad()
+    private val clearAirFilter = StereoBiquad()
+
+    private val dseeExtractorHp = StereoBiquad()
+    private val dseeAirShelf = StereoBiquad()
+
+    private val vinylWarmthPeak = StereoBiquad()
+    private val vinylRolloffShelf = StereoBiquad()
+
+    // Chấp nhận mọi định dạng PCM (16-bit, 24-bit, 32-bit, Float) và xuất ra PCM_FLOAT hoặc PCM_16BIT
     override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
-        if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT &&
-            inputAudioFormat.encoding != C.ENCODING_PCM_FLOAT
-        ) {
+        val enc = inputAudioFormat.encoding
+        val supported = enc == C.ENCODING_PCM_16BIT ||
+                enc == C.ENCODING_PCM_24BIT ||
+                enc == C.ENCODING_PCM_24BIT_BIG_ENDIAN ||
+                enc == C.ENCODING_PCM_32BIT ||
+                enc == C.ENCODING_PCM_FLOAT
+        if (!supported) {
             return AudioProcessor.AudioFormat.NOT_SET
         }
+
         val fs = inputAudioFormat.sampleRate.toDouble().coerceAtLeast(44100.0)
         subsonicHp.setHighPass(fs, 20.0, 0.7071)
-        return inputAudioFormat
+        dseeExtractorHp.setHighPass(fs, 3600.0, 0.7071)
+
+        // Nếu đầu vào là 24-bit hoặc 32-bit hoặc Float -> xuất thống nhất ra PCM_FLOAT 32-bit để giữ dải động cao nhất
+        return if (enc == C.ENCODING_PCM_16BIT) {
+            inputAudioFormat
+        } else {
+            AudioProcessor.AudioFormat(
+                inputAudioFormat.sampleRate,
+                inputAudioFormat.channelCount,
+                C.ENCODING_PCM_FLOAT
+            )
+        }
     }
 
     override fun onFlush() {
         subsonicHp.reset()
-        mudCutEq.reset()
-        tightBassEq.reset()
-        sweetVocalEq.reset()
-        airLayerEq.reset()
+        for (b in eqBands) b.reset()
+        megaBassSubShelf.reset()
+        megaBassPunchPeak.reset()
+        megaBassMudCut.reset()
+        clearBassFilter.reset()
+        clearVocalFilter.reset()
+        clearAirFilter.reset()
+        dseeExtractorHp.reset()
+        dseeAirShelf.reset()
+        vinylWarmthPeak.reset()
+        vinylRolloffShelf.reset()
+    }
+
+    private fun updateFiltersForCurrentBlock(fs: Double): Boolean {
+        var hasActiveEq = false
+        for (i in 0 until 10) {
+            val g = eq10Gains[i].toDouble()
+            if (abs(g) > 0.03) hasActiveEq = true
+            eqBands[i].setPeaking(fs, EQ10_FREQS[i], 1.414, g)
+        }
+
+        val mb = megaBassLevel.toDouble()
+        if (mb > 0.01) {
+            megaBassSubShelf.setLowShelf(fs, 55.0, 0.75, mb * 9.5)
+            megaBassPunchPeak.setPeaking(fs, 90.0, 1.15, mb * 4.5)
+            megaBassMudCut.setPeaking(fs, 230.0, 1.30, -mb * 2.2)
+        } else {
+            megaBassSubShelf.setBypass()
+            megaBassPunchPeak.setBypass()
+            megaBassMudCut.setBypass()
+        }
+
+        if (clearAudioEnabled) {
+            clearBassFilter.setPeaking(fs, 65.0, 1.0, 2.6)
+            clearVocalFilter.setPeaking(fs, 2600.0, 0.85, 3.2)
+            clearAirFilter.setHighShelf(fs, 10500.0, 0.7071, 3.5)
+        } else {
+            clearBassFilter.setBypass()
+            clearVocalFilter.setBypass()
+            clearAirFilter.setBypass()
+        }
+
+        if (dseeEnabled) {
+            dseeAirShelf.setHighShelf(fs, 8500.0, 0.75, 4.5)
+        } else {
+            dseeAirShelf.setBypass()
+        }
+
+        if (vinylEnabled) {
+            vinylWarmthPeak.setPeaking(fs, 165.0, 0.85, 3.2)
+            vinylRolloffShelf.setHighShelf(fs, 13000.0, 0.7071, -2.2)
+        } else {
+            vinylWarmthPeak.setBypass()
+            vinylRolloffShelf.setBypass()
+        }
+
+        return hasActiveEq
+    }
+
+    private inline fun processStereoSamplePair(
+        inL: Double,
+        inR: Double,
+        pureBypass: Boolean,
+        hasActiveEq: Boolean,
+        mbLevel: Float,
+        clearAudio: Boolean,
+        dsee: Boolean,
+        vinyl: Boolean,
+        leftPan: Double,
+        rightPan: Double,
+        phaseSign: Double,
+        outPair: DoubleArray
+    ) {
+        var L = inL
+        var R = inR
+
+        if (!pureBypass) {
+            L = subsonicHp.processL(L)
+            R = subsonicHp.processR(R)
+
+            // 1. 10-Band EQ
+            if (hasActiveEq) {
+                for (i in 0 until 10) {
+                    L = eqBands[i].processL(L)
+                    R = eqBands[i].processR(R)
+                }
+            }
+
+            // 2. Mega Bass
+            if (mbLevel > 0.01f) {
+                L = megaBassSubShelf.processL(L)
+                R = megaBassSubShelf.processR(R)
+                L = megaBassPunchPeak.processL(L)
+                R = megaBassPunchPeak.processR(R)
+                L = megaBassMudCut.processL(L)
+                R = megaBassMudCut.processR(R)
+            }
+
+            // 3. Vinyl Processor
+            if (vinyl) {
+                L = vinylWarmthPeak.processL(L)
+                R = vinylWarmthPeak.processR(R)
+                L = vinylRolloffShelf.processL(L)
+                R = vinylRolloffShelf.processR(R)
+                val dL = L * 1.15
+                val dR = R * 1.15
+                L = tanh(dL) + 0.045 * (dL * dL) * (if (L >= 0.0) 1.0 else -1.0)
+                R = tanh(dR) + 0.045 * (dR * dR) * (if (R >= 0.0) 1.0 else -1.0)
+            }
+
+            // 4. DSEE Harmonic Exciter
+            if (dsee) {
+                val hfL = dseeExtractorHp.processL(L)
+                val hfR = dseeExtractorHp.processR(R)
+                L += tanh(hfL * 2.4) * 0.22
+                R += tanh(hfR * 2.4) * 0.22
+                L = dseeAirShelf.processL(L)
+                R = dseeAirShelf.processR(R)
+            }
+
+            // 5. Clear Audio+
+            if (clearAudio) {
+                L = clearBassFilter.processL(L)
+                R = clearBassFilter.processR(R)
+                L = clearVocalFilter.processL(L)
+                R = clearVocalFilter.processR(R)
+                L = clearAirFilter.processL(L)
+                R = clearAirFilter.processR(R)
+                val mid = (L + R) * 0.5
+                val side = (L - R) * 0.5 * 1.38
+                L = mid * 0.96 + side
+                R = mid * 0.96 - side
+            }
+        }
+
+        L = L * leftPan * phaseSign
+        R = R * rightPan * phaseSign
+
+        // Soft-Knee Limiter bảo vệ chống vỡ tiếng (clipping)
+        if (abs(L) > 0.92) L = (if (L > 0.0) 1.0 else -1.0) * (0.92 + 0.08 * tanh((abs(L) - 0.92) / 0.08))
+        if (abs(R) > 0.92) R = (if (R > 0.0) 1.0 else -1.0) * (0.92 + 0.08 * tanh((abs(R) - 0.92) / 0.08))
+
+        outPair[0] = L
+        outPair[1] = R
     }
 
     override fun queueInput(inputBuffer: ByteBuffer) {
@@ -127,96 +351,119 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
 
         val fs = inputAudioFormat.sampleRate.toDouble().coerceAtLeast(44100.0)
         val ch = inputAudioFormat.channelCount.coerceAtLeast(1)
+        val inEnc = inputAudioFormat.encoding
 
-        val eqLow = (eq10Gains[0] + eq10Gains[1]).toDouble() * 0.5
-        val eqMid = (eq10Gains[4] + eq10Gains[5] + eq10Gains[6]).toDouble() / 3.0
-        val eqHigh = (eq10Gains[8] + eq10Gains[9]).toDouble() * 0.5
-
-        tightBassEq.setPeaking(fs, 60.0, 1.15, (megaBassLevel * 5.5) + (eqLow * 0.6))
-        mudCutEq.setPeaking(fs, 210.0, 1.40, if (clearAudioEnabled) -1.8 else -0.8)
-        sweetVocalEq.setPeaking(fs, 1650.0, 0.80, (if (clearAudioEnabled) 1.8 else 0.5) + (if (vinylEnabled) 0.7 else 0.0) + (eqMid * 0.6))
-        airLayerEq.setPeaking(fs, 11500.0, 0.90, (if (dseeEnabled) 2.4 else 0.4) + (eqHigh * 0.6))
+        val pureBypass = pureDirectBypass
+        val mbLevel = megaBassLevel
+        val clearAudio = clearAudioEnabled
+        val dsee = dseeEnabled
+        val vinyl = vinylEnabled
+        val hasActiveEq = if (!pureBypass) updateFiltersForCurrentBlock(fs) else false
 
         val bal = if (abs(channelBalance) < 0.03f) 0f else channelBalance.coerceIn(-0.5f, 0.5f)
         val leftPan = if (bal > 0f) (1.0 - bal).coerceIn(0.0, 1.0) else 1.0
         val rightPan = if (bal < 0f) (1.0 + bal).coerceIn(0.0, 1.0) else 1.0
-        val phase = if (phaseInvert) -1.0 else 1.0
+        val phaseSign = if (phaseInvert && !pureBypass) -1.0 else 1.0
 
-        val outBuffer = replaceOutputBuffer(remaining).order(ByteOrder.LITTLE_ENDIAN)
-        inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
+        val stereoPair = DoubleArray(2)
 
-        if (inputAudioFormat.encoding == C.ENCODING_PCM_16BIT) {
-            while (inputBuffer.remaining() >= ch * 2) {
-                var L = inputBuffer.short.toDouble() / 32768.0
-                var R = if (ch >= 2) inputBuffer.short.toDouble() / 32768.0 else L
-                for (c in 2 until ch) inputBuffer.short
+        when (inEnc) {
+            C.ENCODING_PCM_16BIT -> {
+                val outBuffer = replaceOutputBuffer(remaining).order(ByteOrder.LITTLE_ENDIAN)
+                inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
+                while (inputBuffer.remaining() >= ch * 2) {
+                    val inL = inputBuffer.short.toDouble() / 32768.0
+                    val inR = if (ch >= 2) inputBuffer.short.toDouble() / 32768.0 else inL
+                    for (c in 2 until ch) inputBuffer.short
 
-                L = subsonicHp.processL(L)
-                R = subsonicHp.processR(R)
-                L = mudCutEq.processL(L)
-                R = mudCutEq.processR(R)
-                L = tightBassEq.processL(L)
-                R = tightBassEq.processR(R)
-                L = sweetVocalEq.processL(L)
-                R = sweetVocalEq.processR(R)
-                L = airLayerEq.processL(L)
-                R = airLayerEq.processR(R)
+                    processStereoSamplePair(
+                        inL, inR, pureBypass, hasActiveEq, mbLevel, clearAudio, dsee, vinyl,
+                        leftPan, rightPan, phaseSign, stereoPair
+                    )
 
-                if (clearAudioEnabled) {
-                    val mid = (L + R) * 0.5
-                    val side = (L - R) * 0.5 * 1.16
-                    L = mid + side
-                    R = mid - side
+                    val sL = (stereoPair[0] * 32767.0).toInt().coerceIn(-32768, 32767).toShort()
+                    val sR = (stereoPair[1] * 32767.0).toInt().coerceIn(-32768, 32767).toShort()
+                    outBuffer.putShort(sL)
+                    if (ch >= 2) outBuffer.putShort(sR)
+                    for (c in 2 until ch) outBuffer.putShort(0)
                 }
-
-                L = L * leftPan * phase * 0.92
-                R = R * rightPan * phase * 0.92
-
-                if (abs(L) > 0.95) L = (if (L > 0) 1.0 else -1.0) * (0.95 + 0.05 * tanh((abs(L) - 0.95) / 0.05))
-                if (abs(R) > 0.95) R = (if (R > 0) 1.0 else -1.0) * (0.95 + 0.05 * tanh((abs(R) - 0.95) / 0.05))
-
-                val sL = (L * 32767.0).toInt().coerceIn(-32768, 32767).toShort()
-                val sR = (R * 32767.0).toInt().coerceIn(-32768, 32767).toShort()
-                outBuffer.putShort(sL)
-                if (ch >= 2) outBuffer.putShort(sR)
-                for (c in 2 until ch) outBuffer.putShort(0)
+                outBuffer.flip()
             }
-        } else {
-            while (inputBuffer.remaining() >= ch * 4) {
-                var L = inputBuffer.float.toDouble()
-                var R = if (ch >= 2) inputBuffer.float.toDouble() else L
-                for (c in 2 until ch) inputBuffer.float
 
-                L = subsonicHp.processL(L)
-                R = subsonicHp.processR(R)
-                L = mudCutEq.processL(L)
-                R = mudCutEq.processR(R)
-                L = tightBassEq.processL(L)
-                R = tightBassEq.processR(R)
-                L = sweetVocalEq.processL(L)
-                R = sweetVocalEq.processR(R)
-                L = airLayerEq.processL(L)
-                R = airLayerEq.processR(R)
+            C.ENCODING_PCM_24BIT -> {
+                val frames = remaining / (ch * 3)
+                val outBuffer = replaceOutputBuffer(frames * ch * 4).order(ByteOrder.LITTLE_ENDIAN)
+                while (inputBuffer.remaining() >= ch * 3) {
+                    val b0L = inputBuffer.get().toInt() and 0xFF
+                    val b1L = inputBuffer.get().toInt() and 0xFF
+                    val b2L = inputBuffer.get().toInt()
+                    val intL = (b2L shl 16) or (b1L shl 8) or b0L
+                    val inL = intL.toDouble() / 8388608.0
 
-                if (clearAudioEnabled) {
-                    val mid = (L + R) * 0.5
-                    val side = (L - R) * 0.5 * 1.16
-                    L = mid + side
-                    R = mid - side
+                    val inR = if (ch >= 2) {
+                        val b0R = inputBuffer.get().toInt() and 0xFF
+                        val b1R = inputBuffer.get().toInt() and 0xFF
+                        val b2R = inputBuffer.get().toInt()
+                        val intR = (b2R shl 16) or (b1R shl 8) or b0R
+                        intR.toDouble() / 8388608.0
+                    } else inL
+
+                    for (c in 2 until ch) {
+                        inputBuffer.get(); inputBuffer.get(); inputBuffer.get()
+                    }
+
+                    processStereoSamplePair(
+                        inL, inR, pureBypass, hasActiveEq, mbLevel, clearAudio, dsee, vinyl,
+                        leftPan, rightPan, phaseSign, stereoPair
+                    )
+
+                    outBuffer.putFloat(stereoPair[0].toFloat())
+                    if (ch >= 2) outBuffer.putFloat(stereoPair[1].toFloat())
+                    for (c in 2 until ch) outBuffer.putFloat(0f)
                 }
+                outBuffer.flip()
+            }
 
-                L = L * leftPan * phase * 0.92
-                R = R * rightPan * phase * 0.92
+            C.ENCODING_PCM_32BIT -> {
+                val outBuffer = replaceOutputBuffer(remaining).order(ByteOrder.LITTLE_ENDIAN)
+                inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
+                while (inputBuffer.remaining() >= ch * 4) {
+                    val inL = inputBuffer.int.toDouble() / 2147483648.0
+                    val inR = if (ch >= 2) inputBuffer.int.toDouble() / 2147483648.0 else inL
+                    for (c in 2 until ch) inputBuffer.int
 
-                if (abs(L) > 0.95) L = (if (L > 0) 1.0 else -1.0) * (0.95 + 0.05 * tanh((abs(L) - 0.95) / 0.05))
-                if (abs(R) > 0.95) R = (if (R > 0) 1.0 else -1.0) * (0.95 + 0.05 * tanh((abs(R) - 0.95) / 0.05))
+                    processStereoSamplePair(
+                        inL, inR, pureBypass, hasActiveEq, mbLevel, clearAudio, dsee, vinyl,
+                        leftPan, rightPan, phaseSign, stereoPair
+                    )
 
-                outBuffer.putFloat(L.toFloat())
-                if (ch >= 2) outBuffer.putFloat(R.toFloat())
-                for (c in 2 until ch) outBuffer.putFloat(0f)
+                    outBuffer.putFloat(stereoPair[0].toFloat())
+                    if (ch >= 2) outBuffer.putFloat(stereoPair[1].toFloat())
+                    for (c in 2 until ch) outBuffer.putFloat(0f)
+                }
+                outBuffer.flip()
+            }
+
+            else -> {
+                val outBuffer = replaceOutputBuffer(remaining).order(ByteOrder.LITTLE_ENDIAN)
+                inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
+                while (inputBuffer.remaining() >= ch * 4) {
+                    val inL = inputBuffer.float.toDouble()
+                    val inR = if (ch >= 2) inputBuffer.float.toDouble() else inL
+                    for (c in 2 until ch) inputBuffer.float
+
+                    processStereoSamplePair(
+                        inL, inR, pureBypass, hasActiveEq, mbLevel, clearAudio, dsee, vinyl,
+                        leftPan, rightPan, phaseSign, stereoPair
+                    )
+
+                    outBuffer.putFloat(stereoPair[0].toFloat())
+                    if (ch >= 2) outBuffer.putFloat(stereoPair[1].toFloat())
+                    for (c in 2 until ch) outBuffer.putFloat(0f)
+                }
+                outBuffer.flip()
             }
         }
-        outBuffer.flip()
     }
 }
 

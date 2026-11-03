@@ -375,7 +375,7 @@ class FiioDirectDsdEngine(
                         outParams[6] = leftPan
                         outParams[7] = rightPan
                         outParams[8] = if (dspProcessor.phaseInvert) -1.0f else 1.0f
-                        for (i in 0 until 9) {
+                        for (i in 0 until 10) {
                             outParams[9 + i] = dspProcessor.eq10Gains[i]
                         }
                         return 0
@@ -407,3 +407,4 @@ class FiioDirectDsdEngine(
         }
     }
 }
+

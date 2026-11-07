@@ -21,6 +21,10 @@ extern "C" {
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
+static const double ISO_EQ_FREQS[10] = {
+    31.25, 62.5, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0
+};
+
 struct BiquadFilter64 {
     double b0 = 1.0, b1 = 0.0, b2 = 0.0;
     double a1 = 0.0, a2 = 0.0;
@@ -36,6 +40,19 @@ struct BiquadFilter64 {
         a1 = 0.0; a2 = 0.0;
     }
 
+    void setLowPass(double fs, double f0, double q) {
+        double w0 = 2.0 * M_PI * std::min(f0, fs * 0.45) / fs;
+        double cosw0 = std::cos(w0);
+        double sinw0 = std::sin(w0);
+        double alpha = sinw0 / (2.0 * q);
+        double a0 = 1.0 + alpha;
+        b0 = ((1.0 - cosw0) * 0.5) / a0;
+        b1 = (1.0 - cosw0) / a0;
+        b2 = ((1.0 - cosw0) * 0.5) / a0;
+        a1 = (-2.0 * cosw0) / a0;
+        a2 = (1.0 - alpha) / a0;
+    }
+
     void setHighPass(double fs, double f0, double q) {
         double w0 = 2.0 * M_PI * f0 / fs;
         double cosw0 = std::cos(w0);
@@ -49,21 +66,8 @@ struct BiquadFilter64 {
         a2 = (1.0 - alpha) / a0;
     }
 
-    void setLowPass(double fs, double f0, double q) {
-        double w0 = 2.0 * M_PI * f0 / fs;
-        double cosw0 = std::cos(w0);
-        double sinw0 = std::sin(w0);
-        double alpha = sinw0 / (2.0 * q);
-        double a0 = 1.0 + alpha;
-        b0 = ((1.0 - cosw0) * 0.5) / a0;
-        b1 = (1.0 - cosw0) / a0;
-        b2 = ((1.0 - cosw0) * 0.5) / a0;
-        a1 = (-2.0 * cosw0) / a0;
-        a2 = (1.0 - alpha) / a0;
-    }
-
     void setPeakingEQ(double fs, double f0, double q, double gainDb) {
-        if (std::abs(gainDb) < 0.02) {
+        if (std::abs(gainDb) < 0.03 || f0 >= fs * 0.47) {
             setBypass();
             return;
         }
@@ -80,6 +84,25 @@ struct BiquadFilter64 {
         a2 = (1.0 - alpha / A) / a0;
     }
 
+    void setHighShelf(double fs, double f0, double q, double gainDb) {
+        if (std::abs(gainDb) < 0.03 || f0 >= fs * 0.47) {
+            setBypass();
+            return;
+        }
+        double A = std::pow(10.0, gainDb / 40.0);
+        double w0 = 2.0 * M_PI * f0 / fs;
+        double cosw0 = std::cos(w0);
+        double sinw0 = std::sin(w0);
+        double alpha = sinw0 / (2.0 * q);
+        double twoSqrtAAlpha = 2.0 * std::sqrt(A) * alpha;
+        double a0 = (A + 1.0) - (A - 1.0) * cosw0 + twoSqrtAAlpha;
+        b0 = (A * ((A + 1.0) + (A - 1.0) * cosw0 + twoSqrtAAlpha)) / a0;
+        b1 = (-2.0 * A * ((A - 1.0) + (A + 1.0) * cosw0)) / a0;
+        b2 = (A * ((A + 1.0) + (A - 1.0) * cosw0 - twoSqrtAAlpha)) / a0;
+        a1 = (2.0 * ((A - 1.0) - (A + 1.0) * cosw0)) / a0;
+        a2 = ((A + 1.0) - (A - 1.0) * cosw0 - twoSqrtAAlpha) / a0;
+    }
+
     inline void processStereo(double& L, double& R) {
         double outL = b0 * L + z1L;
         z1L = b1 * L - a1 * outL + z2L;
@@ -93,51 +116,108 @@ struct BiquadFilter64 {
     }
 };
 
+/**
+ * HỆ THỐNG XỬ LÝ MASTERING 64-BIT THỜI GIAN THỰC:
+ * - 10 Bộ lọc Biquad độc lập cho 10 cần Equalizer (31Hz -> 16kHz)
+ * - 5 Bộ lọc chuyên biệt cho Mega Bass, Clear Audio+, DSEE Ultimate, Vinyl Processor
+ */
 class AudiophileMasteringChain {
 public:
-    BiquadFilter64 mudCutFilter;
-    BiquadFilter64 tightBassFilter;
-    BiquadFilter64 sweetMidFilter;
-    BiquadFilter64 airDetailFilter;
-    BiquadFilter64 ultrasonicCut1;
-    BiquadFilter64 ultrasonicCut2;
+    BiquadFilter64 subsonicHp;
+    BiquadFilter64 ultrasonicLp1;
+    BiquadFilter64 ultrasonicLp2;
+
+    // 10-Band Independent Graphic Equalizer
+    BiquadFilter64 eqBands[10];
+
+    // Dedicated Sound Mode Filters
+    BiquadFilter64 megaBassPunch;   // 55Hz Deep Punch
+    BiquadFilter64 megaBassClean;   // 215Hz Anti-mud cut
+    BiquadFilter64 clearAudioDip;   // 280Hz Boxiness removal
+    BiquadFilter64 clearAudioVocal; // 2400Hz Vocal Presence
+    BiquadFilter64 dseePresence;    // 5500Hz Detail Articulation
+    BiquadFilter64 dseeAirShelf;    // 10500Hz High-Shelf Air
+    BiquadFilter64 vinylWarmBody;   // 145Hz Analog Body
+    BiquadFilter64 vinylSweetMid;   // 850Hz Tube Midrange
 
     double currentFs = 0.0;
+    double autoHeadroomAtten = 1.0;
 
-    void configureIfNeeded(double fs, float megaBassLevel, bool clearAudio, bool dsee, bool vinyl, const float* eq10) {
+    void configure(double fs, float megaBassLevel, bool clearAudio, bool dsee, bool vinyl, const float* eq10) {
         if (std::abs(fs - currentFs) > 1.0) {
             currentFs = fs;
+            subsonicHp.setHighPass(fs, 20.0, 0.7071);
             double lpCut = std::min(32000.0, fs * 0.43);
-            ultrasonicCut1.setLowPass(fs, lpCut, 0.5412);
-            ultrasonicCut2.setLowPass(fs, lpCut, 1.3065);
-            mudCutFilter.reset();
-            tightBassFilter.reset();
-            sweetMidFilter.reset();
-            airDetailFilter.reset();
-            ultrasonicCut1.reset();
-            ultrasonicCut2.reset();
+            ultrasonicLp1.setLowPass(fs, lpCut, 0.5412);
+            ultrasonicLp2.setLowPass(fs, lpCut, 1.3065);
+
+            subsonicHp.reset();
+            ultrasonicLp1.reset();
+            ultrasonicLp2.reset();
+            for (int i = 0; i < 10; ++i) eqBands[i].reset();
+            megaBassPunch.reset();
+            megaBassClean.reset();
+            clearAudioDip.reset();
+            clearAudioVocal.reset();
+            dseePresence.reset();
+            dseeAirShelf.reset();
+            vinylWarmBody.reset();
+            vinylSweetMid.reset();
         }
 
-        double eqLowDb = (eq10[0] + eq10[1] + eq10[2]) / 3.0;
-        double eqMidDb = (eq10[3] + eq10[4] + eq10[5] + eq10[6]) / 4.0;
-        double eqHighDb = (eq10[7] + eq10[8] + eq10[9]) / 3.0;
+        // 1. Cấu hình 10 cần Equalizer độc lập 100% (Mỗi cần 1 tần số chuẩn, đáp ứng 1:1 theo mức dB người dùng kéo)
+        double maxPositiveEqBoost = 0.0;
+        for (int i = 0; i < 10; ++i) {
+            double gDb = static_cast<double>(eq10[i]);
+            eqBands[i].setPeakingEQ(fs, ISO_EQ_FREQS[i], 1.414, gDb);
+            if (gDb > maxPositiveEqBoost) maxPositiveEqBoost = gDb;
+        }
 
-        // 1. Mega Bass: Giảm mạnh từ +5.5dB xuống tối đa +2.4dB (Q=0.85 êm, chắc, không đè mid)
-        // Khi megaBassLevel = 0 và eqLowDb = 0 -> bassDb = 0.0 (Bypass hoàn toàn)
-        double bassDb = (megaBassLevel * 2.4) + (eqLowDb * 0.35);
-        tightBassFilter.setPeakingEQ(fs, 62.0, 0.85, bassDb);
+        // 2. Cấu hình Mega Bass (0.0 -> 1.0 tương ứng 0.0dB -> +6.0dB tại 55Hz kèm khử đục -1.4dB tại 215Hz)
+        double bassBoostDb = static_cast<double>(megaBassLevel) * 6.0;
+        if (bassBoostDb > 0.05) {
+            megaBassPunch.setPeakingEQ(fs, 55.0, 0.90, bassBoostDb);
+            megaBassClean.setPeakingEQ(fs, 215.0, 1.35, -bassBoostDb * 0.22);
+        } else {
+            megaBassPunch.setBypass();
+            megaBassClean.setBypass();
+        }
 
-        // 2. Clear Audio: Chỉ cắt rất nhẹ -0.5dB ở 210Hz khi bật; khi tắt trả về 0.0dB
-        double mudDb = clearAudio ? -0.5 : 0.0;
-        mudCutFilter.setPeakingEQ(fs, 210.0, 1.00, mudDb);
+        // 3. Cấu hình Clear Audio+ (Khử âm mũi 280Hz, đẩy giọng hát rõ nét ở 2.4kHz)
+        if (clearAudio) {
+            clearAudioDip.setPeakingEQ(fs, 280.0, 1.40, -1.8);
+            clearAudioVocal.setPeakingEQ(fs, 2400.0, 0.85, 2.2);
+        } else {
+            clearAudioDip.setBypass();
+            clearAudioVocal.setBypass();
+        }
 
-        // 3. Mid & Vinyl: Clear Audio chỉ nâng nhẹ +0.6dB, Vinyl chỉ tạo độ ấm nhẹ +0.35dB; khi tắt cả hai trả về 0.0dB
-        double midDb = (clearAudio ? 0.6 : 0.0) + (vinyl ? 0.35 : 0.0) + (eqMidDb * 0.35);
-        sweetMidFilter.setPeakingEQ(fs, 1500.0, 0.65, midDb);
+        // 4. Cấu hình DSEE Ultimate (Bổ sung chi tiết nhạc cụ ở 5.5kHz và dải Air long lanh trên 10.5kHz)
+        if (dsee) {
+            dseePresence.setPeakingEQ(fs, 5500.0, 1.00, 1.6);
+            dseeAirShelf.setHighShelf(fs, 10500.0, 0.707, 3.2);
+        } else {
+            dseePresence.setBypass();
+            dseeAirShelf.setBypass();
+        }
 
-        // 4. DSEE: Giảm mạnh độ sáng từ +2.4dB xuống +0.8dB (và trừ nhẹ -0.25dB khi bật Vinyl để âm dịu mượt)
-        double highDb = (dsee ? 0.8 : 0.0) - (vinyl ? 0.25 : 0.0) + (eqHighDb * 0.35);
-        airDetailFilter.setPeakingEQ(fs, 12000.0, 0.70, highDb);
+        // 5. Cấu hình Vinyl Processor (Tạo độ ấm dày ở 145Hz & trung âm ngọt mộc mạc ở 850Hz)
+        if (vinyl) {
+            vinylWarmBody.setPeakingEQ(fs, 145.0, 0.85, 2.0);
+            vinylSweetMid.setPeakingEQ(fs, 850.0, 0.75, 1.4);
+        } else {
+            vinylWarmBody.setBypass();
+            vinylSweetMid.setBypass();
+        }
+
+        // Tính toán Auto-Headroom thông minh để khi kéo EQ cao hoặc bật hiệu ứng không bao giờ bị vỡ tiếng hay gắt
+        double totalEstBoostDb = (maxPositiveEqBoost * 0.65) + (bassBoostDb * 0.55) +
+                                 (clearAudio ? 1.0 : 0.0) + (dsee ? 1.2 : 0.0) + (vinyl ? 1.0 : 0.0);
+        if (totalEstBoostDb > 1.5) {
+            autoHeadroomAtten = std::pow(10.0, -(totalEstBoostDb - 1.5) / 28.0);
+        } else {
+            autoHeadroomAtten = 1.0;
+        }
     }
 
     inline void processSample(
@@ -145,42 +225,70 @@ public:
         double& R,
         bool pureDsd,
         bool clearAudio,
+        bool dsee,
+        bool vinyl,
         double masterVol,
         double leftPan,
         double rightPan,
         double phaseSign
     ) {
-        // Lọc nhiễu siêu âm DSD ngoài ngưỡng nghe (>32kHz)
-        ultrasonicCut1.processStereo(L, R);
-        ultrasonicCut2.processStereo(L, R);
+        subsonicHp.processStereo(L, R);
+        ultrasonicLp1.processStereo(L, R);
+        ultrasonicLp2.processStereo(L, R);
 
         if (!pureDsd) {
-            mudCutFilter.processStereo(L, R);
-            tightBassFilter.processStereo(L, R);
-            sweetMidFilter.processStereo(L, R);
-            airDetailFilter.processStereo(L, R);
+            // Áp dụng bù headroom tự động trước khi qua chuỗi lọc
+            L *= autoHeadroomAtten;
+            R *= autoHeadroomAtten;
 
-            // Clear Audio: Mở rộng không gian rất nhẹ (1.05x thay vì 1.18x) để dễ chịu, không gây gắt
+            // 1. Chạy qua toàn bộ 10 cần Equalizer độc lập
+            for (int i = 0; i < 10; ++i) {
+                eqBands[i].processStereo(L, R);
+            }
+
+            // 2. Chạy qua bộ lọc Mega Bass
+            megaBassClean.processStereo(L, R);
+            megaBassPunch.processStereo(L, R);
+
+            // 3. Chạy qua Clear Audio+ (Lọc tần số + Mở rộng âm trường Holographic Stereo Mid/Side)
             if (clearAudio) {
+                clearAudioDip.processStereo(L, R);
+                clearAudioVocal.processStereo(L, R);
                 double mid = (L + R) * 0.5;
-                double side = (L - R) * 0.5 * 1.05;
+                double side = (L - R) * 0.5 * 1.24; // Mở rộng không gian Stereo 24% rõ rệt
                 L = mid + side;
                 R = mid - side;
             }
+
+            // 4. Chạy qua Vinyl Processor (Warm Analog Tube Harmonics)
+            if (vinyl) {
+                vinylWarmBody.processStereo(L, R);
+                vinylSweetMid.processStereo(L, R);
+                // Hài âm bậc chẵn (Even-order tube warmth) tạo chất âm ấm mộc tự nhiên
+                L = L + 0.045 * (L * L) * (L >= 0.0 ? 1.0 : -1.0);
+                R = R + 0.045 * (R * R) * (R >= 0.0 ? 1.0 : -1.0);
+            }
+
+            // 5. Chạy qua DSEE Ultimate (High-Frequency Harmonic Restoration)
+            if (dsee) {
+                dseePresence.processStereo(L, R);
+                dseeAirShelf.processStereo(L, R);
+            }
         }
 
-        // Hạ hệ số gain DSD từ 1.95 xuống 1.35 để âm thanh thư giãn, không bị "đấm vào tai"
-        double gain = 1.35 * masterVol * phaseSign;
+        // Bù biên độ chuẩn SACD (+4.5dB = 1.68) * Master Volume
+        double gain = 1.68 * masterVol * phaseSign;
         L *= (gain * leftPan);
         R *= (gain * rightPan);
 
-        if (std::abs(L) > 0.96) {
+        // Soft-Knee Mastering Limiter bảo vệ chống clipping tuyệt đối
+        if (std::abs(L) > 0.92) {
             double s = (L > 0.0) ? 1.0 : -1.0;
-            L = s * (0.96 + 0.04 * std::tanh((std::abs(L) - 0.96) / 0.04));
+            L = s * (0.92 + 0.08 * std::tanh((std::abs(L) - 0.92) / 0.08));
         }
-        if (std::abs(R) > 0.96) {
+        if (std::abs(R) > 0.92) {
             double s = (R > 0.0) ? 1.0 : -1.0;
-            R = s * (0.96 + 0.04 * std::tanh((std::abs(R) - 0.96) / 0.04));
+            R = s * (0.92 + 0.08 * std::tanh((std::abs(R) - 0.92) / 0.08));
         }
     }
 };
@@ -333,7 +441,7 @@ Java_com_sony_walkmanpro_FFmpegNativeDsdDecoder_nativeDecodeDsdFile(
                     float phaseSign = dspParams[8];
                     const float* eq10 = &dspParams[9];
 
-                    masteringChain.configureIfNeeded(
+                    masteringChain.configure(
                         static_cast<double>(targetPcmSampleRate),
                         megaBass, clearAudio, dsee, vinyl, eq10
                     );
@@ -353,7 +461,7 @@ Java_com_sony_walkmanpro_FFmpegNativeDsdDecoder_nativeDecodeDsdFile(
                             double R = static_cast<double>(rawSwrOut[i * 2 + 1]);
 
                             masteringChain.processSample(
-                                L, R, pureDsd, clearAudio,
+                                L, R, pureDsd, clearAudio, dsee, vinyl,
                                 static_cast<double>(masterVol),
                                 static_cast<double>(leftPan),
                                 static_cast<double>(rightPan),

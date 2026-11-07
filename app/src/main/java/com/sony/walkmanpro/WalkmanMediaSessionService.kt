@@ -26,15 +26,22 @@ import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.pow
 import kotlin.math.sin
+import kotlin.math.sqrt
 import kotlin.math.tanh
 
 /**
- * 1. BỘ XỬ LÝ DSP TINH TẾ & TỰ NHIÊN (GENTLE MASTERING BIQUAD CASCADE)
- * - Đảm bảo khi tắt hết DSP + EQ = 0 -> Tín hiệu trung tính 100% (Bit-transparent, không chỉnh màu).
- * - Khi bật từng hiệu ứng: Thay đổi nhẹ nhàng, êm dịu, tuyệt đối không gây gắt hay đấm vào tai.
+ * 1. BỘ XỬ LÝ MASTERING DSP 64-BIT DOUBLE PRECISION BIQUAD CASCADE CHO EXOPLAYER (PCM/FLAC/WAV/MP3)
+ * - Tách riêng 10 bộ lọc Biquad độc lập cho 10 tần số Equalizer (31Hz, 62Hz, 125Hz, 250Hz, 500Hz, 1kHz, 2kHz, 4kHz, 8kHz, 16kHz).
+ * - Tái tạo rõ nét 4 chế độ âm thanh: Mega Bass, Clear Audio+, DSEE Ultimate, Vinyl Processor.
  */
 @UnstableApi
 class SonyRealTimeDspProcessor : BaseAudioProcessor() {
+    companion object {
+        private val ISO_FREQS = doubleArrayOf(
+            31.25, 62.5, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0
+        )
+    }
+
     @Volatile var pureDirectBypass: Boolean = false
     @Volatile var megaBassLevel: Float = 0.25f
     @Volatile var vinylEnabled: Boolean = false
@@ -49,6 +56,7 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
         var a1 = 0.0; var a2 = 0.0
         var z1L = 0.0; var z2L = 0.0
         var z1R = 0.0; var z2R = 0.0
+        var active = false
 
         fun reset() {
             z1L = 0.0; z2L = 0.0; z1R = 0.0; z2R = 0.0
@@ -57,10 +65,24 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
         fun setBypass() {
             b0 = 1.0; b1 = 0.0; b2 = 0.0
             a1 = 0.0; a2 = 0.0
+            active = false
+        }
+
+        fun setHighPass(fs: Double, f0: Double, q: Double) {
+            val w0 = 2.0 * PI * f0 / fs
+            val cosw0 = cos(w0)
+            val alpha = sin(w0) / (2.0 * q)
+            val a0 = 1.0 + alpha
+            b0 = ((1.0 + cosw0) * 0.5) / a0
+            b1 = -(1.0 + cosw0) / a0
+            b2 = ((1.0 + cosw0) * 0.5) / a0
+            a1 = (-2.0 * cosw0) / a0
+            a2 = (1.0 - alpha) / a0
+            active = true
         }
 
         fun setPeaking(fs: Double, f0: Double, q: Double, gainDb: Double) {
-            if (abs(gainDb) < 0.02) {
+            if (abs(gainDb) < 0.03 || f0 >= fs * 0.47) {
                 setBypass()
                 return
             }
@@ -74,9 +96,30 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
             b2 = (1.0 - alpha * a) / a0
             a1 = (-2.0 * cosw0) / a0
             a2 = (1.0 - alpha / a) / a0
+            active = true
+        }
+
+        fun setHighShelf(fs: Double, f0: Double, q: Double, gainDb: Double) {
+            if (abs(gainDb) < 0.03 || f0 >= fs * 0.47) {
+                setBypass()
+                return
+            }
+            val a = 10.0.pow(gainDb / 40.0)
+            val w0 = 2.0 * PI * f0 / fs
+            val cosw0 = cos(w0)
+            val alpha = sin(w0) / (2.0 * q)
+            val twoSqrtAAlpha = 2.0 * sqrt(a) * alpha
+            val a0 = (a + 1.0) - (a - 1.0) * cosw0 + twoSqrtAAlpha
+            b0 = (a * ((a + 1.0) + (a - 1.0) * cosw0 + twoSqrtAAlpha)) / a0
+            b1 = (-2.0 * a * ((a - 1.0) + (a + 1.0) * cosw0)) / a0
+            b2 = (a * ((a + 1.0) + (a - 1.0) * cosw0 - twoSqrtAAlpha)) / a0
+            a1 = (2.0 * ((a - 1.0) - (a + 1.0) * cosw0)) / a0
+            a2 = ((a + 1.0) - (a - 1.0) * cosw0 - twoSqrtAAlpha) / a0
+            active = true
         }
 
         fun processL(x: Double): Double {
+            if (!active) return x
             val y = b0 * x + z1L
             z1L = b1 * x - a1 * y + z2L
             z2L = b2 * x - a2 * y
@@ -84,6 +127,7 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
         }
 
         fun processR(x: Double): Double {
+            if (!active) return x
             val y = b0 * x + z1R
             z1R = b1 * x - a1 * y + z2R
             z2R = b2 * x - a2 * y
@@ -91,10 +135,17 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
         }
     }
 
-    private val mudCutEq = StereoBiquad()
-    private val tightBassEq = StereoBiquad()
-    private val sweetVocalEq = StereoBiquad()
-    private val airLayerEq = StereoBiquad()
+    private val subsonicHp = StereoBiquad()
+    private val eqBands = Array(10) { StereoBiquad() }
+
+    private val megaBassPunch = StereoBiquad()
+    private val megaBassClean = StereoBiquad()
+    private val clearAudioDip = StereoBiquad()
+    private val clearAudioVocal = StereoBiquad()
+    private val dseePresence = StereoBiquad()
+    private val dseeAirShelf = StereoBiquad()
+    private val vinylWarmBody = StereoBiquad()
+    private val vinylSweetMid = StereoBiquad()
 
     override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
         if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT &&
@@ -102,14 +153,22 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
         ) {
             return AudioProcessor.AudioFormat.NOT_SET
         }
+        val fs = inputAudioFormat.sampleRate.toDouble().coerceAtLeast(44100.0)
+        subsonicHp.setHighPass(fs, 20.0, 0.7071)
         return inputAudioFormat
     }
 
     override fun onFlush() {
-        mudCutEq.reset()
-        tightBassEq.reset()
-        sweetVocalEq.reset()
-        airLayerEq.reset()
+        subsonicHp.reset()
+        for (b in eqBands) b.reset()
+        megaBassPunch.reset()
+        megaBassClean.reset()
+        clearAudioDip.reset()
+        clearAudioVocal.reset()
+        dseePresence.reset()
+        dseeAirShelf.reset()
+        vinylWarmBody.reset()
+        vinylSweetMid.reset()
     }
 
     override fun queueInput(inputBuffer: ByteBuffer) {
@@ -119,43 +178,70 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
         val fs = inputAudioFormat.sampleRate.toDouble().coerceAtLeast(44100.0)
         val ch = inputAudioFormat.channelCount.coerceAtLeast(1)
 
-        val eqLow = (eq10Gains[0] + eq10Gains[1] + eq10Gains[2]).toDouble() / 3.0
-        val eqMid = (eq10Gains[3] + eq10Gains[4] + eq10Gains[5] + eq10Gains[6]).toDouble() / 4.0
-        val eqHigh = (eq10Gains[7] + eq10Gains[8] + eq10Gains[9]).toDouble() / 3.0
-
         val isAllEqFlat = eq10Gains.all { abs(it) < 0.05f }
         val isAllDspOff = pureDirectBypass || (megaBassLevel < 0.02f && !clearAudioEnabled && !dseeEnabled && !vinylEnabled && isAllEqFlat)
 
-        if (isAllDspOff) {
-            tightBassEq.setBypass()
-            mudCutEq.setBypass()
-            sweetVocalEq.setBypass()
-            airLayerEq.setBypass()
-        } else {
-            // 1. Mega Bass: Giảm mạnh xuống tối đa +2.4dB @ 62Hz (Q=0.85), giữ bass chắc gọn nhưng không đè mid
-            val bassDb = (megaBassLevel * 2.4) + (eqLow * 0.35)
-            tightBassEq.setPeaking(fs, 62.0, 0.85, bassDb)
+        var autoHeadroomAtten = 1.0
 
-            // 2. Clear Audio: Chỉ cắt nhẹ -0.5dB ở 210Hz khi bật; khi tắt bằng 0.0dB
-            val mudDb = if (clearAudioEnabled) -0.5 else 0.0
-            mudCutEq.setPeaking(fs, 210.0, 1.00, mudDb)
+        if (!isAllDspOff) {
+            // 1. Cấu hình 10 cần Equalizer độc lập (Đáp ứng 1:1 chuẩn xác từng tần số)
+            var maxPositiveEq = 0.0
+            for (i in 0 until 10) {
+                val g = eq10Gains[i].toDouble()
+                eqBands[i].setPeaking(fs, ISO_FREQS[i], 1.414, g)
+                if (g > maxPositiveEq) maxPositiveEq = g
+            }
 
-            // 3. Mid & Vinyl: Clear Audio nâng nhẹ +0.6dB, Vinyl làm ấm nhẹ +0.35dB; khi tắt bằng 0.0dB
-            val midDb = (if (clearAudioEnabled) 0.6 else 0.0) + (if (vinylEnabled) 0.35 else 0.0) + (eqMid * 0.35)
-            sweetVocalEq.setPeaking(fs, 1500.0, 0.65, midDb)
+            // 2. Cấu hình Mega Bass (0..1 -> 0..+6.0dB @ 55Hz kèm khử bùn 215Hz)
+            val bassDb = megaBassLevel.toDouble() * 6.0
+            if (bassDb > 0.05) {
+                megaBassPunch.setPeaking(fs, 55.0, 0.90, bassDb)
+                megaBassClean.setPeaking(fs, 215.0, 1.35, -bassDb * 0.22)
+            } else {
+                megaBassPunch.setBypass()
+                megaBassClean.setBypass()
+            }
 
-            // 4. DSEE: Chỉ tăng chi tiết nhẹ +0.8dB ở 12kHz (Vinyl làm dịu -0.25dB); khi tắt bằng 0.0dB
-            val highDb = (if (dseeEnabled) 0.8 else 0.0) - (if (vinylEnabled) 0.25 else 0.0) + (eqHigh * 0.35)
-            airLayerEq.setPeaking(fs, 12000.0, 0.70, highDb)
+            // 3. Cấu hình Clear Audio+ (Khử âm hộp 280Hz, đẩy vocal 2.4kHz rõ nét)
+            if (clearAudioEnabled) {
+                clearAudioDip.setPeaking(fs, 280.0, 1.40, -1.8)
+                clearAudioVocal.setPeaking(fs, 2400.0, 0.85, 2.2)
+            } else {
+                clearAudioDip.setBypass()
+                clearAudioVocal.setBypass()
+            }
+
+            // 4. Cấu hình DSEE Ultimate (Nâng chi tiết 5.5kHz & High-Shelf Air 10.5kHz)
+            if (dseeEnabled) {
+                dseePresence.setPeaking(fs, 5500.0, 1.00, 1.6)
+                dseeAirShelf.setHighShelf(fs, 10500.0, 0.707, 3.2)
+            } else {
+                dseePresence.setBypass()
+                dseeAirShelf.setBypass()
+            }
+
+            // 5. Cấu hình Vinyl Processor (Ấm mộc 145Hz & ngọt trung âm 850Hz)
+            if (vinylEnabled) {
+                vinylWarmBody.setPeaking(fs, 145.0, 0.85, 2.0)
+                vinylSweetMid.setPeaking(fs, 850.0, 0.75, 1.4)
+            } else {
+                vinylWarmBody.setBypass()
+                vinylSweetMid.setBypass()
+            }
+
+            val totalBoostEst = (maxPositiveEq * 0.65) + (bassDb * 0.55) +
+                    (if (clearAudioEnabled) 1.0 else 0.0) +
+                    (if (dseeEnabled) 1.2 else 0.0) +
+                    (if (vinylEnabled) 1.0 else 0.0)
+            if (totalBoostEst > 1.5) {
+                autoHeadroomAtten = 10.0.pow(-(totalBoostEst - 1.5) / 28.0)
+            }
         }
 
         val bal = if (abs(channelBalance) < 0.03f) 0f else channelBalance.coerceIn(-0.5f, 0.5f)
         val leftPan = if (bal > 0f) (1.0 - bal).coerceIn(0.0, 1.0) else 1.0
         val rightPan = if (bal < 0f) (1.0 + bal).coerceIn(0.0, 1.0) else 1.0
         val phase = if (phaseInvert) -1.0 else 1.0
-
-        // Khi có bật boost hiệu ứng, giảm nhẹ 4% pre-gain (0.96) để tránh cạn headroom; khi tắt hết giữ nguyên 1.0
-        val headroomScale = if (isAllDspOff) 1.0 else 0.96
 
         val outBuffer = replaceOutputBuffer(remaining).order(ByteOrder.LITTLE_ENDIAN)
         inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
@@ -166,29 +252,56 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
                 var R = if (ch >= 2) inputBuffer.short.toDouble() / 32768.0 else L
                 for (c in 2 until ch) inputBuffer.short
 
+                L = subsonicHp.processL(L)
+                R = subsonicHp.processR(R)
+
                 if (!isAllDspOff) {
-                    L = mudCutEq.processL(L)
-                    R = mudCutEq.processR(R)
-                    L = tightBassEq.processL(L)
-                    R = tightBassEq.processR(R)
-                    L = sweetVocalEq.processL(L)
-                    R = sweetVocalEq.processR(R)
-                    L = airLayerEq.processL(L)
-                    R = airLayerEq.processR(R)
+                    L *= autoHeadroomAtten
+                    R *= autoHeadroomAtten
+
+                    for (i in 0 until 10) {
+                        L = eqBands[i].processL(L)
+                        R = eqBands[i].processR(R)
+                    }
+
+                    L = megaBassClean.processL(L)
+                    R = megaBassClean.processR(R)
+                    L = megaBassPunch.processL(L)
+                    R = megaBassPunch.processR(R)
 
                     if (clearAudioEnabled) {
+                        L = clearAudioDip.processL(L)
+                        R = clearAudioDip.processR(R)
+                        L = clearAudioVocal.processL(L)
+                        R = clearAudioVocal.processR(R)
                         val mid = (L + R) * 0.5
-                        val side = (L - R) * 0.5 * 1.05
+                        val side = (L - R) * 0.5 * 1.24
                         L = mid + side
                         R = mid - side
                     }
+
+                    if (vinylEnabled) {
+                        L = vinylWarmBody.processL(L)
+                        R = vinylWarmBody.processR(R)
+                        L = vinylSweetMid.processL(L)
+                        R = vinylSweetMid.processR(R)
+                        L += 0.045 * (L * L) * (if (L >= 0.0) 1.0 else -1.0)
+                        R += 0.045 * (R * R) * (if (R >= 0.0) 1.0 else -1.0)
+                    }
+
+                    if (dseeEnabled) {
+                        L = dseePresence.processL(L)
+                        R = dseePresence.processR(R)
+                        L = dseeAirShelf.processL(L)
+                        R = dseeAirShelf.processR(R)
+                    }
                 }
 
-                L = L * leftPan * phase * headroomScale
-                R = R * rightPan * phase * headroomScale
+                L = L * leftPan * phase
+                R = R * rightPan * phase
 
-                if (abs(L) > 0.96) L = (if (L > 0) 1.0 else -1.0) * (0.96 + 0.04 * tanh((abs(L) - 0.96) / 0.04))
-                if (abs(R) > 0.96) R = (if (R > 0) 1.0 else -1.0) * (0.96 + 0.04 * tanh((abs(R) - 0.96) / 0.04))
+                if (abs(L) > 0.92) L = (if (L > 0) 1.0 else -1.0) * (0.92 + 0.08 * tanh((abs(L) - 0.92) / 0.08))
+                if (abs(R) > 0.92) R = (if (R > 0) 1.0 else -1.0) * (0.92 + 0.08 * tanh((abs(R) - 0.92) / 0.08))
 
                 val sL = (L * 32767.0).toInt().coerceIn(-32768, 32767).toShort()
                 val sR = (R * 32767.0).toInt().coerceIn(-32768, 32767).toShort()
@@ -202,29 +315,56 @@ class SonyRealTimeDspProcessor : BaseAudioProcessor() {
                 var R = if (ch >= 2) inputBuffer.float.toDouble() else L
                 for (c in 2 until ch) inputBuffer.float
 
+                L = subsonicHp.processL(L)
+                R = subsonicHp.processR(R)
+
                 if (!isAllDspOff) {
-                    L = mudCutEq.processL(L)
-                    R = mudCutEq.processR(R)
-                    L = tightBassEq.processL(L)
-                    R = tightBassEq.processR(R)
-                    L = sweetVocalEq.processL(L)
-                    R = sweetVocalEq.processR(R)
-                    L = airLayerEq.processL(L)
-                    R = airLayerEq.processR(R)
+                    L *= autoHeadroomAtten
+                    R *= autoHeadroomAtten
+
+                    for (i in 0 until 10) {
+                        L = eqBands[i].processL(L)
+                        R = eqBands[i].processR(R)
+                    }
+
+                    L = megaBassClean.processL(L)
+                    R = megaBassClean.processR(R)
+                    L = megaBassPunch.processL(L)
+                    R = megaBassPunch.processR(R)
 
                     if (clearAudioEnabled) {
+                        L = clearAudioDip.processL(L)
+                        R = clearAudioDip.processR(R)
+                        L = clearAudioVocal.processL(L)
+                        R = clearAudioVocal.processR(R)
                         val mid = (L + R) * 0.5
-                        val side = (L - R) * 0.5 * 1.05
+                        val side = (L - R) * 0.5 * 1.24
                         L = mid + side
                         R = mid - side
                     }
+
+                    if (vinylEnabled) {
+                        L = vinylWarmBody.processL(L)
+                        R = vinylWarmBody.processR(R)
+                        L = vinylSweetMid.processL(L)
+                        R = vinylSweetMid.processR(R)
+                        L += 0.045 * (L * L) * (if (L >= 0.0) 1.0 else -1.0)
+                        R += 0.045 * (R * R) * (if (R >= 0.0) 1.0 else -1.0)
+                    }
+
+                    if (dseeEnabled) {
+                        L = dseePresence.processL(L)
+                        R = dseePresence.processR(R)
+                        L = dseeAirShelf.processL(L)
+                        R = dseeAirShelf.processR(R)
+                    }
                 }
 
-                L = L * leftPan * phase * headroomScale
-                R = R * rightPan * phase * headroomScale
+                L = L * leftPan * phase
+                R = R * rightPan * phase
 
-                if (abs(L) > 0.96) L = (if (L > 0) 1.0 else -1.0) * (0.96 + 0.04 * tanh((abs(L) - 0.96) / 0.04))
-                if (abs(R) > 0.96) R = (if (R > 0) 1.0 else -1.0) * (0.96 + 0.04 * tanh((abs(R) - 0.96) / 0.04))
+                if (abs(L) > 0.92) L = (if (L > 0) 1.0 else -1.0) * (0.92 + 0.08 * tanh((abs(L) - 0.92) / 0.08))
+                if (abs(R) > 0.92) R = (if (R > 0) 1.0 else -1.0) * (0.92 + 0.08 * tanh((abs(R) - 0.92) / 0.08))
 
                 outBuffer.putFloat(L.toFloat())
                 if (ch >= 2) outBuffer.putFloat(R.toFloat())

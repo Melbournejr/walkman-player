@@ -1,411 +1,274 @@
-﻿package com.sony.walkmanpro
+package com.sony.walkmanpro
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioTrack
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
-import android.widget.Toast
-import androidx.media3.common.util.UnstableApi
-import java.io.InputStream
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import kotlin.math.abs
+import android.os.SystemClock
+import com.sony.walkmanpro.audio.dsp.DspSettings
+import com.sony.walkmanpro.audio.dsp.PlaybackDsp
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
-@UnstableApi
-class FiioDirectDsdEngine(
+internal class FiioDirectDsdEngine(
     private val context: Context,
-    private val dspProcessor: SonyRealTimeDspProcessor,
-    private val onTrackEnded: () -> Unit
+    private val settings: () -> DspSettings,
+    private val onFinished: (position: Int, error: String?) -> Unit
 ) {
-    @Volatile var isPlaying: Boolean = false
-        private set
-    @Volatile var currentPositionMs: Int = 0
-        private set
-    @Volatile var durationMs: Int = 180000
-        private set
-    @Volatile var masterVolume: Float = 0.75f
-    @Volatile var pureDsdMode: Boolean = false
+    data class PcmOutput(val decoderRate: Int, val sampleRate: Int, val sourceChannels: Int)
 
-    private var workerThread: Thread? = null
-    @Volatile private var stopRequested: Boolean = false
-    @Volatile private var pauseRequested: Boolean = false
-    @Volatile private var seekTargetMs: Int = -1
+    private val worker = Executors.newSingleThreadExecutor { Thread(it, "Walkman DSD") }
+    private val main = Handler(Looper.getMainLooper())
+    @Volatile private var current: Session? = null
+    @Volatile var volume: Float = 0.75f
+    val isPlaying: Boolean get() = current?.playing == true
+    val positionMs: Int get() = current?.positionMs ?: 0
+    val durationMs: Int get() = current?.durationMs ?: 0
+    val output: PcmOutput? get() = current?.output
+    val routedDevice: AudioDeviceInfo? get() = runCatching { current?.track?.routedDevice }.getOrNull()
 
-    private val mainHandler = Handler(Looper.getMainLooper())
-
-    data class DsdHeaderInfo(
-        val isValid: Boolean,
-        val isDsf: Boolean,
-        val isLsbFirst: Boolean,
-        val isDstCompressed: Boolean,
-        val channels: Int,
-        val dsdSampleRate: Int,
-        val dsfBlockSize: Int,
-        val dataStartOffset: Long,
-        val dataSize: Long
-    )
-
-    fun startDsdPlayback(uri: Uri, startMs: Int = 0) {
+    fun start(uri: Uri, startMs: Int, play: Boolean) {
         stop()
-        stopRequested = false
-        pauseRequested = false
-        isPlaying = true
-        currentPositionMs = startMs.coerceAtLeast(0)
-        seekTargetMs = -1
+        val session = Session(startMs, play)
+        current = session
+        worker.execute { decode(uri, session) }
+    }
 
-        workerThread = Thread {
-            runFFmpegDirectDsdPlayback(uri, startMs)
-        }.apply {
-            name = "WalkmanFFmpegDirectThread"
-            priority = Thread.MAX_PRIORITY
-            start()
+    fun setPlaying(play: Boolean) {
+        current?.let { session ->
+            synchronized(session.monitor) {
+                session.playing = play
+                session.monitor.notifyAll()
+            }
         }
     }
 
-    fun togglePlayPause(): Boolean {
-        if (workerThread == null || !workerThread!!.isAlive) return false
-        pauseRequested = !pauseRequested
-        isPlaying = !pauseRequested
-        return isPlaying
-    }
-
-    fun seekTo(ms: Int) {
-        currentPositionMs = ms.coerceIn(0, durationMs.coerceAtLeast(1))
-        seekTargetMs = currentPositionMs
+    fun seekTo(positionMs: Int) {
+        current?.let { session ->
+            synchronized(session.monitor) {
+                val target = if (session.durationMs > 0) positionMs.coerceIn(0, session.durationMs)
+                    else positionMs.coerceAtLeast(0)
+                session.positionMs = target
+                session.seek.set(target)
+                session.monitor.notifyAll()
+            }
+        }
     }
 
     fun stop() {
-        stopRequested = true
-        pauseRequested = false
-        isPlaying = false
+        val session = current ?: return
+        current = null
+        synchronized(session.monitor) {
+            session.cancelled = true
+            session.monitor.notifyAll()
+        }
+    }
+
+    fun release() {
+        stop()
+        worker.shutdown()
+    }
+
+    private class Session(start: Int, play: Boolean) {
+        val monitor = java.lang.Object()
+        val seek = AtomicInteger(if (start > 0) start else NO_SEEK)
+        @Volatile var cancelled = false
+        @Volatile var playing = play
+        @Volatile var positionMs = start
+        @Volatile var durationMs = 0
+        @Volatile var track: AudioTrack? = null
+        @Volatile var output: PcmOutput? = null
+    }
+
+    private fun decode(uri: Uri, session: Session) {
+        if (session.cancelled) return
+        var problem: String? = null
         try {
-            workerThread?.join(400)
-        } catch (_: Throwable) {}
-        workerThread = null
-    }
-
-    private fun showToastOnMain(msg: String) {
-        mainHandler.post {
-            try {
-                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
-            } catch (_: Throwable) {}
+            check(FFmpegNativeDsdDecoder.isAvailable()) { "FFmpeg JNI chưa được nạp." }
+            val callback = OutputCallback(session)
+            val descriptor = checkNotNull(context.contentResolver.openFileDescriptor(uri, "r")) {
+                "Không mở được tệp DSD."
+            }
+            val result = descriptor.use { FFmpegNativeDsdDecoder.nativeDecodeDsdFile(it.fd, callback) }
+            if (!session.cancelled) {
+                check(result == 0) { "Giải mã hoặc tua DSD thất bại ($result)." }
+            }
+        } catch (e: Exception) {
+            problem = e.localizedMessage ?: "Không thể phát DSD."
+        } finally {
+            val track = session.track
+            session.track = null
+            track?.release()
         }
-    }
-
-    private fun readExact(ins: InputStream, buf: ByteArray, len: Int): Int {
-        var total = 0
-        while (total < len && !stopRequested) {
-            val r = ins.read(buf, total, len - total)
-            if (r <= 0) break
-            total += r
-        }
-        return total
-    }
-
-    private fun skipExact(ins: InputStream, bytesToSkip: Long): Long {
-        var rem = bytesToSkip
-        val scratch = ByteArray(16384)
-        var skippedTotal = 0L
-        while (rem > 0L && !stopRequested) {
-            val step = rem.coerceAtMost(16384L).toInt()
-            val got = readExact(ins, scratch, step)
-            if (got <= 0) break
-            rem -= got
-            skippedTotal += got
-        }
-        return skippedTotal
-    }
-
-    fun parseDsdHeaderAccurate(context: Context, uri: Uri, knownFileBytes: Long): DsdHeaderInfo {
-        var totalBytes = knownFileBytes
-        if (totalBytes <= 0L) {
-            try {
-                context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
-                    if (afd.length > 0) totalBytes = afd.length
-                }
-            } catch (_: Throwable) {}
-        }
-
-        try {
-            context.contentResolver.openInputStream(uri)?.use { ins ->
-                val h16 = ByteArray(16)
-                if (readExact(ins, h16, 16) < 16) {
-                    return DsdHeaderInfo(false, false, false, false, 2, 2822400, 4096, 0L, 0L)
-                }
-
-                val magic = String(h16, 0, 4, Charsets.ISO_8859_1)
-
-                if (magic == "DSD ") {
-                    val rest76 = ByteArray(76)
-                    if (readExact(ins, rest76, 76) < 76) {
-                        return DsdHeaderInfo(false, true, true, false, 2, 2822400, 4096, 0L, 0L)
-                    }
-                    val full = h16 + rest76
-                    val bb = ByteBuffer.wrap(full).order(ByteOrder.LITTLE_ENDIAN)
-
-                    val ch = bb.getInt(48).coerceIn(1, 6)
-                    val rawFs = bb.getInt(52)
-                    val fs = when (rawFs) {
-                        5644800, 11289600, 22579200 -> rawFs
-                        else -> 2822400
-                    }
-                    val bitsPerSample = bb.getInt(56)
-                    val isLsb = (bitsPerSample == 1)
-                    val blk = bb.getInt(64).coerceIn(256, 65536)
-                    val dataChunkSz = bb.getLong(84)
-
-                    val validSize = if (dataChunkSz in 13L..totalBytes) {
-                        dataChunkSz - 12L
-                    } else {
-                        (totalBytes - 92L).coerceAtLeast(4096L)
-                    }
-                    return DsdHeaderInfo(true, true, isLsb, false, ch, fs, blk, 92L, validSize)
-
-                } else if (magic == "FRM8") {
-                    val frm8Size = ByteBuffer.wrap(h16, 4, 8).order(ByteOrder.BIG_ENDIAN).long
-                    if (totalBytes <= 0L && frm8Size > 0L) totalBytes = frm8Size + 12L
-
-                    var ch = 2
-                    var fs = 2822400
-                    var isDst = false
-                    var currentOffset = 16L
-                    val chunkHdr = ByteArray(12)
-
-                    var safetyCount = 0
-                    while (safetyCount < 256 && readExact(ins, chunkHdr, 12) == 12) {
-                        safetyCount++
-                        val chunkId = String(chunkHdr, 0, 4, Charsets.ISO_8859_1)
-                        val chunkSize = ByteBuffer.wrap(chunkHdr, 4, 8).order(ByteOrder.BIG_ENDIAN).long
-                        currentOffset += 12L
-
-                        if (chunkSize < 0L) break
-
-                        when (chunkId) {
-                            "PROP" -> {
-                                if (chunkSize in 4L..262144L) {
-                                    val propData = ByteArray(chunkSize.toInt())
-                                    val got = readExact(ins, propData, propData.size)
-                                    currentOffset += got
-
-                                    var p = 4
-                                    while (p <= got - 12) {
-                                        val subId = String(propData, p, 4, Charsets.ISO_8859_1)
-                                        val subSz = ByteBuffer.wrap(propData, p + 4, 8).order(ByteOrder.BIG_ENDIAN).long.toInt()
-                                        p += 12
-                                        if (subSz < 0 || p + subSz > got) break
-
-                                        when (subId) {
-                                            "FS  " -> {
-                                                if (subSz == 4) {
-                                                    val parsedFs = ByteBuffer.wrap(propData, p, 4).order(ByteOrder.BIG_ENDIAN).int
-                                                    if (parsedFs == 2822400 || parsedFs == 5644800 || parsedFs == 11289600 || parsedFs == 22579200) {
-                                                        fs = parsedFs
-                                                    }
-                                                }
-                                            }
-                                            "CHNL" -> {
-                                                if (subSz >= 2) {
-                                                    val parsedCh = ByteBuffer.wrap(propData, p, 2).order(ByteOrder.BIG_ENDIAN).short.toInt()
-                                                    if (parsedCh in 1..6) ch = parsedCh
-                                                }
-                                            }
-                                            "CMPR" -> {
-                                                if (subSz >= 4) {
-                                                    val cmpr = String(propData, p, 4, Charsets.ISO_8859_1)
-                                                    if (cmpr == "DST ") isDst = true
-                                                }
-                                            }
-                                        }
-                                        val padSub = if (subSz % 2 != 0) subSz + 1 else subSz
-                                        p += padSub
-                                    }
-                                    if (chunkSize % 2L != 0L) {
-                                        skipExact(ins, 1L)
-                                        currentOffset += 1L
-                                    }
-                                } else {
-                                    val pad = if (chunkSize % 2L != 0L) chunkSize + 1L else chunkSize
-                                    currentOffset += skipExact(ins, pad)
-                                }
-                            }
-                            "DSD " -> {
-                                val remainingFile = if (totalBytes > currentOffset) (totalBytes - currentOffset) else chunkSize
-                                val validDataSize = if (chunkSize in 1024L..remainingFile) chunkSize else remainingFile.coerceAtLeast(4096L)
-                                return DsdHeaderInfo(true, false, false, isDst, ch, fs, 4096, currentOffset, validDataSize)
-                            }
-                            "DST " -> {
-                                return DsdHeaderInfo(true, false, false, true, ch, fs, 4096, currentOffset, chunkSize.coerceAtLeast(0L))
-                            }
-                            else -> {
-                                val pad = if (chunkSize % 2L != 0L) chunkSize + 1L else chunkSize
-                                currentOffset += skipExact(ins, pad)
-                            }
-                        }
-                    }
+        main.post {
+            if (current === session) {
+                val seek = session.seek.get()
+                if (problem == null && seek != NO_SEEK) start(uri, seek, session.playing)
+                else {
+                    current = null
+                    onFinished(session.positionMs, problem)
                 }
             }
-        } catch (_: Throwable) {}
-        return DsdHeaderInfo(false, false, false, false, 2, 2822400, 4096, 0L, 0L)
+        }
     }
 
-    private fun createHighResFloatAudioTrack(dsdFs: Int): Pair<AudioTrack, Int> {
-        val preferredRate = if (dsdFs >= 5644800) 176400 else 88200
-        for (rate in listOf(preferredRate, 176400, 88200).distinct()) {
-            try {
-                val minBuf = AudioTrack.getMinBufferSize(
-                    rate,
-                    AudioFormat.CHANNEL_OUT_STEREO,
-                    AudioFormat.ENCODING_PCM_FLOAT
-                )
-                if (minBuf > 0) {
-                    val track = AudioTrack.Builder()
-                        .setAudioAttributes(
-                            AudioAttributes.Builder()
-                                .setUsage(AudioAttributes.USAGE_MEDIA)
-                                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                                .build()
-                        )
-                        .setAudioFormat(
-                            AudioFormat.Builder()
-                                .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
-                                .setSampleRate(rate)
-                                .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
-                                .build()
-                        )
-                        .setBufferSizeInBytes((minBuf * 4).coerceAtLeast(65536))
+    private inner class OutputCallback(private val session: Session) : NativePcmCallback {
+        private lateinit var dsp: PlaybackDsp
+        private var rate = 0
+        private var channels = 0
+        private var anchorMs = 0L
+        private var written = 0L
+        private var baseHead = 0L
+        private var appliedVolume = -1f
+        private var anchored = false
+
+        override fun isCancelled() = session.cancelled
+
+        override fun onNativeFormat(decoderRate: Int, sourceChannels: Int, durationMs: Long): Int {
+            if (session.cancelled) return CANCELLED
+            channels = sourceChannels.coerceAtMost(2)
+            val mask = if (channels == 1) AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO
+            val family = if (decoderRate % 44_100 == 0) 44_100 else 48_000
+            val preferred = if (decoderRate >= family * 16) family * 4 else family * 2
+            for (candidate in listOf(preferred, family * 2, family, 48_000, 44_100).distinct()) {
+                val minimum = AudioTrack.getMinBufferSize(candidate, mask, AudioFormat.ENCODING_PCM_FLOAT)
+                if (minimum <= 0) continue
+                val track = runCatching {
+                    AudioTrack.Builder()
+                        .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
+                        .setAudioFormat(AudioFormat.Builder().setSampleRate(candidate).setChannelMask(mask)
+                            .setEncoding(AudioFormat.ENCODING_PCM_FLOAT).build())
+                        .setBufferSizeInBytes(maxOf(minimum * 2, candidate * channels * 4 / 12))
                         .setTransferMode(AudioTrack.MODE_STREAM)
                         .build()
-
-                    if (track.state == AudioTrack.STATE_INITIALIZED) {
-                        return Pair(track, rate)
-                    } else {
-                        track.release()
-                    }
+                }.getOrNull() ?: continue
+                if (track.state != AudioTrack.STATE_INITIALIZED) {
+                    track.release()
+                    continue
                 }
-            } catch (_: Throwable) {}
+                session.track = track
+                rate = track.sampleRate
+                dsp = PlaybackDsp(rate, channels)
+                session.durationMs = durationMs.coerceIn(0, Int.MAX_VALUE.toLong()).toInt()
+                session.output = PcmOutput(decoderRate, rate, sourceChannels)
+                return rate
+            }
+            error("Thiết bị không mở được AudioTrack PCM float.")
         }
 
-        val fallback = AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                    .build()
-            )
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
-                    .setSampleRate(88200)
-                    .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
-                    .build()
-            )
-            .setBufferSizeInBytes(65536)
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .build()
-        return Pair(fallback, 88200)
+        override fun getPlaybackCommand(): Int {
+            val track = checkNotNull(session.track)
+            val state = awaitPlayback(track)
+            if (state == CANCELLED) return CANCELLED
+            val target = session.seek.getAndSet(NO_SEEK)
+            if (target != NO_SEEK) {
+                track.pause()
+                track.flush()
+                written = 0
+                anchored = false
+                dsp.reset()
+            }
+            return target
+        }
+
+        override fun onNativePcmChunk(pcmBuffer: FloatArray, floatSampleCount: Int, startPositionMs: Long): Int {
+            val track = checkNotNull(session.track)
+            if (!anchored) {
+                anchorMs = startPositionMs
+                baseHead = head(track)
+                anchored = true
+            }
+            dsp.processInterleaved(pcmBuffer, floatSampleCount, settings())
+            var offset = 0
+            var deadline = SystemClock.elapsedRealtime() + 2_000
+            while (offset < floatSampleCount) {
+                val start = SystemClock.elapsedRealtime()
+                val state = awaitPlayback(track)
+                deadline += SystemClock.elapsedRealtime() - start
+                if (state != 0) return state
+                if (volume != appliedVolume) {
+                    appliedVolume = volume
+                    track.setVolume(appliedVolume)
+                }
+                val count = track.write(pcmBuffer, offset, floatSampleCount - offset, AudioTrack.WRITE_NON_BLOCKING)
+                check(count >= 0 && count % channels == 0) { "AudioTrack lỗi ($count)." }
+                offset += count
+                written += count / channels
+                updatePosition(track)
+                if (count > 0) deadline = SystemClock.elapsedRealtime() + 2_000
+                else {
+                    check(SystemClock.elapsedRealtime() < deadline) { "AudioTrack không nhận dữ liệu." }
+                    waitForChange(8)
+                }
+            }
+            return 0
+        }
+
+        override fun onNativeEnd(): Int {
+            val track = checkNotNull(session.track)
+            var deadline = SystemClock.elapsedRealtime() + 2_000
+            var previousHead = head(track)
+            while (played(track) < written && !session.cancelled) {
+                val start = SystemClock.elapsedRealtime()
+                val state = awaitPlayback(track)
+                deadline += SystemClock.elapsedRealtime() - start
+                if (state != 0) return state
+                updatePosition(track)
+                val nextHead = head(track)
+                if (previousHead != nextHead) {
+                    previousHead = nextHead
+                    deadline = SystemClock.elapsedRealtime() + 2_000
+                }
+                check(SystemClock.elapsedRealtime() < deadline) { "AudioTrack ngừng nhận dữ liệu." }
+                waitForChange(12)
+            }
+            updatePosition(track)
+            return when {
+                session.cancelled -> CANCELLED
+                session.seek.get() != NO_SEEK -> SEEK_PENDING
+                else -> 0
+            }
+        }
+
+        private fun awaitPlayback(track: AudioTrack): Int {
+            synchronized(session.monitor) {
+                while (!session.cancelled) {
+                    if (session.seek.get() != NO_SEEK) return SEEK_PENDING
+                    if (session.playing) {
+                        if (track.playState != AudioTrack.PLAYSTATE_PLAYING) track.play()
+                        return 0
+                    }
+                    if (track.playState == AudioTrack.PLAYSTATE_PLAYING) track.pause()
+                    session.monitor.wait()
+                }
+            }
+            return CANCELLED
+        }
+
+        private fun waitForChange(ms: Long) {
+            synchronized(session.monitor) {
+                if (!session.cancelled && session.seek.get() == NO_SEEK) session.monitor.wait(ms)
+            }
+        }
+
+        private fun head(track: AudioTrack) = track.playbackHeadPosition.toLong() and 0xffffffffL
+        private fun played(track: AudioTrack) = ((head(track) - baseHead) and 0xffffffffL).coerceAtMost(written)
+
+        private fun updatePosition(track: AudioTrack) {
+            if (session.seek.get() != NO_SEEK) return
+            val limit = session.durationMs.takeIf { it > 0 } ?: Int.MAX_VALUE
+            session.positionMs = (anchorMs + played(track) * 1000 / rate).coerceIn(0, limit.toLong()).toInt()
+        }
     }
 
-    private fun runFFmpegDirectDsdPlayback(uri: Uri, initialStartMs: Int) {
-        var audioTrack: AudioTrack? = null
-        try {
-            var totalFileBytes = 0L
-            try {
-                context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
-                    if (afd.length > 0) totalFileBytes = afd.length
-                }
-            } catch (_: Throwable) {}
-
-            val info = parseDsdHeaderAccurate(context, uri, totalFileBytes)
-            val channels = info.channels.coerceAtLeast(1)
-            val dsdFs = info.dsdSampleRate.coerceAtLeast(2822400)
-            val bytesPerSec = ((dsdFs / 8) * channels).toLong().coerceAtLeast(1L)
-            if (info.dataSize > 0L) {
-                durationMs = ((info.dataSize * 1000L) / bytesPerSec).toInt().coerceAtLeast(1000)
-            }
-
-            if (!FFmpegNativeDsdDecoder.isAvailable()) {
-                showToastOnMain("Lỗi: Thư viện C++ FFmpeg chưa được nạp!")
-                isPlaying = false
-                return
-            }
-
-            val (track, targetPcmRate) = createHighResFloatAudioTrack(dsdFs)
-            audioTrack = track
-            audioTrack.play()
-
-            context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
-                val callback = object : NativePcmCallback {
-                    override fun onNativePcmChunk(
-                        pcmBuffer: FloatArray,
-                        floatSampleCount: Int,
-                        currentPositionMs: Long
-                    ): Int {
-                        while (pauseRequested && !stopRequested) {
-                            try { Thread.sleep(30) } catch (_: Throwable) {}
-                        }
-                        if (stopRequested) return -1
-
-                        audioTrack.write(pcmBuffer, 0, floatSampleCount, AudioTrack.WRITE_BLOCKING)
-                        this@FiioDirectDsdEngine.currentPositionMs = currentPositionMs.toInt().coerceAtMost(durationMs)
-                        return 0
-                    }
-
-                    override fun getRealtimeDspParams(outParams: FloatArray): Int {
-                        if (stopRequested) return -1
-                        val pendingSeek = seekTargetMs
-                        if (pendingSeek >= 0) {
-                            seekTargetMs = -1
-                            return pendingSeek.coerceAtLeast(1)
-                        }
-
-                        val rawBal = dspProcessor.channelBalance
-                        val bal = if (abs(rawBal) < 0.03f) 0f else rawBal.coerceIn(-0.5f, 0.5f)
-                        val leftPan = if (bal > 0f) (1f - bal).coerceIn(0f, 1f) else 1f
-                        val rightPan = if (bal < 0f) (1f + bal).coerceIn(0f, 1f) else 1f
-
-                        outParams[0] = masterVolume
-                        outParams[1] = if (pureDsdMode) 1.0f else 0.0f
-                        outParams[2] = dspProcessor.megaBassLevel
-                        outParams[3] = if (dspProcessor.clearAudioEnabled) 1.0f else 0.0f
-                        outParams[4] = if (dspProcessor.dseeEnabled) 1.0f else 0.0f
-                        outParams[5] = if (dspProcessor.vinylEnabled) 1.0f else 0.0f
-                        outParams[6] = leftPan
-                        outParams[7] = rightPan
-                        outParams[8] = if (dspProcessor.phaseInvert) -1.0f else 1.0f
-                        for (i in 0 until 10) {
-                            outParams[9 + i] = dspProcessor.eq10Gains[i]
-                        }
-                        return 0
-                    }
-                }
-
-                val decodeStatus = FFmpegNativeDsdDecoder.nativeDecodeDsdFile(
-                    pfd.fd,
-                    initialStartMs,
-                    targetPcmRate,
-                    callback
-                )
-
-                if (decodeStatus == 0 && !stopRequested) {
-                    isPlaying = false
-                    mainHandler.post { onTrackEnded() }
-                }
-            }
-        } catch (t: Throwable) {
-            if (!stopRequested) {
-                showToastOnMain("Lỗi giải mã FFmpeg DSD: ${t.localizedMessage}")
-            }
-            isPlaying = false
-        } finally {
-            try {
-                audioTrack?.stop()
-                audioTrack?.release()
-            } catch (_: Throwable) {}
-        }
+    private companion object {
+        const val CANCELLED = -1
+        const val NO_SEEK = -2
+        const val SEEK_PENDING = 1
     }
 }
-
-

@@ -1,502 +1,281 @@
-﻿#include <jni.h>
-#include <android/log.h>
-#include <cstdio>
-#include <cstdlib>
-#include <cmath>
-#include <cstring>
+#include <jni.h>
 #include <algorithm>
-#include <atomic>
+#include <array>
+#include <cstring>
+#include <cerrno>
+#include <poll.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 extern "C" {
-#include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
-#include <libswresample/swresample.h>
-#include <libavutil/opt.h>
-#include <libavutil/channel_layout.h>
-#include <libavutil/samplefmt.h>
+#include <libavformat/avformat.h>
 #include <libavutil/mathematics.h>
+#include <libavutil/intreadwrite.h>
+#include <libswresample/swresample.h>
 }
 
-#define LOG_TAG "WalkmanFFmpegJNI"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+namespace {
+constexpr int kCancelled = -1;
+constexpr int kNoSeek = -2;
+constexpr int kFrames = 2048;
+constexpr AVRational kMilliseconds{1, 1000};
 
-static const double ISO_EQ_FREQS[10] = {
-    31.25, 62.5, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0
-};
+struct Decoder {
+    AVIOContext* io = nullptr;
+    AVFormatContext* format = nullptr;
+    AVCodecContext* codec = nullptr;
+    SwrContext* resampler = nullptr;
+    AVPacket* packet = nullptr;
+    AVFrame* frame = nullptr;
 
-struct BiquadFilter64 {
-    double b0 = 1.0, b1 = 0.0, b2 = 0.0;
-    double a1 = 0.0, a2 = 0.0;
-    double z1L = 0.0, z2L = 0.0;
-    double z1R = 0.0, z2R = 0.0;
-
-    void reset() {
-        z1L = z2L = z1R = z2R = 0.0;
-    }
-
-    void setBypass() {
-        b0 = 1.0; b1 = 0.0; b2 = 0.0;
-        a1 = 0.0; a2 = 0.0;
-    }
-
-    void setLowPass(double fs, double f0, double q) {
-        double w0 = 2.0 * M_PI * std::min(f0, fs * 0.45) / fs;
-        double cosw0 = std::cos(w0);
-        double sinw0 = std::sin(w0);
-        double alpha = sinw0 / (2.0 * q);
-        double a0 = 1.0 + alpha;
-        b0 = ((1.0 - cosw0) * 0.5) / a0;
-        b1 = (1.0 - cosw0) / a0;
-        b2 = ((1.0 - cosw0) * 0.5) / a0;
-        a1 = (-2.0 * cosw0) / a0;
-        a2 = (1.0 - alpha) / a0;
-    }
-
-    void setHighPass(double fs, double f0, double q) {
-        double w0 = 2.0 * M_PI * f0 / fs;
-        double cosw0 = std::cos(w0);
-        double sinw0 = std::sin(w0);
-        double alpha = sinw0 / (2.0 * q);
-        double a0 = 1.0 + alpha;
-        b0 = ((1.0 + cosw0) * 0.5) / a0;
-        b1 = -(1.0 + cosw0) / a0;
-        b2 = ((1.0 + cosw0) * 0.5) / a0;
-        a1 = (-2.0 * cosw0) / a0;
-        a2 = (1.0 - alpha) / a0;
-    }
-
-    void setPeakingEQ(double fs, double f0, double q, double gainDb) {
-        if (std::abs(gainDb) < 0.03 || f0 >= fs * 0.47) {
-            setBypass();
-            return;
-        }
-        double A = std::pow(10.0, gainDb / 40.0);
-        double w0 = 2.0 * M_PI * f0 / fs;
-        double cosw0 = std::cos(w0);
-        double sinw0 = std::sin(w0);
-        double alpha = sinw0 / (2.0 * q);
-        double a0 = 1.0 + alpha / A;
-        b0 = (1.0 + alpha * A) / a0;
-        b1 = (-2.0 * cosw0) / a0;
-        b2 = (1.0 - alpha * A) / a0;
-        a1 = (-2.0 * cosw0) / a0;
-        a2 = (1.0 - alpha / A) / a0;
-    }
-
-    void setHighShelf(double fs, double f0, double q, double gainDb) {
-        if (std::abs(gainDb) < 0.03 || f0 >= fs * 0.47) {
-            setBypass();
-            return;
-        }
-        double A = std::pow(10.0, gainDb / 40.0);
-        double w0 = 2.0 * M_PI * f0 / fs;
-        double cosw0 = std::cos(w0);
-        double sinw0 = std::sin(w0);
-        double alpha = sinw0 / (2.0 * q);
-        double twoSqrtAAlpha = 2.0 * std::sqrt(A) * alpha;
-        double a0 = (A + 1.0) - (A - 1.0) * cosw0 + twoSqrtAAlpha;
-        b0 = (A * ((A + 1.0) + (A - 1.0) * cosw0 + twoSqrtAAlpha)) / a0;
-        b1 = (-2.0 * A * ((A - 1.0) + (A + 1.0) * cosw0)) / a0;
-        b2 = (A * ((A + 1.0) + (A - 1.0) * cosw0 - twoSqrtAAlpha)) / a0;
-        a1 = (2.0 * ((A - 1.0) - (A + 1.0) * cosw0)) / a0;
-        a2 = ((A + 1.0) - (A - 1.0) * cosw0 - twoSqrtAAlpha) / a0;
-    }
-
-    inline void processStereo(double& L, double& R) {
-        double outL = b0 * L + z1L;
-        z1L = b1 * L - a1 * outL + z2L;
-        z2L = b2 * L - a2 * outL;
-        L = outL;
-
-        double outR = b0 * R + z1R;
-        z1R = b1 * R - a1 * outR + z2R;
-        z2R = b2 * R - a2 * outR;
-        R = outR;
+    ~Decoder() {
+        av_frame_free(&frame);
+        av_packet_free(&packet);
+        swr_free(&resampler);
+        avcodec_free_context(&codec);
+        avformat_close_input(&format);
+        if (io) av_freep(&io->buffer);
+        avio_context_free(&io);
     }
 };
 
-/**
- * HỆ THỐNG XỬ LÝ MASTERING 64-BIT THỜI GIAN THỰC:
- * - 10 Bộ lọc Biquad độc lập cho 10 cần Equalizer (31Hz -> 16kHz)
- * - 5 Bộ lọc chuyên biệt cho Mega Bass, Clear Audio+, DSEE Ultimate, Vinyl Processor
- */
-class AudiophileMasteringChain {
-public:
-    BiquadFilter64 subsonicHp;
-    BiquadFilter64 ultrasonicLp1;
-    BiquadFilter64 ultrasonicLp2;
+struct Input {
+    int fd;
+    JNIEnv* env;
+    jobject callback;
+    jmethodID cancelled;
+    bool seekable;
+    std::array<uint8_t, 92> prefix{};
+    size_t prefixSize = 0;
 
-    // 10-Band Independent Graphic Equalizer
-    BiquadFilter64 eqBands[10];
-
-    // Dedicated Sound Mode Filters
-    BiquadFilter64 megaBassPunch;   // 55Hz Deep Punch
-    BiquadFilter64 megaBassClean;   // 215Hz Anti-mud cut
-    BiquadFilter64 clearAudioDip;   // 280Hz Boxiness removal
-    BiquadFilter64 clearAudioVocal; // 2400Hz Vocal Presence
-    BiquadFilter64 dseePresence;    // 5500Hz Detail Articulation
-    BiquadFilter64 dseeAirShelf;    // 10500Hz High-Shelf Air
-    BiquadFilter64 vinylWarmBody;   // 145Hz Analog Body
-    BiquadFilter64 vinylSweetMid;   // 850Hz Tube Midrange
-
-    double currentFs = 0.0;
-    double autoHeadroomAtten = 1.0;
-
-    void configure(double fs, float megaBassLevel, bool clearAudio, bool dsee, bool vinyl, const float* eq10) {
-        if (std::abs(fs - currentFs) > 1.0) {
-            currentFs = fs;
-            subsonicHp.setHighPass(fs, 20.0, 0.7071);
-            double lpCut = std::min(32000.0, fs * 0.43);
-            ultrasonicLp1.setLowPass(fs, lpCut, 0.5412);
-            ultrasonicLp2.setLowPass(fs, lpCut, 1.3065);
-
-            subsonicHp.reset();
-            ultrasonicLp1.reset();
-            ultrasonicLp2.reset();
-            for (int i = 0; i < 10; ++i) eqBands[i].reset();
-            megaBassPunch.reset();
-            megaBassClean.reset();
-            clearAudioDip.reset();
-            clearAudioVocal.reset();
-            dseePresence.reset();
-            dseeAirShelf.reset();
-            vinylWarmBody.reset();
-            vinylSweetMid.reset();
-        }
-
-        // 1. Cấu hình 10 cần Equalizer độc lập 100% (Mỗi cần 1 tần số chuẩn, đáp ứng 1:1 theo mức dB người dùng kéo)
-        double maxPositiveEqBoost = 0.0;
-        for (int i = 0; i < 10; ++i) {
-            double gDb = static_cast<double>(eq10[i]);
-            eqBands[i].setPeakingEQ(fs, ISO_EQ_FREQS[i], 1.414, gDb);
-            if (gDb > maxPositiveEqBoost) maxPositiveEqBoost = gDb;
-        }
-
-        // 2. Cấu hình Mega Bass (0.0 -> 1.0 tương ứng 0.0dB -> +6.0dB tại 55Hz kèm khử đục -1.4dB tại 215Hz)
-        double bassBoostDb = static_cast<double>(megaBassLevel) * 6.0;
-        if (bassBoostDb > 0.05) {
-            megaBassPunch.setPeakingEQ(fs, 55.0, 0.90, bassBoostDb);
-            megaBassClean.setPeakingEQ(fs, 215.0, 1.35, -bassBoostDb * 0.22);
-        } else {
-            megaBassPunch.setBypass();
-            megaBassClean.setBypass();
-        }
-
-        // 3. Cấu hình Clear Audio+ (Khử âm mũi 280Hz, đẩy giọng hát rõ nét ở 2.4kHz)
-        if (clearAudio) {
-            clearAudioDip.setPeakingEQ(fs, 280.0, 1.40, -1.8);
-            clearAudioVocal.setPeakingEQ(fs, 2400.0, 0.85, 2.2);
-        } else {
-            clearAudioDip.setBypass();
-            clearAudioVocal.setBypass();
-        }
-
-        // 4. Cấu hình DSEE Ultimate (Bổ sung chi tiết nhạc cụ ở 5.5kHz và dải Air long lanh trên 10.5kHz)
-        if (dsee) {
-            dseePresence.setPeakingEQ(fs, 5500.0, 1.00, 1.6);
-            dseeAirShelf.setHighShelf(fs, 10500.0, 0.707, 3.2);
-        } else {
-            dseePresence.setBypass();
-            dseeAirShelf.setBypass();
-        }
-
-        // 5. Cấu hình Vinyl Processor (Tạo độ ấm dày ở 145Hz & trung âm ngọt mộc mạc ở 850Hz)
-        if (vinyl) {
-            vinylWarmBody.setPeakingEQ(fs, 145.0, 0.85, 2.0);
-            vinylSweetMid.setPeakingEQ(fs, 850.0, 0.75, 1.4);
-        } else {
-            vinylWarmBody.setBypass();
-            vinylSweetMid.setBypass();
-        }
-
-        // Tính toán Auto-Headroom thông minh để khi kéo EQ cao hoặc bật hiệu ứng không bao giờ bị vỡ tiếng hay gắt
-        double totalEstBoostDb = (maxPositiveEqBoost * 0.65) + (bassBoostDb * 0.55) +
-                                 (clearAudio ? 1.0 : 0.0) + (dsee ? 1.2 : 0.0) + (vinyl ? 1.0 : 0.0);
-        if (totalEstBoostDb > 1.5) {
-            autoHeadroomAtten = std::pow(10.0, -(totalEstBoostDb - 1.5) / 28.0);
-        } else {
-            autoHeadroomAtten = 1.0;
-        }
+    int64_t dsfDuration() const {
+        const uint8_t* data = prefix.data();
+        if (prefixSize != prefix.size() || memcmp(data, "DSD ", 4) != 0 ||
+            AV_RL64(data + 4) != 28 || memcmp(data + 28, "fmt ", 4) != 0 ||
+            AV_RL64(data + 32) != 52 || memcmp(data + 80, "data", 4) != 0) return 0;
+        const uint32_t channels = AV_RL32(data + 52);
+        const uint32_t frequency = AV_RL32(data + 56);
+        const uint64_t samples = AV_RL64(data + 64);
+        const uint64_t size = AV_RL64(data + 84);
+        if (channels == 0 || frequency == 0 || samples == 0 || samples > INT64_MAX || size <= 12 ||
+            (samples - 1) / 8 + 1 > (size - 12) / channels) return 0;
+        return av_rescale(samples, 1000, frequency);
     }
 
-    inline void processSample(
-        double& L,
-        double& R,
-        bool pureDsd,
-        bool clearAudio,
-        bool dsee,
-        bool vinyl,
-        double masterVol,
-        double leftPan,
-        double rightPan,
-        double phaseSign
-    ) {
-        subsonicHp.processStereo(L, R);
-        ultrasonicLp1.processStereo(L, R);
-        ultrasonicLp2.processStereo(L, R);
-
-        if (!pureDsd) {
-            // Áp dụng bù headroom tự động trước khi qua chuỗi lọc
-            L *= autoHeadroomAtten;
-            R *= autoHeadroomAtten;
-
-            // 1. Chạy qua toàn bộ 10 cần Equalizer độc lập
-            for (int i = 0; i < 10; ++i) {
-                eqBands[i].processStereo(L, R);
-            }
-
-            // 2. Chạy qua bộ lọc Mega Bass
-            megaBassClean.processStereo(L, R);
-            megaBassPunch.processStereo(L, R);
-
-            // 3. Chạy qua Clear Audio+ (Lọc tần số + Mở rộng âm trường Holographic Stereo Mid/Side)
-            if (clearAudio) {
-                clearAudioDip.processStereo(L, R);
-                clearAudioVocal.processStereo(L, R);
-                double mid = (L + R) * 0.5;
-                double side = (L - R) * 0.5 * 1.24; // Mở rộng không gian Stereo 24% rõ rệt
-                L = mid + side;
-                R = mid - side;
-            }
-
-            // 4. Chạy qua Vinyl Processor (Warm Analog Tube Harmonics)
-            if (vinyl) {
-                vinylWarmBody.processStereo(L, R);
-                vinylSweetMid.processStereo(L, R);
-                // Hài âm bậc chẵn (Even-order tube warmth) tạo chất âm ấm mộc tự nhiên
-                L = L + 0.045 * (L * L) * (L >= 0.0 ? 1.0 : -1.0);
-                R = R + 0.045 * (R * R) * (R >= 0.0 ? 1.0 : -1.0);
-            }
-
-            // 5. Chạy qua DSEE Ultimate (High-Frequency Harmonic Restoration)
-            if (dsee) {
-                dseePresence.processStereo(L, R);
-                dseeAirShelf.processStereo(L, R);
-            }
-        }
-
-        // Bù biên độ chuẩn SACD (+4.5dB = 1.68) * Master Volume
-        double gain = 1.68 * masterVol * phaseSign;
-        L *= (gain * leftPan);
-        R *= (gain * rightPan);
-
-        // Soft-Knee Mastering Limiter bảo vệ chống clipping tuyệt đối
-        if (std::abs(L) > 0.92) {
-            double s = (L > 0.0) ? 1.0 : -1.0;
-            L = s * (0.92 + 0.08 * std::tanh((std::abs(L) - 0.92) / 0.08));
-        }
-        if (std::abs(R) > 0.92) {
-            double s = (R > 0.0) ? 1.0 : -1.0;
-            R = s * (0.92 + 0.08 * std::tanh((std::abs(R) - 0.92) / 0.08));
-        }
+    bool isCancelled() const {
+        return env->ExceptionCheck() || env->CallBooleanMethod(callback, cancelled) ||
+               env->ExceptionCheck();
     }
 };
+
+int readInput(void* opaque, uint8_t* data, int size) {
+    auto& input = *static_cast<Input*>(opaque);
+    while (!input.isCancelled()) {
+        if (!input.seekable) {
+            pollfd descriptor{input.fd, POLLIN, 0};
+            const int ready = poll(&descriptor, 1, 100);
+            if (ready == 0 || (ready < 0 && errno == EINTR)) continue;
+            if (ready < 0) return AVERROR(errno);
+        }
+        const ssize_t count = read(input.fd, data, size);
+        if (count > 0) {
+            const size_t keep = std::min(static_cast<size_t>(count), input.prefix.size() - input.prefixSize);
+            memcpy(input.prefix.data() + input.prefixSize, data, keep);
+            input.prefixSize += keep;
+            return static_cast<int>(count);
+        }
+        if (count == 0) return AVERROR_EOF;
+        if (errno != EINTR && errno != EAGAIN) return AVERROR(errno);
+    }
+    return AVERROR_EXIT;
+}
+
+int64_t seekInput(void* opaque, int64_t offset, int mode) {
+    const auto& input = *static_cast<Input*>(opaque);
+    if (mode == AVSEEK_SIZE) {
+        struct stat statBuffer{};
+        return fstat(input.fd, &statBuffer) == 0 && statBuffer.st_size > 0
+            ? statBuffer.st_size : AVERROR(ENOSYS);
+    }
+    const off_t position = lseek(input.fd, offset, mode & ~AVSEEK_FORCE);
+    return position < 0 ? AVERROR(errno) : position;
+}
+
+int interruptInput(void* opaque) {
+    return static_cast<Input*>(opaque)->isCancelled();
+}
+} // namespace
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_sony_walkmanpro_FFmpegNativeDsdDecoder_nativeGetFFmpegVersion(JNIEnv* env, jclass clazz) {
-    char info[256];
-    snprintf(
-        info, sizeof(info),
-        "FFmpeg %s (avformat %u.%u, avcodec %u.%u, swresample %u.%u)",
-        av_version_info(),
-        LIBAVFORMAT_VERSION_MAJOR, LIBAVFORMAT_VERSION_MINOR,
-        LIBAVCODEC_VERSION_MAJOR, LIBAVCODEC_VERSION_MINOR,
-        LIBSWRESAMPLE_VERSION_MAJOR, LIBSWRESAMPLE_VERSION_MINOR
-    );
-    return env->NewStringUTF(info);
+Java_com_sony_walkmanpro_FFmpegNativeDsdDecoder_nativeGetFFmpegVersion(JNIEnv* env, jclass) {
+    return env->NewStringUTF(av_version_info());
 }
 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_sony_walkmanpro_FFmpegNativeDsdDecoder_nativeDecodeDsdFile(
-    JNIEnv* env,
-    jclass clazz,
-    jint fd,
-    jint startMs,
-    jint targetPcmSampleRate,
-    jobject callbackObj
+    JNIEnv* env, jclass, jint fd, jobject callback
 ) {
-    AVFormatContext* fmtCtx = nullptr;
-    AVCodecContext* codecCtx = nullptr;
-    SwrContext* swrCtx = nullptr;
-    AVPacket* pkt = nullptr;
-    AVFrame* frame = nullptr;
+    const jclass callbackClass = env->GetObjectClass(callback);
+    if (!callbackClass) return AVERROR(EINVAL);
+    const jmethodID cancelled = env->GetMethodID(callbackClass, "isCancelled", "()Z");
+    if (!cancelled) return AVERROR(EINVAL);
+    const jmethodID configure = env->GetMethodID(callbackClass, "onNativeFormat", "(IIJ)I");
+    if (!configure) return AVERROR(EINVAL);
+    const jmethodID control = env->GetMethodID(callbackClass, "getPlaybackCommand", "()I");
+    if (!control) return AVERROR(EINVAL);
+    const jmethodID write = env->GetMethodID(callbackClass, "onNativePcmChunk", "([FIJ)I");
+    if (!write) return AVERROR(EINVAL);
+    const jmethodID drain = env->GetMethodID(callbackClass, "onNativeEnd", "()I");
+    if (!drain) return AVERROR(EINVAL);
 
-    char urlPath[64];
-    snprintf(urlPath, sizeof(urlPath), "pipe:%d", fd);
-
-    char procFdPath[64];
-    snprintf(procFdPath, sizeof(procFdPath), "/proc/self/fd/%d", fd);
-
-    int ret = avformat_open_input(&fmtCtx, procFdPath, nullptr, nullptr);
-    if (ret < 0) {
-        ret = avformat_open_input(&fmtCtx, urlPath, nullptr, nullptr);
-        if (ret < 0) {
-            LOGE("avformat_open_input failed: %d", ret);
-            return -1;
-        }
+    Input input{fd, env, callback, cancelled, lseek(fd, 0, SEEK_CUR) >= 0};
+    Decoder dec;
+    constexpr int ioSize = 32768;
+    auto* ioBuffer = static_cast<uint8_t*>(av_malloc(ioSize));
+    if (!ioBuffer) return AVERROR(ENOMEM);
+    dec.io = avio_alloc_context(ioBuffer, ioSize, 0, &input, readInput, nullptr,
+                                input.seekable ? seekInput : nullptr);
+    if (!dec.io) {
+        av_free(ioBuffer);
+        return AVERROR(ENOMEM);
     }
+    dec.format = avformat_alloc_context();
+    if (!dec.format) return AVERROR(ENOMEM);
+    dec.format->pb = dec.io;
+    dec.format->flags |= AVFMT_FLAG_CUSTOM_IO;
+    dec.format->probesize = 512 * 1024;
+    dec.format->max_analyze_duration = 2 * AV_TIME_BASE;
+    dec.format->interrupt_callback = AVIOInterruptCB{interruptInput, &input};
 
-    if (avformat_find_stream_info(fmtCtx, nullptr) < 0) {
-        avformat_close_input(&fmtCtx);
-        return -2;
+    int result = avformat_open_input(&dec.format, nullptr, nullptr, nullptr);
+    if (result < 0) return result;
+    result = avformat_find_stream_info(dec.format, nullptr);
+    if (result < 0) return result;
+    const AVCodec* decoder = nullptr;
+    const int streamIndex = av_find_best_stream(dec.format, AVMEDIA_TYPE_AUDIO, -1, -1, &decoder, 0);
+    if (streamIndex < 0) return streamIndex;
+    const AVStream* stream = dec.format->streams[streamIndex];
+    dec.codec = avcodec_alloc_context3(decoder);
+    if (!dec.codec) return AVERROR(ENOMEM);
+    result = avcodec_parameters_to_context(dec.codec, stream->codecpar);
+    if (result < 0) return result;
+    dec.codec->thread_count = 1;
+    result = avcodec_open2(dec.codec, decoder, nullptr);
+    if (result < 0) return result;
+    if (dec.codec->sample_rate <= 0 || dec.codec->ch_layout.nb_channels <= 0) return AVERROR_INVALIDDATA;
+
+    const int sourceChannels = dec.codec->ch_layout.nb_channels;
+    const int channels = std::min(sourceChannels, 2);
+    const int64_t dsfDuration = input.dsfDuration();
+    const int64_t duration = dsfDuration > 0 ? dsfDuration
+        : (stream->duration > 0 ? av_rescale_q(stream->duration, stream->time_base, kMilliseconds)
+           : (dec.format->duration > 0 ? dec.format->duration / 1000 : 0));
+    const int rate = env->CallIntMethod(callback, configure, dec.codec->sample_rate, sourceChannels,
+                                        static_cast<jlong>(duration));
+    if (env->ExceptionCheck() || rate <= 0) return AVERROR_EXIT;
+    AVChannelLayout layout{};
+    av_channel_layout_default(&layout, channels);
+    AVChannelLayout sourceLayout = dec.codec->ch_layout;
+    if (sourceLayout.order == AV_CHANNEL_ORDER_UNSPEC) {
+        av_channel_layout_default(&sourceLayout, sourceChannels);
     }
+    result = swr_alloc_set_opts2(&dec.resampler, &layout, AV_SAMPLE_FMT_FLT, rate,
+                                 &sourceLayout, dec.codec->sample_fmt, dec.codec->sample_rate, 0, nullptr);
+    if (result < 0) return result;
+    result = swr_init(dec.resampler);
+    if (result < 0) return result;
 
-    int audioStreamIdx = av_find_best_stream(fmtCtx, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
-    if (audioStreamIdx < 0) {
-        avformat_close_input(&fmtCtx);
-        return -3;
-    }
+    dec.packet = av_packet_alloc();
+    dec.frame = av_frame_alloc();
+    const jfloatArray output = env->NewFloatArray(kFrames * channels);
+    if (!dec.packet || !dec.frame || !output) return AVERROR(ENOMEM);
+    float pcm[kFrames * 2];
+    const int64_t start = stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
+    int64_t nextFrame = 0;
+    int64_t seekMinFrame = 0;
+    bool alignAfterSeek = false;
 
-    AVStream* audioStream = fmtCtx->streams[audioStreamIdx];
-    const AVCodec* decoder = avcodec_find_decoder(audioStream->codecpar->codec_id);
-    if (!decoder) {
-        avformat_close_input(&fmtCtx);
-        return -4;
-    }
-
-    codecCtx = avcodec_alloc_context3(decoder);
-    avcodec_parameters_to_context(codecCtx, audioStream->codecpar);
-    codecCtx->thread_count = 2;
-
-    if (avcodec_open2(codecCtx, decoder, nullptr) < 0) {
-        avcodec_free_context(&codecCtx);
-        avformat_close_input(&fmtCtx);
-        return -5;
-    }
-
-    AVChannelLayout outChLayout = AV_CHANNEL_LAYOUT_STEREO;
-    AVChannelLayout inChLayout = codecCtx->ch_layout;
-    if (inChLayout.nb_channels <= 0) {
-        av_channel_layout_default(&inChLayout, 2);
-    }
-
-    ret = swr_alloc_set_opts2(
-        &swrCtx,
-        &outChLayout,
-        AV_SAMPLE_FMT_FLT,
-        targetPcmSampleRate,
-        &inChLayout,
-        codecCtx->sample_fmt,
-        codecCtx->sample_rate,
-        0,
-        nullptr
-    );
-
-    if (ret < 0 || !swrCtx || swr_init(swrCtx) < 0) {
-        if (swrCtx) swr_free(&swrCtx);
-        avcodec_free_context(&codecCtx);
-        avformat_close_input(&fmtCtx);
-        return -6;
-    }
-
-    jclass cbClass = env->GetObjectClass(callbackObj);
-    jmethodID onPcmMethod = env->GetMethodID(cbClass, "onNativePcmChunk", "([FIJ)I");
-    jmethodID getParamsMethod = env->GetMethodID(cbClass, "getRealtimeDspParams", "([F)I");
-
-    if (startMs > 0) {
-        int64_t seekTs = av_rescale_q(startMs, AVRational{1, 1000}, audioStream->time_base);
-        av_seek_frame(fmtCtx, audioStreamIdx, seekTs, AVSEEK_FLAG_BACKWARD);
-        avcodec_flush_buffers(codecCtx);
-    }
-
-    pkt = av_packet_alloc();
-    frame = av_frame_alloc();
-
-    const int maxOutFrames = 8192;
-    jfloatArray jPcmArray = env->NewFloatArray(maxOutFrames * 2);
-    jfloatArray jDspParamsArray = env->NewFloatArray(19);
-    float* rawSwrOut = new float[maxOutFrames * 2];
-
-    AudiophileMasteringChain masteringChain;
-    int64_t totalFramesRendered = (static_cast<int64_t>(startMs) * targetPcmSampleRate) / 1000;
-
-    bool stopLoop = false;
-    while (!stopLoop && av_read_frame(fmtCtx, pkt) >= 0) {
-        if (pkt->stream_index == audioStreamIdx) {
-            if (avcodec_send_packet(codecCtx, pkt) == 0) {
-                while (!stopLoop && avcodec_receive_frame(codecCtx, frame) == 0) {
-                    jint ctrlCmd = env->CallIntMethod(callbackObj, getParamsMethod, jDspParamsArray);
-                    if (ctrlCmd == -1) {
-                        stopLoop = true;
-                        break;
-                    } else if (ctrlCmd > 0) {
-                        int64_t targetTs = av_rescale_q(ctrlCmd, AVRational{1, 1000}, audioStream->time_base);
-                        av_seek_frame(fmtCtx, audioStreamIdx, targetTs, AVSEEK_FLAG_BACKWARD);
-                        avcodec_flush_buffers(codecCtx);
-                        totalFramesRendered = (static_cast<int64_t>(ctrlCmd) * targetPcmSampleRate) / 1000;
-                        break;
-                    }
-
-                    jfloat dspParams[19];
-                    env->GetFloatArrayRegion(jDspParamsArray, 0, 19, dspParams);
-                    float masterVol = dspParams[0];
-                    bool pureDsd = (dspParams[1] > 0.5f);
-                    float megaBass = dspParams[2];
-                    bool clearAudio = (dspParams[3] > 0.5f);
-                    bool dsee = (dspParams[4] > 0.5f);
-                    bool vinyl = (dspParams[5] > 0.5f);
-                    float leftPan = dspParams[6];
-                    float rightPan = dspParams[7];
-                    float phaseSign = dspParams[8];
-                    const float* eq10 = &dspParams[9];
-
-                    masteringChain.configure(
-                        static_cast<double>(targetPcmSampleRate),
-                        megaBass, clearAudio, dsee, vinyl, eq10
-                    );
-
-                    uint8_t* outPlanes[1] = { reinterpret_cast<uint8_t*>(rawSwrOut) };
-                    int convertedFrames = swr_convert(
-                        swrCtx,
-                        outPlanes,
-                        maxOutFrames,
-                        const_cast<const uint8_t**>(frame->extended_data),
-                        frame->nb_samples
-                    );
-
-                    if (convertedFrames > 0) {
-                        for (int i = 0; i < convertedFrames; ++i) {
-                            double L = static_cast<double>(rawSwrOut[i * 2]);
-                            double R = static_cast<double>(rawSwrOut[i * 2 + 1]);
-
-                            masteringChain.processSample(
-                                L, R, pureDsd, clearAudio, dsee, vinyl,
-                                static_cast<double>(masterVol),
-                                static_cast<double>(leftPan),
-                                static_cast<double>(rightPan),
-                                static_cast<double>(phaseSign)
-                            );
-
-                            rawSwrOut[i * 2] = static_cast<float>(L);
-                            rawSwrOut[i * 2 + 1] = static_cast<float>(R);
-                        }
-
-                        int floatCount = convertedFrames * 2;
-                        env->SetFloatArrayRegion(jPcmArray, 0, floatCount, rawSwrOut);
-                        totalFramesRendered += convertedFrames;
-                        int64_t currentPosMs = (totalFramesRendered * 1000L) / targetPcmSampleRate;
-
-                        jint writeStatus = env->CallIntMethod(
-                            callbackObj, onPcmMethod, jPcmArray, floatCount, static_cast<jlong>(currentPosMs)
-                        );
-                        if (writeStatus < 0) {
-                            stopLoop = true;
-                            break;
-                        }
-                    }
-                }
+    auto convert = [&](const uint8_t** samples, int count) -> int {
+        do {
+            uint8_t* planes[] = {reinterpret_cast<uint8_t*>(pcm)};
+            const int frames = swr_convert(dec.resampler, planes, kFrames, samples, count);
+            if (frames <= 0) return frames;
+            const int skip = static_cast<int>(std::clamp<int64_t>(seekMinFrame - nextFrame, 0, frames));
+            const int64_t position = av_rescale_q(nextFrame + skip, AVRational{1, rate}, kMilliseconds);
+            nextFrame += frames;
+            if (skip < frames) {
+                const int size = (frames - skip) * channels;
+                env->SetFloatArrayRegion(output, 0, size, pcm + skip * channels);
+                if (env->ExceptionCheck()) return AVERROR_EXIT;
+                const int status = env->CallIntMethod(callback, write, output, size, static_cast<jlong>(position));
+                if (env->ExceptionCheck() || status < 0) return AVERROR_EXIT;
+                if (status > 0) return 1; // A seek requested while writing interrupts this buffer.
             }
+            if (frames < kFrames) return 0;
+            // A non-null pointer with zero samples retrieves queued output without draining the filter.
+            count = 0;
+        } while (true);
+    };
+
+    bool demuxEnded = false;
+    bool decodedAudio = false;
+    while (!input.isCancelled()) {
+        const int command = env->CallIntMethod(callback, control);
+        if (env->ExceptionCheck() || command == kCancelled) return AVERROR_EXIT;
+        if (command != kNoSeek) {
+            if (!input.seekable || command < 0) return AVERROR(ENOSYS);
+            const int64_t ts = start + av_rescale_q(command, kMilliseconds, stream->time_base);
+            result = av_seek_frame(dec.format, streamIndex, ts, AVSEEK_FLAG_BACKWARD);
+            if (result < 0) return result;
+            avcodec_flush_buffers(dec.codec);
+            swr_close(dec.resampler);
+            result = swr_init(dec.resampler);
+            if (result < 0) return result;
+            seekMinFrame = av_rescale_q(command, kMilliseconds, AVRational{1, rate});
+            nextFrame = seekMinFrame;
+            alignAfterSeek = true;
+            demuxEnded = false;
         }
-        av_packet_unref(pkt);
+
+        result = avcodec_receive_frame(dec.codec, dec.frame);
+        if (result == AVERROR_EOF) {
+            if (!decodedAudio) return AVERROR_INVALIDDATA;
+            result = convert(nullptr, 0);
+            if (result == 1) continue;
+            if (result < 0) return result;
+            const int status = env->CallIntMethod(callback, drain);
+            if (env->ExceptionCheck() || status < 0) return AVERROR_EXIT;
+            if (status > 0) continue;
+            return 0;
+        }
+        if (result == 0) {
+            decodedAudio = true;
+            if (alignAfterSeek) {
+                const int64_t ts = dec.frame->best_effort_timestamp;
+                if (ts != AV_NOPTS_VALUE) {
+                    nextFrame = av_rescale_q(ts - start, stream->time_base, AVRational{1, rate});
+                }
+                alignAfterSeek = false;
+            }
+            result = convert(const_cast<const uint8_t**>(dec.frame->extended_data), dec.frame->nb_samples);
+            av_frame_unref(dec.frame);
+            if (result < 0) return result;
+            continue;
+        }
+        if (result != AVERROR(EAGAIN) || demuxEnded) return result;
+
+        do {
+            result = av_read_frame(dec.format, dec.packet);
+            if (result < 0) break;
+            if (dec.packet->stream_index == streamIndex) break;
+            av_packet_unref(dec.packet);
+        } while (true);
+        demuxEnded = result == AVERROR_EOF;
+        if (result < 0 && !demuxEnded) return result;
+        result = avcodec_send_packet(dec.codec, demuxEnded ? nullptr : dec.packet);
+        av_packet_unref(dec.packet);
+        if (result < 0) return result;
     }
-
-    delete[] rawSwrOut;
-    av_frame_free(&frame);
-    av_packet_free(&pkt);
-    swr_free(&swrCtx);
-    avcodec_free_context(&codecCtx);
-    avformat_close_input(&fmtCtx);
-
-    return stopLoop ? 1 : 0;
+    return AVERROR_EXIT;
 }

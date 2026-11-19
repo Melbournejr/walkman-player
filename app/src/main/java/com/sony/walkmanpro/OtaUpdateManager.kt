@@ -1,19 +1,23 @@
-﻿package com.sony.walkmanpro
+package com.sony.walkmanpro
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.core.content.FileProvider
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
-import org.json.JSONObject
 import java.io.File
-import java.io.FileOutputStream
-import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
+import javax.net.ssl.HttpsURLConnection
 
 data class OtaReleaseInfo(
     val versionTag: String,
@@ -22,6 +26,7 @@ data class OtaReleaseInfo(
     val changelog: String,
     val apkDownloadUrl: String,
     val apkSizeBytes: Long,
+    val apkSha256: String,
     val publishedAt: String
 )
 
@@ -34,268 +39,258 @@ sealed class OtaCheckResult {
 object OtaUpdateManager {
     private const val PREF_OTA = "walkman_ota_prefs"
     private const val KEY_AUTO_CHECK = "ota_auto_check_on_start"
-    private const val KEY_CUSTOM_REPO = "ota_custom_github_repo"
+    private const val KEY_BETA = "ota_include_prereleases"
+    private const val MAX_METADATA_CHARS = 2 * 1024 * 1024
+    internal const val MAX_APK_BYTES = 200L * 1024 * 1024
+    private val cdnHosts = setOf("objects.githubusercontent.com", "release-assets.githubusercontent.com")
+    private val sha256Pattern = Regex("[0-9a-f]{64}")
 
-    fun isAutoCheckEnabled(context: Context): Boolean {
-        return context.getSharedPreferences(PREF_OTA, Context.MODE_PRIVATE)
-            .getBoolean(KEY_AUTO_CHECK, true)
-    }
+    private fun prefs(context: Context) = context.getSharedPreferences(PREF_OTA, Context.MODE_PRIVATE)
+
+    fun isAutoCheckEnabled(context: Context): Boolean = prefs(context).getBoolean(KEY_AUTO_CHECK, true)
 
     fun setAutoCheckEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREF_OTA, Context.MODE_PRIVATE)
-            .edit().putBoolean(KEY_AUTO_CHECK, enabled).apply()
+        prefs(context).edit().putBoolean(KEY_AUTO_CHECK, enabled).apply()
     }
 
-    fun getConfiguredRepo(context: Context): String {
-        val saved = context.getSharedPreferences(PREF_OTA, Context.MODE_PRIVATE)
-            .getString(KEY_CUSTOM_REPO, null)
-        return if (!saved.isNullOrBlank() && saved.contains("/")) {
-            saved.trim()
-        } else {
-            BuildConfig.GITHUB_REPO
-        }
+    fun isBetaEnabled(context: Context): Boolean = prefs(context).getBoolean(KEY_BETA, false)
+
+    fun setBetaEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_BETA, enabled).apply()
     }
 
-    fun setConfiguredRepo(context: Context, repoSlug: String) {
-        context.getSharedPreferences(PREF_OTA, Context.MODE_PRIVATE)
-            .edit().putString(KEY_CUSTOM_REPO, repoSlug.trim()).apply()
-    }
+    fun isRemoteVersionNewer(currentVersion: String, remoteVersion: String): Boolean =
+        OtaVersion.parse(remoteVersion)?.let { remote ->
+            OtaVersion.parse(currentVersion)?.let { remote > it }
+        } ?: false
 
-    /**
-     * Chuẩn hóa chuỗi phiên bản (ví dụ "v11.1.0-Release" -> [11, 1, 0]) để so sánh chính xác.
-     */
-    private fun parseSemVerParts(versionStr: String): List<Int> {
-        val regex = Regex("""(\d+)\.(\d+)(?:\.(\d+))?""")
-        val match = regex.find(versionStr) ?: return listOf(0, 0, 0)
-        val major = match.groupValues.getOrNull(1)?.toIntOrNull() ?: 0
-        val minor = match.groupValues.getOrNull(2)?.toIntOrNull() ?: 0
-        val patch = match.groupValues.getOrNull(3)?.toIntOrNull() ?: 0
-        return listOf(major, minor, patch)
-    }
-
-    fun isRemoteVersionNewer(currentVersion: String, remoteVersion: String): Boolean {
-        val curr = parseSemVerParts(currentVersion)
-        val rem = parseSemVerParts(remoteVersion)
-        for (i in 0..2) {
-            if (rem[i] > curr[i]) return true
-            if (rem[i] < curr[i]) return false
-        }
-        return false
-    }
-
-    /**
-     * Kiểm tra bản phát hành mới nhất từ GitHub Releases API.
-     */
     suspend fun checkForUpdates(context: Context): OtaCheckResult = withContext(Dispatchers.IO) {
-        val repo = getConfiguredRepo(context)
-        val currentVer = BuildConfig.VERSION_NAME
-
-        if (repo.isBlank() || !repo.contains("/") || repo.startsWith("owner/")) {
-            return@withContext OtaCheckResult.Error("Chưa cấu hình địa chỉ GitHub Repo hợp lệ ($repo).")
-        }
-
-        var conn: HttpURLConnection? = null
+        val current = BuildConfig.VERSION_NAME
         try {
-            val apiUrl = URL("https://api.github.com/repos/$repo/releases")
-            conn = (apiUrl.openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 10000
-                readTimeout = 10000
-                setRequestProperty("Accept", "application/vnd.github+json")
-                setRequestProperty("User-Agent", "Walkman-Signature-OTA/${BuildConfig.VERSION_NAME}")
-            }
-
-            val code = conn.responseCode
-            if (code == 404) {
-                return@withContext OtaCheckResult.Error("Không tìm thấy mục Releases trên kho GitHub: $repo")
-            }
-            if (code !in 200..299) {
-                return@withContext OtaCheckResult.Error("Máy chủ GitHub trả về mã lỗi HTTP $code")
-            }
-
-            val responseText = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-            val releasesArr = JSONArray(responseText)
-            if (releasesArr.length() == 0) {
-                return@withContext OtaCheckResult.UpToDate(currentVer)
-            }
-
-            // Tìm bản Release đầu tiên có đính kèm file .apk
-            for (i in 0 until releasesArr.length()) {
-                val relObj = releasesArr.getJSONObject(i)
-                if (relObj.optBoolean("draft", false)) continue
-
-                val tagName = relObj.optString("tag_name", "")
-                val relName = relObj.optString("name", tagName)
-                val body = relObj.optString("body", "Cải thiện hiệu năng giải mã DSD và nâng cấp giao diện.")
-                val published = relObj.optString("published_at", "").take(10)
-
-                val assets = relObj.optJSONArray("assets") ?: JSONArray()
-                var apkUrl = ""
-                var apkSize = 0L
-
-                for (a in 0 until assets.length()) {
-                    val assetObj = assets.getJSONObject(a)
-                    val assetName = assetObj.optString("name", "")
-                    if (assetName.endsWith(".apk", ignoreCase = true)) {
-                        apkUrl = assetObj.optString("browser_download_url", "")
-                        apkSize = assetObj.optLong("size", 0L)
-                        break
+            val apiUrl = URL("https://api.github.com/repos/${BuildConfig.GITHUB_REPO}/releases?per_page=30")
+            val connection = connect(apiUrl, setOf("api.github.com"), followRedirects = false)
+            val releases = try {
+                val json = connection.inputStream.bufferedReader().use { reader ->
+                    val buffer = CharArray(8192)
+                    buildString {
+                        while (true) {
+                            val count = reader.read(buffer)
+                            if (count < 0) break
+                            check(length + count <= MAX_METADATA_CHARS) { "Phản hồi OTA quá lớn." }
+                            append(buffer, 0, count)
+                        }
                     }
                 }
-
-                if (apkUrl.isNotBlank()) {
-                    val candidateVersionStr = if (tagName.any { it.isDigit() }) tagName else relName
-                    val cleanRemoteVer = Regex("""\d+\.\d+(?:\.\d+)?""").find(candidateVersionStr)?.value ?: candidateVersionStr
-
-                    return@withContext if (isRemoteVersionNewer(currentVer, cleanRemoteVer)) {
-                        OtaCheckResult.UpdateAvailable(
-                            OtaReleaseInfo(
-                                versionTag = tagName,
-                                cleanVersion = cleanRemoteVer,
-                                releaseTitle = relName.ifBlank { "Walkman $cleanRemoteVer" },
-                                changelog = body.ifBlank { "• Tối ưu hóa bộ lọc DSD 1024-Tap Kaiser FIR.\n• Cải thiện chuyển động vật lý băng Cassette." },
-                                apkDownloadUrl = apkUrl,
-                                apkSizeBytes = apkSize,
-                                publishedAt = published
-                            )
-                        )
-                    } else {
-                        OtaCheckResult.UpToDate(currentVer)
-                    }
-                }
+                JSONArray(json)
+            } finally {
+                connection.disconnect()
             }
 
-            return@withContext OtaCheckResult.UpToDate(currentVer)
+            val beta = isBetaEnabled(context)
+            var best: OtaReleaseInfo? = null
+            var bestVersion = checkNotNull(OtaVersion.parse(current))
+            var missingDigest = false
+            for (i in 0 until releases.length()) {
+                val release = releases.getJSONObject(i)
+                if (release.optBoolean("draft")) continue
+                val tag = release.optString("tag_name")
+                val version = OtaVersion.parse(tag) ?: continue
+                if ((!beta && (release.optBoolean("prerelease") || version.isPrerelease)) || version <= bestVersion) continue
+                val assets = release.optJSONArray("assets") ?: continue
+                for (j in 0 until assets.length()) {
+                    val asset = assets.getJSONObject(j)
+                    val name = asset.optString("name")
+                    if (!name.endsWith(".apk", ignoreCase = true) || asset.optString("state") != "uploaded") continue
+                    val url = asset.optString("browser_download_url")
+                    if (!isTrustedAssetUrl(url, tag)) continue
+                    val size = asset.optLong("size")
+                    if (size !in 1..MAX_APK_BYTES) continue
+                    val rawDigest = asset.optString("digest")
+                    val digest = rawDigest.removePrefix("sha256:")
+                    if (!rawDigest.startsWith("sha256:") || !sha256Pattern.matches(digest)) {
+                        missingDigest = true
+                        continue
+                    }
+                    best = OtaReleaseInfo(
+                        tag, tag.removePrefix("v"),
+                        release.optString("name").ifBlank { "Walkman $tag" },
+                        release.optString("body").takeUnless { it == "null" }.orEmpty(),
+                        url, size, digest, release.optString("published_at").take(10)
+                    )
+                    bestVersion = version
+                    break
+                }
+            }
+            best?.let { OtaCheckResult.UpdateAvailable(it) }
+                ?: if (missingDigest) OtaCheckResult.Error("Bản cập nhật thiếu mã SHA-256 từ GitHub.")
+                else OtaCheckResult.UpToDate(current)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            return@withContext OtaCheckResult.Error("Lỗi kết nối mạng: ${e.localizedMessage ?: e.javaClass.simpleName}")
-        } finally {
-            try { conn?.disconnect() } catch (_: Throwable) {}
+            OtaCheckResult.Error(e.localizedMessage ?: "Không thể kiểm tra cập nhật.")
         }
     }
 
-    /**
-     * Tải file APK về bộ nhớ đệm với callback tiến trình % và tự động kiểm tra tính toàn vẹn.
-     */
+    internal fun isTrustedAssetUrl(rawUrl: String, tag: String): Boolean = runCatching {
+        val url = URL(rawUrl)
+        val prefix = "/${BuildConfig.GITHUB_REPO}/releases/download/$tag/"
+        trustedHttps(url, setOf("github.com")) && url.query == null &&
+            url.path.startsWith(prefix) && url.path.substringAfter(prefix).let {
+                it.endsWith(".apk", ignoreCase = true) && '/' !in it &&
+                    !it.contains("%2f", ignoreCase = true) && !it.contains("%5c", ignoreCase = true)
+            }
+    }.getOrDefault(false)
+
+    private fun trustedHttps(url: URL, hosts: Set<String>) =
+        url.protocol == "https" && url.host in hosts && url.port in setOf(-1, 443) &&
+            url.userInfo == null && url.ref == null
+
+    private fun connect(url: URL, hosts: Set<String>, followRedirects: Boolean): HttpsURLConnection {
+        var next = url
+        repeat(6) {
+            check(trustedHttps(next, hosts)) { "Nguồn OTA không đáng tin cậy." }
+            val connection = (next.openConnection() as HttpsURLConnection).apply {
+                instanceFollowRedirects = false
+                connectTimeout = 10_000
+                readTimeout = 15_000
+                setRequestProperty("Accept-Encoding", "identity")
+                setRequestProperty("User-Agent", "Walkman-OTA/${BuildConfig.VERSION_NAME}")
+                if (!followRedirects) setRequestProperty("Accept", "application/vnd.github+json")
+            }
+            var handedOff = false
+            try {
+                val status = connection.responseCode
+                if (status == 200) {
+                    handedOff = true
+                    return connection
+                }
+                check(followRedirects && status in listOf(301, 302, 303, 307, 308)) { "Lỗi OTA HTTP $status." }
+                val location = checkNotNull(connection.getHeaderField("Location"))
+                next = URL(next, location)
+                check(trustedHttps(next, cdnHosts)) { "Chuyển hướng OTA không đáng tin cậy." }
+            } finally {
+                // A successful connection belongs to the caller.
+                if (!handedOff) connection.disconnect()
+            }
+        }
+        error("OTA chuyển hướng quá nhiều lần.")
+    }
+
     suspend fun downloadUpdateApk(
         context: Context,
         release: OtaReleaseInfo,
         onProgress: (downloadedBytes: Long, totalBytes: Long, percent: Int) -> Unit
     ): Result<File> = withContext(Dispatchers.IO) {
-        var conn: HttpURLConnection? = null
+        var partial: File? = null
         try {
-            val cacheDir = context.externalCacheDir ?: context.cacheDir
-            // Xóa các bản APK cập nhật cũ trong cache
-            cacheDir.listFiles()?.forEach { f ->
-                if (f.name.startsWith("Walkman_Update_") && f.name.endsWith(".apk")) {
-                    try { f.delete() } catch (_: Throwable) {}
-                }
+            check(isTrustedAssetUrl(release.apkDownloadUrl, release.versionTag))
+            check(release.apkSizeBytes in 1..MAX_APK_BYTES && sha256Pattern.matches(release.apkSha256))
+            val incoming = File(context.cacheDir, "ota/incoming")
+            val ready = File(context.cacheDir, "ota/ready")
+            for (directory in listOf(incoming, ready)) {
+                check(directory.mkdirs() || directory.isDirectory) { "Không thể mở bộ nhớ đệm OTA." }
+                directory.listFiles()?.filter { it.lastModified() < System.currentTimeMillis() - 86_400_000L }
+                    ?.forEach { it.delete() }
             }
-
-            val targetFile = File(cacheDir, "Walkman_Update_${release.cleanVersion}.apk")
-            var currentUrl = release.apkDownloadUrl
-            var redirectCount = 0
-
-            // Xử lý chuyển hướng 302 của GitHub Releases CDN (objects.githubusercontent.com)
-            while (redirectCount < 5) {
-                conn = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
-                    instanceFollowRedirects = true
-                    connectTimeout = 15000
-                    readTimeout = 20000
-                    setRequestProperty("User-Agent", "Walkman-Signature-OTA/${BuildConfig.VERSION_NAME}")
-                }
-                val status = conn.responseCode
-                if (status in 301..308) {
-                    val nextUrl = conn.getHeaderField("Location")
-                    conn.disconnect()
-                    if (nextUrl.isNullOrBlank()) break
-                    currentUrl = nextUrl
-                    redirectCount++
-                } else {
-                    break
-                }
-            }
-
-            val finalConn = conn ?: return@withContext Result.failure(Exception("Không thể mở kết nối tải file."))
-            if (finalConn.responseCode !in 200..299) {
-                return@withContext Result.failure(Exception("Lỗi tải file APK (HTTP ${finalConn.responseCode})"))
-            }
-
-            val totalBytes = finalConn.contentLengthLong.takeIf { it > 0L } ?: release.apkSizeBytes.coerceAtLeast(1L)
-            var downloaded = 0L
-
-            finalConn.inputStream.use { input ->
-                FileOutputStream(targetFile).use { output ->
-                    val buffer = ByteArray(16384)
-                    var read: Int
-                    var lastReportedPercent = -1
-                    while (input.read(buffer).also { read = it } != -1) {
-                        output.write(buffer, 0, read)
-                        downloaded += read
-                        val pct = if (totalBytes > 0L) ((downloaded * 100L) / totalBytes).toInt().coerceIn(0, 100) else 0
-                        if (pct != lastReportedPercent) {
-                            lastReportedPercent = pct
-                            onProgress(downloaded, totalBytes, pct)
+            val file = File.createTempFile("walkman-", ".apk", incoming)
+            partial = file
+            val connection = connect(URL(release.apkDownloadUrl), cdnHosts + "github.com", followRedirects = true)
+            try {
+                val size = release.apkSizeBytes
+                check(connection.contentLengthLong in listOf(-1L, size)) { "Kích thước APK không khớp." }
+                var downloaded = 0L
+                var lastPercent = -1
+                connection.inputStream.use { input ->
+                    file.outputStream().buffered().use { output ->
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            currentCoroutineContext().ensureActive()
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            downloaded += count
+                            check(downloaded <= size) { "APK lớn hơn kích thước đã công bố." }
+                            output.write(buffer, 0, count)
+                            val percent = (downloaded * 100 / size).toInt()
+                            if (percent != lastPercent) {
+                                lastPercent = percent
+                                withContext(Dispatchers.Main) { onProgress(downloaded, size, percent) }
+                            }
                         }
                     }
-                    output.flush()
                 }
+            } finally {
+                connection.disconnect()
             }
-
-            if (targetFile.length() < 100_000L) {
-                return@withContext Result.failure(Exception("File APK tải về bị lỗi hoặc không đầy đủ."))
-            }
-
-            Result.success(targetFile)
+            verifyApk(context, file, release)
+            currentCoroutineContext().ensureActive()
+            val apk = File(ready, file.name)
+            check(file.renameTo(apk)) { "Không thể lưu APK." }
+            partial = null
+            Result.success(apk)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Result.failure(e)
         } finally {
-            try { conn?.disconnect() } catch (_: Throwable) {}
+            partial?.delete()
         }
     }
 
-    /**
-     * Kiểm tra quyền cài đặt ứng dụng từ nguồn không xác định (Android 8.0+) và mở trình cài đặt APK qua FileProvider.
-     */
-    fun canRequestPackageInstalls(context: Context): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.packageManager.canRequestPackageInstalls()
-        } else {
-            true
-        }
-    }
-
-    fun openInstallPermissionSettings(context: Context) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val intent = Intent(
-                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                Uri.parse("package:${context.packageName}")
-            ).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    internal fun matchesApkBytes(file: File, size: Long, sha256: String): Boolean {
+        if (size !in 1..MAX_APK_BYTES || file.length() != size || !sha256Pattern.matches(sha256)) return false
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(64 * 1024)
+            var bytesRead = 0L
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                bytesRead += count
+                if (bytesRead > size) return false
+                digest.update(buffer, 0, count)
             }
-            context.startActivity(intent)
+            if (bytesRead != size) return false
         }
+        return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) } == sha256
     }
 
-    fun triggerApkInstallation(context: Context, apkFile: File): Result<Unit> {
+    @Suppress("DEPRECATION")
+    private fun verifyApk(context: Context, apk: File, release: OtaReleaseInfo) {
+        check(matchesApkBytes(apk, release.apkSizeBytes, release.apkSha256)) { "SHA-256 hoặc kích thước APK không khớp." }
+        val pm = context.packageManager
+        val flags = if (Build.VERSION.SDK_INT >= 28) PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
+        val update = checkNotNull(pm.getPackageArchiveInfo(apk.absolutePath, flags)) { "APK không hợp lệ." }
+        val installed = pm.getPackageInfo(context.packageName, flags)
+        check(update.packageName == installed.packageName) { "APK thuộc ứng dụng khác." }
+        check(versionCode(update) > versionCode(installed) &&
+            update.versionName == release.cleanVersion &&
+            isRemoteVersionNewer(installed.versionName.orEmpty(), release.cleanVersion)) { "Phiên bản APK không hợp lệ." }
+        val currentSigners = signers(installed)
+        check(currentSigners.isNotEmpty() && signers(update) == currentSigners) { "Chứng thư ký APK không khớp." }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun versionCode(info: PackageInfo) = if (Build.VERSION.SDK_INT >= 28) info.longVersionCode else info.versionCode.toLong()
+
+    @Suppress("DEPRECATION")
+    private fun signers(info: PackageInfo) =
+        (if (Build.VERSION.SDK_INT >= 28) info.signingInfo?.apkContentsSigners else info.signatures).orEmpty().toSet()
+
+    suspend fun triggerApkInstallation(context: Context, apkFile: File, release: OtaReleaseInfo): Result<Unit> {
         return try {
-            if (!canRequestPackageInstalls(context)) {
-                openInstallPermissionSettings(context)
-                return Result.failure(Exception("Vui lòng cấp quyền 'Cho phép cài đặt ứng dụng' rồi bấm Cài đặt lại."))
+            withContext(Dispatchers.IO) { verifyApk(context, apkFile, release) }
+            if (!context.packageManager.canRequestPackageInstalls()) {
+                context.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}")))
+                return Result.failure(IllegalStateException("Cấp quyền cài đặt ứng dụng rồi bấm Cài đặt lại."))
             }
-
-            val apkUri: Uri = FileProvider.getUriForFile(
-                context,
-                "${context.packageName}.fileprovider",
-                apkFile
-            )
-
-            val installIntent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(apkUri, "application/vnd.android.package-archive")
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", apkFile)
+            context.startActivity(Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(installIntent)
+            })
             Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Result.failure(e)
         }

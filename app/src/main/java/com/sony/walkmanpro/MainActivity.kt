@@ -1,6 +1,8 @@
-﻿package com.sony.walkmanpro
+package com.sony.walkmanpro
 
 import android.Manifest
+import android.content.ComponentName
+import android.content.ServiceConnection
 import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
@@ -9,17 +11,17 @@ import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
-import android.media.MediaMetadataRetriever
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.PowerManager
+import android.os.IBinder
 import android.provider.MediaStore
 import android.provider.OpenableColumns
-import android.provider.Settings
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -75,23 +77,18 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import androidx.documentfile.provider.DocumentFile
-import androidx.media3.common.AudioAttributes
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.C
-import androidx.media3.common.MediaItem
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.PlaybackParameters
-import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.exoplayer.DefaultRenderersFactory
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.audio.AudioSink
-import androidx.media3.exoplayer.audio.DefaultAudioSink
+import com.sony.walkmanpro.audio.decoder.DsdHeader
+import com.sony.walkmanpro.playback.PlaybackController
+import com.sony.walkmanpro.playback.isDsd
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import org.json.JSONObject
 import java.io.File
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -140,67 +137,56 @@ enum class AppScreen {
 }
 
 data class AudioOutputState(
-    val deviceType: String = "Speaker",
+    val deviceType: String = "Unknown",
     val isBluetooth: Boolean = false,
-    val deviceName: String = "Internal Speaker",
-    val codecEstimate: String = "PCM",
-    val batteryPercent: Int = 100
+    val deviceName: String = "Unknown",
+    val codecEstimate: String = "Unknown",
+    val batteryPercent: Int = 0,
+    val connectedDevice: String? = null,
+    val supportedRates: List<Int> = emptyList()
 )
+
+private data class TrackSpecs(
+    val bitrateKbps: Int? = null,
+    val sampleRate: Int? = null,
+    val bitDepth: String? = null
+) {
+    val description get() = listOf(sampleRate?.let { formatRate(it) } ?: "Unknown", bitDepth ?: "Unknown")
+        .joinToString(" | ")
+}
+
+private fun formatRate(hz: Int) = if (hz >= 1_000_000) "${hz / 1_000_000.0} MHz" else "${hz / 1000.0} kHz"
+
+@UnstableApi
+private fun pcmEncodingLabel(encoding: Int) = when (encoding) {
+    C.ENCODING_PCM_8BIT -> "PCM 8-bit"
+    C.ENCODING_PCM_16BIT, C.ENCODING_PCM_16BIT_BIG_ENDIAN -> "PCM 16-bit"
+    C.ENCODING_PCM_24BIT, C.ENCODING_PCM_24BIT_BIG_ENDIAN -> "PCM 24-bit"
+    C.ENCODING_PCM_32BIT, C.ENCODING_PCM_32BIT_BIG_ENDIAN -> "PCM 32-bit"
+    C.ENCODING_PCM_FLOAT -> "PCM float"
+    else -> "Unknown"
+}
 
 @UnstableApi
 class MainActivity : ComponentActivity() {
-    companion object {
-        var onExternalCommand: ((String) -> Unit)? = null
-        private var sharedExoPlayer: ExoPlayer? = null
-        private var sharedDsdEngine: FiioDirectDsdEngine? = null
-        private val sharedDspProcessor = SonyRealTimeDspProcessor()
-        @Volatile private var isDsdModeActive: Boolean = false
-    }
-
-    private var onTrackEndedCallback: (() -> Unit)? = null
-    private var masterVolume: Float = 0.75f
-    private var sleepFadeMultiplier: Float = 1.0f
-    private var crossfadeEnabled: Boolean = true
-    private var tapeSpeed: Float = 1.0f
-    private var pureDsdEnabled: Boolean = false
-
     private val backgroundHandler = Handler(Looper.getMainLooper())
-    private var currentTrackRef: AudioTrack? = null
-    private var currentIndexRef: Int = 0
+    private var playback by mutableStateOf<PlaybackController?>(null)
+    private var serviceBound = false
+    private var screenStarted by mutableStateOf(false)
+    private val playbackConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            playback = (binder as? WalkmanMediaSessionService.PlaybackBinder)?.playback
+        }
 
-    private val backgroundKeepAliveRunnable = object : Runnable {
-        override fun run() {
-            try {
-                if (getActiveIsPlaying()) {
-                    val pos = getActivePosition()
-                    val dur = getActiveDuration().toLong().coerceAtLeast(1000L)
-                    currentTrackRef?.let { t ->
-                        PlaylistStorage.saveTrackPosition(applicationContext, t.title, pos, currentIndexRef)
-                        WalkmanMediaSessionService.updateNowPlayingNotification(
-                            context = applicationContext,
-                            title = t.title,
-                            artist = t.artist,
-                            isPlaying = true,
-                            posMs = pos.toLong(),
-                            durMs = dur
-                        ) { cmd ->
-                            onExternalCommand?.invoke(cmd)
-                        }
-                    }
-                }
-            } catch (_: Throwable) {}
-            backgroundHandler.postDelayed(this, 2000L)
+        override fun onServiceDisconnected(name: ComponentName?) {
+            playback = null
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        startPersistentForegroundService()
-        requestIgnoreBatteryOptimizationsIfNeeded()
-        loadSavedDspSettings()
-        initAudioEngines()
-        backgroundHandler.post(backgroundKeepAliveRunnable)
-
+        serviceBound = bindService(Intent(this, WalkmanMediaSessionService::class.java),
+            playbackConnection, Context.BIND_AUTO_CREATE)
         setContent {
             MaterialTheme(
                 colorScheme = darkColorScheme(
@@ -212,44 +198,41 @@ class MainActivity : ComponentActivity() {
                     onSurface = TextPure
                 )
             ) {
-                SnowskyEchoDapApp(
-                    onAutoScanAll = { scanAllMusicSources(this@MainActivity) },
-                    onParseManualUris = { uris -> parseManualFiles(this@MainActivity, uris) },
-                    onParseFolderUri = { treeUri -> parseFolderTree(this@MainActivity, treeUri) },
-                    onPlayTrack = { track, idx, startMs, onEnd ->
-                        currentTrackRef = track
-                        currentIndexRef = idx
-                        onTrackEndedCallback = onEnd
-                        playTrackUnified(track, startMs)
-                    },
-                    onTogglePlay = { togglePlayUnified() },
-                    onStopPlayback = { stopUnified() },
-                    onSeekTo = { ms -> seekUnified(ms) },
-                    onSetMasterVolume = { vol -> updateMasterVolume(vol) },
-                    onSetSleepMultiplier = { mult ->
-                        sleepFadeMultiplier = mult.coerceIn(0f, 1f)
-                        applyEffectiveVolume()
-                    },
-                    onSetPureDsdMode = { enabled -> updatePureDsdMode(enabled) },
-                    onSetBass = { level -> updateMegaBass(level) },
-                    onSetVinyl = { enabled -> updateVinylEffect(enabled) },
-                    onSetClearAudio = { enabled -> updateClearAudio(enabled) },
-                    onSetDsee = { enabled -> updateDsee(enabled) },
-                    onSetChannelBalance = { bal -> updateChannelBalance(bal) },
-                    onSetPhaseInvert = { inv -> updatePhaseInvert(inv) },
-                    onSetCrossfade = { cf -> updateCrossfade(cf) },
-                    onSetTapeSpeed = { spd -> updateTapeSpeed(spd) },
-                    onSetKeepScreenOn = { keepOn -> setDeskScreenKeepOn(keepOn) },
-                    onToggleOrientation = { toggleScreenOrientation() },
-                    onSetEqBand10 = { band, gain -> updateEqBand10(band, gain) },
-                    getIsPlaying = { getActiveIsPlaying() },
-                    getPosition = { getActivePosition() },
-                    getDuration = { getActiveDuration() },
-                    getAudioOutputState = { detectAudioOutputState(this@MainActivity) },
-                    getTrackSpecs = { track -> inspectTrackSpecsSafe(this@MainActivity, track) }
-                )
+                val controller = playback
+                if (controller == null) {
+                    Box(Modifier.fillMaxSize().background(DapChassisBlack))
+                } else {
+                    SnowskyEchoDapApp(
+                        playback = controller,
+                        screenStarted = screenStarted,
+                        onAutoScanAll = { scanAllMusicSources(this@MainActivity) },
+                        onParseManualUris = { uris -> parseManualFiles(this@MainActivity, uris) },
+                        onParseFolderUri = { treeUri -> parseFolderTree(this@MainActivity, treeUri) },
+                        onSetKeepScreenOn = ::setDeskScreenKeepOn,
+                        onToggleOrientation = ::toggleScreenOrientation,
+                        getOutputState = { detectAudioOutputState(controller.dsdRoute) },
+                        getTrackSpecs = { inspectTrackSpecs(this@MainActivity, it) }
+                    )
+                }
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        screenStarted = true
+    }
+
+    override fun onStop() {
+        playback?.persist()
+        screenStarted = false
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        if (serviceBound) unbindService(playbackConnection)
+        backgroundHandler.removeCallbacksAndMessages(null)
+        super.onDestroy()
     }
 
     private fun toggleScreenOrientation() {
@@ -264,52 +247,6 @@ class MainActivity : ComponentActivity() {
         }, 4000L)
     }
 
-    private fun getActiveIsPlaying(): Boolean {
-        return if (isDsdModeActive) {
-            sharedDsdEngine?.isPlaying == true
-        } else {
-            sharedExoPlayer?.isPlaying == true
-        }
-    }
-
-    private fun getActivePosition(): Int {
-        return if (isDsdModeActive) {
-            (sharedDsdEngine?.currentPositionMs ?: 0).coerceAtLeast(0)
-        } else {
-            (sharedExoPlayer?.currentPosition ?: 0L).toInt().coerceAtLeast(0)
-        }
-    }
-
-    private fun getActiveDuration(): Int {
-        return if (isDsdModeActive) {
-            (sharedDsdEngine?.durationMs ?: 180000).coerceAtLeast(1)
-        } else {
-            val d = sharedExoPlayer?.duration ?: 1L
-            if (d <= 0L || d == C.TIME_UNSET) 1 else d.toInt()
-        }
-    }
-
-    private fun startPersistentForegroundService() {
-        try {
-            val serviceIntent = Intent(applicationContext, WalkmanMediaSessionService::class.java)
-            ContextCompat.startForegroundService(applicationContext, serviceIntent)
-        } catch (_: Throwable) {}
-    }
-
-    private fun requestIgnoreBatteryOptimizationsIfNeeded() {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-                if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                        data = Uri.parse("package:$packageName")
-                    }
-                    startActivity(intent)
-                }
-            }
-        } catch (_: Throwable) {}
-    }
-
     private fun setDeskScreenKeepOn(keepOn: Boolean) {
         if (keepOn) {
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -318,428 +255,76 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun initAudioEngines() {
-        if (sharedDsdEngine == null) {
-            sharedDsdEngine = FiioDirectDsdEngine(applicationContext, sharedDspProcessor) {
-                onTrackEndedCallback?.invoke()
-            }.apply {
-                pureDsdMode = pureDsdEnabled
-            }
+    private fun detectAudioOutputState(route: AudioDeviceInfo?): AudioOutputState {
+        val battery = getSystemService(BatteryManager::class.java)
+            .getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY).coerceIn(0, 100)
+        val audioManager = getSystemService(AudioManager::class.java)
+        val outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+        val external = outputs.filter { it.type in externalOutputTypes }
+        val candidate = route ?: external.singleOrNull()
+        val label = when (candidate?.type) {
+            AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_USB_DEVICE -> "USB DAC"
+            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLE_HEADSET,
+            AudioDeviceInfo.TYPE_BLE_SPEAKER -> "Bluetooth"
+            AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "Headphones"
+            AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "Speaker"
+            else -> "Unknown"
         }
-
-        if (sharedExoPlayer != null) return
-
-        val renderersFactory = object : DefaultRenderersFactory(applicationContext) {
-            override fun buildAudioSink(
-                context: Context,
-                enableFloatOutput: Boolean,
-                enableAudioTrackPlaybackParams: Boolean
-            ): AudioSink {
-                return DefaultAudioSink.Builder(context)
-                    .setEnableFloatOutput(true)
-                    .setAudioProcessors(arrayOf(sharedDspProcessor))
-                    .build()
-            }
-        }
-
-        val audioAttributes = AudioAttributes.Builder()
-            .setUsage(C.USAGE_MEDIA)
-            .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
-            .build()
-
-        sharedExoPlayer = ExoPlayer.Builder(applicationContext, renderersFactory)
-            .setAudioAttributes(audioAttributes, true)
-            .setHandleAudioBecomingNoisy(true)
-            .setWakeMode(C.WAKE_MODE_LOCAL)
-            .build().apply {
-                volume = masterVolume
-                playbackParameters = PlaybackParameters(tapeSpeed, tapeSpeed)
-                addListener(object : Player.Listener {
-                    override fun onPlaybackStateChanged(playbackState: Int) {
-                        if (!isDsdModeActive && playbackState == Player.STATE_ENDED) {
-                            onTrackEndedCallback?.invoke()
-                        }
-                    }
-
-                    override fun onPlayerError(error: PlaybackException) {
-                        Toast.makeText(
-                            applicationContext,
-                            "Không thể phát file này (${error.errorCodeName})",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    }
-                })
-            }
+        val connected = external.mapNotNull { it.productName?.toString() }.distinct().joinToString()
+        return AudioOutputState(label, label == "Bluetooth", route?.productName?.toString() ?: "Unknown",
+            "Unknown", battery, connected.ifEmpty { null },
+            candidate?.sampleRates?.filter { it > 0 }?.distinct()?.sorted().orEmpty())
     }
 
-    private fun loadSavedDspSettings() {
-        val prefs = getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
-        masterVolume = prefs.getFloat("dsp_master_vol", 0.75f)
-        pureDsdEnabled = prefs.getBoolean("dsp_pure_dsd_mode", false)
-        sharedDsdEngine?.pureDsdMode = pureDsdEnabled
-        sharedDspProcessor.pureDirectBypass = pureDsdEnabled; sharedDspProcessor.pureDirectBypass = pureDsdEnabled
-        sharedDspProcessor.megaBassLevel = prefs.getFloat("dsp_bass", 0.25f)
-        sharedDspProcessor.vinylEnabled = prefs.getBoolean("dsp_vinyl", true)
-        sharedDspProcessor.clearAudioEnabled = prefs.getBoolean("dsp_clear_audio", true)
-        sharedDspProcessor.dseeEnabled = prefs.getBoolean("dsp_dsee", true)
-
-        val rawSavedBal = prefs.getFloat("dsp_balance", 0f)
-        val cleanBal = if (abs(rawSavedBal) < 0.04f) 0f else rawSavedBal.coerceIn(-0.5f, 0.5f)
-        sharedDspProcessor.channelBalance = cleanBal
-        if (cleanBal == 0f && rawSavedBal != 0f) {
-            prefs.edit().putFloat("dsp_balance", 0f).apply()
-        }
-
-        sharedDspProcessor.phaseInvert = prefs.getBoolean("dsp_phase_invert", false)
-        crossfadeEnabled = prefs.getBoolean("dsp_crossfade", true)
-        tapeSpeed = prefs.getFloat("dsp_tape_speed", 1.0f)
-        for (i in 0 until 10) {
-            sharedDspProcessor.eq10Gains[i] = prefs.getFloat("dsp_eq_$i", 0f)
-        }
+    private companion object {
+        val externalOutputTypes = setOf(AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_USB_DEVICE,
+            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES
+        ) + if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            setOf(AudioDeviceInfo.TYPE_BLE_HEADSET, AudioDeviceInfo.TYPE_BLE_SPEAKER)
+        } else emptySet()
     }
 
-    private fun applyEffectiveVolume() {
-        val eff = (masterVolume * sleepFadeMultiplier).coerceIn(0f, 1f)
-        sharedExoPlayer?.volume = eff
-        sharedDsdEngine?.masterVolume = eff
-    }
-
-    private fun isDsdTrack(track: AudioTrack): Boolean {
-        val fmt = track.formatName.lowercase()
-        val title = track.title.lowercase()
-        val uriStr = track.uri.toString().lowercase()
-        if (fmt == "dff" || fmt == "dsf" || title.endsWith(".dff") || title.endsWith(".dsf") ||
-            uriStr.endsWith(".dff") || uriStr.endsWith(".dsf")
-        ) {
-            return true
+    private fun inspectTrackSpecs(context: Context, track: AudioTrack): TrackSpecs {
+        if (track.isDsd()) {
+            val header = runCatching {
+                context.contentResolver.openInputStream(track.uri)?.use { DsdHeader.read(it) }
+            }.getOrNull() ?: return TrackSpecs()
+            val bitrate = if (header.compressed) null else header.sampleRate * header.channels / 1000
+            return TrackSpecs(bitrate, header.sampleRate, if (header.compressed) "1-bit DST" else "1-bit")
         }
+
+        val extractor = MediaExtractor()
         return try {
-            contentResolver.openInputStream(track.uri)?.use { ins ->
-                val b = ByteArray(4)
-                if (ins.read(b) == 4) {
-                    val m = String(b, 0, 4, Charsets.ISO_8859_1)
-                    m == "FRM8" || m == "DSD "
-                } else false
-            } ?: false
-        } catch (_: Throwable) {
-            false
-        }
-    }
-
-    private fun playTrackUnified(track: AudioTrack, startMs: Long = 0L) {
-        try {
-            startPersistentForegroundService()
-            if (isDsdTrack(track)) {
-                isDsdModeActive = true
-                sharedExoPlayer?.pause()
-                sharedDsdEngine?.pureDsdMode = pureDsdEnabled
-        sharedDspProcessor.pureDirectBypass = pureDsdEnabled; sharedDspProcessor.pureDirectBypass = pureDsdEnabled
-                sharedDsdEngine?.masterVolume = (masterVolume * sleepFadeMultiplier).coerceIn(0f, 1f)
-                sharedDsdEngine?.startDsdPlayback(track.uri, startMs.toInt())
-            } else {
-                isDsdModeActive = false
-                sharedDsdEngine?.stop()
-                val player = sharedExoPlayer ?: return
-                player.setMediaItem(MediaItem.fromUri(track.uri))
-                player.prepare()
-                if (startMs > 0) player.seekTo(startMs)
-                player.playbackParameters = PlaybackParameters(tapeSpeed, tapeSpeed)
-
-                if (crossfadeEnabled) {
-                    player.volume = 0.05f
-                    player.play()
-                    val targetVol = (masterVolume * sleepFadeMultiplier).coerceIn(0f, 1f)
-                    Thread {
-                        for (step in 1..12) {
-                            try {
-                                Thread.sleep(90)
-                                val v = (targetVol * (step / 12f)).coerceIn(0f, 1f)
-                                runOnUiThread { sharedExoPlayer?.volume = v }
-                            } catch (_: Throwable) {}
-                        }
-                    }.start()
-                } else {
-                    applyEffectiveVolume()
-                    player.play()
-                }
-            }
-        } catch (e: Throwable) {
-            Toast.makeText(this, "Không thể phát: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun togglePlayUnified(): Boolean {
-        return if (isDsdModeActive) {
-            sharedDsdEngine?.togglePlayPause() ?: false
-        } else {
-            val player = sharedExoPlayer ?: return false
-            if (player.isPlaying) {
-                player.pause()
-            } else {
-                startPersistentForegroundService()
-                applyEffectiveVolume()
-                player.play()
-            }
-            player.isPlaying
-        }
-    }
-
-    private fun stopUnified() {
-        if (isDsdModeActive) {
-            sharedDsdEngine?.stop()
-        } else {
-            sharedExoPlayer?.let {
-                it.pause()
-                it.seekTo(0)
-            }
-        }
-    }
-
-    private fun seekUnified(ms: Int) {
-        if (isDsdModeActive) {
-            sharedDsdEngine?.seekTo(ms)
-        } else {
-            sharedExoPlayer?.let { player ->
-                val dur = if (player.duration > 0) player.duration else Long.MAX_VALUE
-                player.seekTo(ms.toLong().coerceIn(0L, dur))
-            }
-        }
-    }
-
-    private fun updateMasterVolume(vol: Float) {
-        masterVolume = vol.coerceIn(0f, 1f)
-        applyEffectiveVolume()
-        getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
-            .edit().putFloat("dsp_master_vol", masterVolume).apply()
-    }
-
-    private fun updatePureDsdMode(enabled: Boolean) {
-        pureDsdEnabled = enabled
-        sharedDsdEngine?.pureDsdMode = enabled
-        sharedDspProcessor.pureDirectBypass = enabled; sharedDspProcessor.pureDirectBypass = enabled
-        getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
-            .edit().putBoolean("dsp_pure_dsd_mode", enabled).apply()
-    }
-
-    private fun updateMegaBass(level: Float) {
-        sharedDspProcessor.megaBassLevel = level.coerceIn(0f, 1f)
-        getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
-            .edit().putFloat("dsp_bass", sharedDspProcessor.megaBassLevel).apply()
-    }
-
-    private fun updateVinylEffect(enabled: Boolean) {
-        sharedDspProcessor.vinylEnabled = enabled
-        getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
-            .edit().putBoolean("dsp_vinyl", enabled).apply()
-    }
-
-    private fun updateClearAudio(enabled: Boolean) {
-        sharedDspProcessor.clearAudioEnabled = enabled
-        getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
-            .edit().putBoolean("dsp_clear_audio", enabled).apply()
-    }
-
-    private fun updateDsee(enabled: Boolean) {
-        sharedDspProcessor.dseeEnabled = enabled
-        getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
-            .edit().putBoolean("dsp_dsee", enabled).apply()
-    }
-
-    private fun updateChannelBalance(bal: Float) {
-        val snappedBal = if (abs(bal) < 0.03f) 0f else bal.coerceIn(-0.5f, 0.5f)
-        sharedDspProcessor.channelBalance = snappedBal
-        getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
-            .edit().putFloat("dsp_balance", snappedBal).apply()
-    }
-
-    private fun updatePhaseInvert(inv: Boolean) {
-        sharedDspProcessor.phaseInvert = inv
-        getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
-            .edit().putBoolean("dsp_phase_invert", inv).apply()
-    }
-
-    private fun updateCrossfade(cf: Boolean) {
-        crossfadeEnabled = cf
-        getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
-            .edit().putBoolean("dsp_crossfade", cf).apply()
-    }
-
-    private fun updateTapeSpeed(spd: Float) {
-        tapeSpeed = spd.coerceIn(0.75f, 1.30f)
-        sharedExoPlayer?.playbackParameters = PlaybackParameters(tapeSpeed, tapeSpeed)
-        getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
-            .edit().putFloat("dsp_tape_speed", tapeSpeed).apply()
-    }
-
-    private fun updateEqBand10(band10Index: Int, gainDb: Float) {
-        if (band10Index in 0..9) {
-            sharedDspProcessor.eq10Gains[band10Index] = gainDb.coerceIn(-10f, 10f)
-            getSharedPreferences("walkman_dsp_prefs", Context.MODE_PRIVATE)
-                .edit().putFloat("dsp_eq_$band10Index", sharedDspProcessor.eq10Gains[band10Index]).apply()
-        }
-    }
-
-    private var bluetoothA2dpProxy: android.bluetooth.BluetoothA2dp? = null
-
-    private fun ensureBluetoothA2dpProxy(context: Context) {
-        if (bluetoothA2dpProxy != null) return
-        try {
-            val bm = context.getSystemService(Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager
-            val adapter = bm?.adapter ?: return
-            adapter.getProfileProxy(context.applicationContext, object : android.bluetooth.BluetoothProfile.ServiceListener {
-                override fun onServiceConnected(profile: Int, proxy: android.bluetooth.BluetoothProfile?) {
-                    if (profile == android.bluetooth.BluetoothProfile.A2DP) {
-                        bluetoothA2dpProxy = proxy as? android.bluetooth.BluetoothA2dp
+            extractor.setDataSource(context, track.uri, null)
+            val format = (0 until extractor.trackCount).asSequence().map(extractor::getTrackFormat)
+                .firstOrNull { it.getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true }
+                ?: return TrackSpecs()
+            val encoding = format.intOrNull(MediaFormat.KEY_PCM_ENCODING)
+            val bits = when (encoding) {
+                C.ENCODING_PCM_8BIT -> "8-bit"
+                C.ENCODING_PCM_16BIT, C.ENCODING_PCM_16BIT_BIG_ENDIAN -> "16-bit"
+                C.ENCODING_PCM_24BIT, C.ENCODING_PCM_24BIT_BIG_ENDIAN -> "24-bit"
+                C.ENCODING_PCM_32BIT, C.ENCODING_PCM_32BIT_BIG_ENDIAN -> "32-bit"
+                C.ENCODING_PCM_FLOAT -> "32-bit float"
+                else -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    when (encoding) {
+                        android.media.AudioFormat.ENCODING_PCM_24BIT_PACKED -> "24-bit"
+                        android.media.AudioFormat.ENCODING_PCM_32BIT -> "32-bit"
+                        else -> null
                     }
-                }
-                override fun onServiceDisconnected(profile: Int) {
-                    if (profile == android.bluetooth.BluetoothProfile.A2DP) {
-                        bluetoothA2dpProxy = null
-                    }
-                }
-            }, android.bluetooth.BluetoothProfile.A2DP)
-        } catch (_: Throwable) {}
-    }
-
-    private fun getPhoneBatteryPercent(context: Context): Int {
-        return try {
-            val bm = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
-            bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)?.coerceIn(0, 100) ?: 100
-        } catch (_: Throwable) {
-            100
-        }
-    }
-
-    private fun queryRealBluetoothCodecAndBattery(deviceNameHint: String): Pair<String?, Int> {
-        var realCodecName: String? = null
-        var batteryPercent = -1
-        try {
-            ensureBluetoothA2dpProxy(this)
-            val proxy = bluetoothA2dpProxy
-            val bm = getSystemService(Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager
-            val devices = proxy?.connectedDevices
-            val activeDevice = if (!devices.isNullOrEmpty()) {
-                devices.firstOrNull { it.name?.equals(deviceNameHint, ignoreCase = true) == true } ?: devices[0]
-            } else {
-                bm?.adapter?.bondedDevices?.firstOrNull {
-                    it.name?.equals(deviceNameHint, ignoreCase = true) == true
-                }
-            }
-
-            if (activeDevice != null) {
-                try {
-                    val battMethod = activeDevice.javaClass.getMethod("getBatteryLevel")
-                    val level = battMethod.invoke(activeDevice) as? Int ?: -1
-                    if (level in 0..100) batteryPercent = level
-                } catch (_: Throwable) {}
-
-                if (proxy != null) {
-                    try {
-                        val getCodecStatusMethod = proxy.javaClass.getMethod("getCodecStatus", android.bluetooth.BluetoothDevice::class.java)
-                        val codecStatus = getCodecStatusMethod.invoke(proxy, activeDevice)
-                        if (codecStatus != null) {
-                            val getCodecConfigMethod = codecStatus.javaClass.getMethod("getCodecConfig")
-                            val codecConfig = getCodecConfigMethod.invoke(codecStatus)
-                            if (codecConfig != null) {
-                                val getCodecTypeMethod = codecConfig.javaClass.getMethod("getCodecType")
-                                val codecType = getCodecTypeMethod.invoke(codecConfig) as? Int ?: -1
-                                realCodecName = when (codecType) {
-                                    0 -> "Bluetooth SBC"
-                                    1 -> "Bluetooth AAC"
-                                    2 -> "Qualcomm® aptX™"
-                                    3 -> "Qualcomm® aptX™ HD"
-                                    4 -> "Sony LDAC™"
-                                    5, 6, 7, 8, 9 -> "Qualcomm® aptX™ Adaptive"
-                                    else -> "Qualcomm® aptX™ Adaptive"
-                                }
-                            }
-                        }
-                    } catch (_: Throwable) {}
-                }
-            }
-        } catch (_: Throwable) {}
-        return Pair(realCodecName, batteryPercent)
-    }
-
-    private fun detectAudioOutputState(context: Context): AudioOutputState {
-        ensureBluetoothA2dpProxy(context)
-        val phoneBatt = getPhoneBatteryPercent(context)
-        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val devices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-            for (dev in devices) {
-                when (dev.type) {
-                    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLE_HEADSET, AudioDeviceInfo.TYPE_BLE_SPEAKER -> {
-                        val rawName = dev.productName?.toString() ?: "Bluetooth Audio"
-                        val (realCodec, btBattery) = queryRealBluetoothCodecAndBattery(rawName)
-                        val effectiveBatt = if (btBattery in 0..100) btBattery else phoneBatt
-                        val codecLabel = realCodec ?: when {
-                            rawName.contains("LDAC", true) || rawName.contains("1000X", true) -> "Sony LDAC™"
-                            rawName.contains("Noble", true) || rawName.contains("Falcon", true) || rawName.contains("aptx", true) -> "Qualcomm® aptX™ Adaptive"
-                            else -> "Bluetooth A2DP"
-                        }
-                        return AudioOutputState("Bluetooth", true, rawName, codecLabel, effectiveBatt)
-                    }
-                    AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> {
-                        return AudioOutputState("4.4mm / 3.5mm", false, "Balanced / Headphones", "Direct Output", phoneBatt)
-                    }
-                    AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_USB_DEVICE -> {
-                        return AudioOutputState("USB-DAC", false, dev.productName?.toString() ?: "USB HiFi DAC", "Bit-Perfect Output", phoneBatt)
-                    }
-                }
-            }
-        }
-        return AudioOutputState("Speaker", false, "Internal Stereo Speaker", "PCM Output", phoneBatt)
-    }
-
-    private fun inspectTrackSpecsSafe(context: Context, track: AudioTrack): Pair<Int, String> {
-        if (isDsdTrack(track)) {
-            return parseDsdSpecsDirectly(context, track.uri)
-        }
-
-        val lowerTitle = track.title.lowercase()
-        val lowerFmt = track.formatName.lowercase()
-        var bitrate = 1536
-        var sampleRate = "192kHz | 24bit"
-        val retriever = MediaMetadataRetriever()
-        try {
-            retriever.setDataSource(context, track.uri)
-            val brStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)
-            if (!brStr.isNullOrBlank()) {
-                val bps = brStr.toIntOrNull() ?: 1536000
-                bitrate = (bps / 1000).coerceIn(64, 18432)
-            }
-            val mime = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE) ?: ""
-            sampleRate = when {
-                lowerTitle.contains("384k") || mime.contains("x-flac") -> "384kHz | 32bit"
-                lowerTitle.endsWith(".flac") || lowerFmt == "flac" -> "192kHz | 24bit"
-                lowerTitle.endsWith(".mqa") || lowerFmt == "mqa" -> "352.8kHz | 24bit"
-                lowerTitle.endsWith(".wav") -> "192kHz | 24bit"
-                else -> "192kHz | 24bit"
-            }
-        } catch (_: Throwable) {
+                } else null
+            } ?: format.intOrNull("bits-per-sample")?.let { "$it-bit" }
+            TrackSpecs(format.intOrNull(MediaFormat.KEY_BIT_RATE)?.div(1000),
+                format.intOrNull(MediaFormat.KEY_SAMPLE_RATE), bits)
+        } catch (_: Exception) {
+            TrackSpecs()
         } finally {
-            try { retriever.release() } catch (_: Throwable) {}
+            extractor.release()
         }
-        return Pair(bitrate, sampleRate)
     }
 
-    private fun parseDsdSpecsDirectly(context: Context, uri: Uri): Pair<Int, String> {
-        try {
-            val engine = sharedDsdEngine ?: FiioDirectDsdEngine(context, sharedDspProcessor) {}
-            val info = engine.parseDsdHeaderAccurate(context, uri, 0L)
-            if (info.isValid) {
-                val kbps = (info.dsdSampleRate * info.channels) / 1000
-                val dsdName = when {
-                    info.dsdSampleRate >= 11289600 -> "11.2MHz | 1bit"
-                    info.dsdSampleRate >= 5644800 -> "5.6MHz | 1bit"
-                    else -> "2.8MHz | 1bit"
-                }
-                return Pair(kbps, dsdName)
-            }
-        } catch (_: Throwable) {}
-        return Pair(11289, "5.6MHz | 1bit")
-    }
+    private fun MediaFormat.intOrNull(key: String) =
+        if (containsKey(key)) getInteger(key).takeIf { it > 0 } else null
 
     private fun isExcluded(text: String, file: String): Boolean {
         val ex = listOf("record", "call@", "call_", "voice", "ghi am", "ghi_am", "cuoc goi", "ringtone", "notification", "alarm")
@@ -863,110 +448,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-object PlaylistStorage {
-    private const val PREF_NAME = "walkman_v7_storage"
-    private const val KEY_TRACKS = "saved_tracks_json"
-    private const val KEY_FOLDERS = "saved_folder_uris"
-    private const val KEY_LAST_INDEX = "saved_last_index"
-    private const val KEY_LAST_POS = "saved_last_pos_ms"
-    private const val KEY_FAVORITES = "saved_favorites_set"
-    private const val KEY_PLAY_MODE = "saved_play_mode"
-
-    fun savePlaylist(context: Context, tracks: List<AudioTrack>) {
-        try {
-            val arr = JSONArray()
-            tracks.take(2000).forEach { t ->
-                val obj = JSONObject().apply {
-                    put("id", t.id)
-                    put("title", t.title)
-                    put("artist", t.artist)
-                    put("duration", t.duration)
-                    put("uri", t.uri.toString())
-                    put("folderInfo", t.folderInfo)
-                    put("sizeBytes", t.sizeBytes)
-                    put("formatName", t.formatName)
-                }
-                arr.put(obj)
-            }
-            context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit().putString(KEY_TRACKS, arr.toString()).apply()
-        } catch (_: Throwable) {}
-    }
-
-    fun loadPlaylist(context: Context): List<AudioTrack> {
-        val list = mutableListOf<AudioTrack>()
-        try {
-            val raw = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).getString(KEY_TRACKS, null) ?: return emptyList()
-            val arr = JSONArray(raw)
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                list.add(
-                    AudioTrack(
-                        id = obj.optLong("id", i.toLong()),
-                        title = obj.optString("title", "Track"),
-                        artist = obj.optString("artist", "Unknown Artist"),
-                        duration = obj.optLong("duration", 226000L),
-                        uri = Uri.parse(obj.getString("uri")),
-                        folderInfo = obj.optString("folderInfo", "Music"),
-                        sizeBytes = obj.optLong("sizeBytes", 0L),
-                        formatName = obj.optString("formatName", "WAV")
-                    )
-                )
-            }
-        } catch (_: Throwable) {}
-        return list
-    }
-
-    fun saveTrackPosition(context: Context, trackTitle: String, posMs: Int, index: Int) {
-        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-        prefs.edit()
-            .putInt(KEY_LAST_INDEX, index)
-            .putInt(KEY_LAST_POS, posMs)
-            .putInt("pos_${trackTitle.hashCode()}", posMs)
-            .apply()
-    }
-
-    fun getSavedTrackPosition(context: Context, trackTitle: String): Int {
-        return context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            .getInt("pos_${trackTitle.hashCode()}", 0)
-    }
-
-    fun loadFavorites(context: Context): Set<String> {
-        return context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            .getStringSet(KEY_FAVORITES, emptySet()) ?: emptySet()
-    }
-
-    fun toggleFavorite(context: Context, trackTitle: String): Set<String> {
-        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-        val current = prefs.getStringSet(KEY_FAVORITES, emptySet())?.toMutableSet() ?: mutableSetOf()
-        if (current.contains(trackTitle)) current.remove(trackTitle) else current.add(trackTitle)
-        prefs.edit().putStringSet(KEY_FAVORITES, current).apply()
-        return current
-    }
-
-    fun savePlayMode(context: Context, mode: PlayMode) {
-        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit().putString(KEY_PLAY_MODE, mode.name).apply()
-    }
-
-    fun loadPlayMode(context: Context): PlayMode {
-        val name = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).getString(KEY_PLAY_MODE, PlayMode.SEQUENTIAL.name) ?: PlayMode.SEQUENTIAL.name
-        return try { PlayMode.valueOf(name) } catch (_: Throwable) { PlayMode.SEQUENTIAL }
-    }
-
-    fun loadLastIndex(context: Context): Int = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).getInt(KEY_LAST_INDEX, 0)
-    fun loadLastPos(context: Context): Int = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).getInt(KEY_LAST_POS, 0)
-
-    fun addSavedFolderUri(context: Context, treeUri: Uri) {
-        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-        val set = prefs.getStringSet(KEY_FOLDERS, emptySet())?.toMutableSet() ?: mutableSetOf()
-        set.add(treeUri.toString())
-        prefs.edit().putStringSet(KEY_FOLDERS, set).apply()
-    }
-
-    fun getSavedFolderUris(context: Context): List<Uri> {
-        return context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).getStringSet(KEY_FOLDERS, emptySet())?.map { Uri.parse(it) } ?: emptyList()
-    }
-}
-
 fun formatTimeMs(ms: Int): String {
     val totalSec = (ms / 1000).coerceAtLeast(0)
     val hrs = totalSec / 3600
@@ -976,52 +457,40 @@ fun formatTimeMs(ms: Int): String {
 }
 
 @Composable
-fun SnowskyEchoDapApp(
+@UnstableApi
+private fun SnowskyEchoDapApp(
+    playback: PlaybackController,
+    screenStarted: Boolean,
     onAutoScanAll: () -> Pair<List<AudioTrack>, Int>,
     onParseManualUris: (List<Uri>) -> List<AudioTrack>,
     onParseFolderUri: (Uri) -> Pair<List<AudioTrack>, Int>,
-    onPlayTrack: (AudioTrack, Int, Long, () -> Unit) -> Unit,
-    onTogglePlay: () -> Boolean,
-    onStopPlayback: () -> Unit,
-    onSeekTo: (Int) -> Unit,
-    onSetMasterVolume: (Float) -> Unit,
-    onSetSleepMultiplier: (Float) -> Unit,
-    onSetPureDsdMode: (Boolean) -> Unit,
-    onSetBass: (Float) -> Unit,
-    onSetVinyl: (Boolean) -> Unit,
-    onSetClearAudio: (Boolean) -> Unit,
-    onSetDsee: (Boolean) -> Unit,
-    onSetChannelBalance: (Float) -> Unit,
-    onSetPhaseInvert: (Boolean) -> Unit,
-    onSetCrossfade: (Boolean) -> Unit,
-    onSetTapeSpeed: (Float) -> Unit,
     onSetKeepScreenOn: (Boolean) -> Unit,
     onToggleOrientation: () -> Unit,
-    onSetEqBand10: (Int, Float) -> Unit,
-    getIsPlaying: () -> Boolean,
-    getPosition: () -> Int,
-    getDuration: () -> Int,
-    getAudioOutputState: () -> AudioOutputState,
-    getTrackSpecs: (AudioTrack) -> Pair<Int, String>
+    getOutputState: () -> AudioOutputState,
+    getTrackSpecs: (AudioTrack) -> TrackSpecs
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val state by playback.state.collectAsStateWithLifecycle()
 
     var currentScreen by remember { mutableStateOf(AppScreen.NOW_PLAYING) }
-    var playlist by remember { mutableStateOf(PlaylistStorage.loadPlaylist(context)) }
+    val playlist = state.playlist
+    val playMode = state.mode
+    val currentIndex = state.index
+    val posMs = state.position
+    val durMs = state.duration
+    val sleepTimerRemainingSec = state.sleepRemaining
+    val currentTrack = state.track
     var favoriteTitles by remember { mutableStateOf(PlaylistStorage.loadFavorites(context)) }
-    var playMode by remember { mutableStateOf(PlaylistStorage.loadPlayMode(context)) }
-
     var isScanning by remember { mutableStateOf(false) }
-    var currentIndex by remember { mutableStateOf(PlaylistStorage.loadLastIndex(context)) }
-    var isPlaying by remember { mutableStateOf(getIsPlaying()) }
-    var posMs by remember { mutableStateOf(PlaylistStorage.loadLastPos(context)) }
-    var durMs by remember { mutableStateOf(226000) }
+    var scanJob by remember { mutableStateOf<Job?>(null) }
 
     var otaAutoCheck by remember { mutableStateOf(OtaUpdateManager.isAutoCheckEnabled(context)) }
+    var otaBeta by remember { mutableStateOf(OtaUpdateManager.isBetaEnabled(context)) }
     var otaIsChecking by remember { mutableStateOf(false) }
     var otaAvailableRelease by remember { mutableStateOf<OtaReleaseInfo?>(null) }
     var otaIsDownloading by remember { mutableStateOf(false) }
+    var otaInstallJob by remember { mutableStateOf<Job?>(null) }
     var otaDownloadPercent by remember { mutableStateOf(0) }
     var otaDownloadedMb by remember { mutableStateOf(0f) }
     var otaTotalMb by remember { mutableStateOf(0f) }
@@ -1043,7 +512,6 @@ fun SnowskyEchoDapApp(
     var crossfadeEnabled by remember { mutableStateOf(dspPrefs.getBoolean("dsp_crossfade", true)) }
     var tapeSpeed by remember { mutableStateOf(dspPrefs.getFloat("dsp_tape_speed", 1.0f)) }
     var keepScreenOnDeskMode by remember { mutableStateOf(false) }
-    var sleepTimerRemainingSec by remember { mutableStateOf(0) }
 
     val eq10Bands = remember {
         mutableStateListOf(
@@ -1060,9 +528,46 @@ fun SnowskyEchoDapApp(
         )
     }
 
-    var audioOutput by remember { mutableStateOf(getAudioOutputState()) }
-    var currentBitrate by remember { mutableStateOf(1536) }
-    var currentSampleRate by remember { mutableStateOf("192kHz | 24bit") }
+    var audioOutput by remember { mutableStateOf(getOutputState()) }
+    var trackSpecs by remember(currentTrack?.uri) { mutableStateOf(TrackSpecs()) }
+    var pipeline by remember(currentTrack?.uri) { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+    val currentBitrate = trackSpecs.bitrateKbps ?: 0
+    val currentSampleRate = trackSpecs.description
+
+    LaunchedEffect(currentTrack?.uri) {
+        currentTrack?.let { track -> trackSpecs = withContext(Dispatchers.IO) { getTrackSpecs(track) } }
+    }
+    LaunchedEffect(screenStarted, currentScreen, currentTrack?.uri, state.wantsPlayback) {
+        if (!screenStarted) return@LaunchedEffect
+        do {
+            audioOutput = getOutputState()
+            if (currentScreen == AppScreen.AUDIO_LAB) {
+                val dsd = playback.dsdOutput
+                val pcm = playback.pcmFormat
+                val source = playback.pcmSource
+                pipeline = listOf(
+                    "Decoder" to when {
+                        dsd != null -> "FFmpeg ${FFmpegNativeDsdDecoder.nativeGetFFmpegVersion()}"
+                        source != null -> "Media3 ${source.sampleMimeType ?: ""}".trim()
+                        else -> "Unknown"
+                    },
+                    "Decoder PCM rate" to (dsd?.decoderRate?.let(::formatRate) ?: pcm?.sampleRate?.let(::formatRate) ?: "Unknown"),
+                    "DSP input" to when {
+                        dsd != null -> "PCM float • ${formatRate(dsd.sampleRate)}"
+                        pcm != null -> "${pcmEncodingLabel(pcm.pcmEncoding)} • ${pcm.channelCount} ch"
+                        else -> "Unknown"
+                    },
+                    "Requested output rate" to (dsd?.sampleRate?.let(::formatRate) ?: pcm?.sampleRate?.let(::formatRate) ?: "Unknown"),
+                    "Hardware output rate" to "Unknown",
+                    "App resampling" to if (dsd != null) {
+                        if (dsd.decoderRate == dsd.sampleRate) "Same rate" else "${formatRate(dsd.decoderRate)} → ${formatRate(dsd.sampleRate)}"
+                    } else if (pcm != null) "Same nominal rate" else "Unknown",
+                    "DSD conversion" to if (dsd == null) "—" else if (dsd.sourceChannels > 2) "DSD → PCM • stereo downmix" else "DSD → PCM"
+                )
+            }
+            delay(1_000)
+        } while (true)
+    }
 
     val notifPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
@@ -1108,140 +613,31 @@ fun SnowskyEchoDapApp(
         }
     }
 
-    fun updateSystemMediaNotification(playing: Boolean) {
-        val t = playlist.getOrNull(currentIndex) ?: return
-        WalkmanMediaSessionService.updateNowPlayingNotification(
-            context = context,
-            title = t.title,
-            artist = t.artist,
-            isPlaying = playing,
-            posMs = posMs.toLong(),
-            durMs = durMs.toLong().coerceAtLeast(t.duration)
-        ) { cmd ->
-            MainActivity.onExternalCommand?.invoke(cmd)
-        }
-    }
-
-    fun playAtIndex(idx: Int, customResumePos: Long? = null) {
-        if (playlist.isEmpty()) return
-        playlist.getOrNull(currentIndex)?.let { oldTrack ->
-            if (posMs > 5000) {
-                PlaylistStorage.saveTrackPosition(context, oldTrack.title, posMs, currentIndex)
-            }
-        }
-
-        val safeIdx = (idx + playlist.size) % playlist.size
-        currentIndex = safeIdx
-        val track = playlist[safeIdx]
-
-        val savedPosForThisTrack = PlaylistStorage.getSavedTrackPosition(context, track.title)
-        val startMs = customResumePos ?: if (track.duration > 600000L && savedPosForThisTrack > 10000) {
-            savedPosForThisTrack.toLong()
-        } else 0L
-
-        posMs = startMs.toInt()
-        durMs = track.duration.toInt().coerceAtLeast(1)
-
-        scope.launch(Dispatchers.IO) {
-            val specs = getTrackSpecs(track)
-            withContext(Dispatchers.Main) {
-                currentBitrate = specs.first
-                currentSampleRate = specs.second
-            }
-        }
-
-        onPlayTrack(track, safeIdx, startMs) {
-            val nextIdx = when (playMode) {
-                PlayMode.REPEAT_ONE -> currentIndex
-                PlayMode.SHUFFLE -> playlist.indices.random()
-                PlayMode.SEQUENTIAL -> (currentIndex + 1) % playlist.size
-            }
-            playAtIndex(nextIdx, 0L)
-        }
-        isPlaying = true
-        updateSystemMediaNotification(true)
-    }
-
-    LaunchedEffect(sleepTimerRemainingSec > 0) {
-        while (sleepTimerRemainingSec > 0) {
-            delay(1000)
-            sleepTimerRemainingSec--
-            if (sleepTimerRemainingSec in 1..60) {
-                onSetSleepMultiplier(sleepTimerRemainingSec / 60f)
-            } else if (sleepTimerRemainingSec == 0) {
-                onStopPlayback()
-                isPlaying = false
-                onSetSleepMultiplier(1.0f)
-                updateSystemMediaNotification(false)
-            }
-        }
-    }
-
-    DisposableEffect(playlist, currentIndex, playMode, isPlaying) {
-        MainActivity.onExternalCommand = { cmd ->
-            scope.launch(Dispatchers.Main) {
-                when {
-                    cmd == "PLAY_PAUSE" -> {
-                        if (!isPlaying && !getIsPlaying()) {
-                            playAtIndex(currentIndex, posMs.toLong())
-                        } else {
-                            isPlaying = onTogglePlay()
-                            updateSystemMediaNotification(isPlaying)
-                        }
-                    }
-                    cmd == "NEXT" -> {
-                        if (playlist.isNotEmpty()) {
-                            val next = if (playMode == PlayMode.SHUFFLE) playlist.indices.random() else currentIndex + 1
-                            playAtIndex(next, null)
-                        }
-                    }
-                    cmd == "PREV" -> {
-                        if (playlist.isNotEmpty()) playAtIndex(currentIndex - 1, null)
-                    }
-                    cmd.startsWith("SEEK:") -> {
-                        val target = cmd.substringAfter("SEEK:").toIntOrNull() ?: 0
-                        posMs = target
-                        onSeekTo(target)
-                        playlist.getOrNull(currentIndex)?.let {
-                            PlaylistStorage.saveTrackPosition(context, it.title, posMs, currentIndex)
-                        }
-                        updateSystemMediaNotification(isPlaying)
-                    }
-                }
-            }
-        }
-        onDispose {}
-    }
-
-    fun runDeduplicatedScan() {
+    fun scanLibrary(load: () -> List<AudioTrack>) {
         if (isScanning) return
         isScanning = true
-        scope.launch(Dispatchers.IO) {
-            val autoRes = onAutoScanAll()
-            val savedFolders = PlaylistStorage.getSavedFolderUris(context)
-            val folderTracks = mutableListOf<AudioTrack>()
-            for (treeUri in savedFolders) {
-                val r = onParseFolderUri(treeUri)
-                folderTracks.addAll(r.first)
-            }
-
-            val mergedList = mutableListOf<AudioTrack>()
-            val seenKeys = mutableSetOf<String>()
-            for (track in (folderTracks + autoRes.first + playlist)) {
-                val key = "${track.title.trim().lowercase()}_${track.sizeBytes}"
-                if (!seenKeys.contains(key)) {
-                    seenKeys.add(key)
-                    mergedList.add(track)
-                }
-            }
-
-            PlaylistStorage.savePlaylist(context, mergedList)
-            withContext(Dispatchers.Main) {
-                playlist = mergedList
+        scanJob = scope.launch {
+            try {
+                val added = withContext(Dispatchers.IO) { load() }
+                val latest = playback.state.value.playlist
+                val merged = (added + latest).distinctBy { "${it.title.trim().lowercase()}_${it.sizeBytes}" }
+                val encoded = withContext(Dispatchers.IO) { PlaylistStorage.encodePlaylist(merged) }
+                PlaylistStorage.savePlaylist(context, encoded)
+                playback.replacePlaylist(merged)
+                Toast.makeText(context, "Đã cập nhật ${merged.size} bài hát", Toast.LENGTH_SHORT).show()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                Toast.makeText(context, "Không thể cập nhật thư viện.", Toast.LENGTH_SHORT).show()
+            } finally {
                 isScanning = false
-                Toast.makeText(context, "Đã cập nhật ${mergedList.size} bài hát", Toast.LENGTH_SHORT).show()
             }
         }
+    }
+
+    fun runDeduplicatedScan() = scanLibrary {
+        val folders = PlaylistStorage.getSavedFolderUris(context).flatMap { onParseFolderUri(it).first }
+        folders + onAutoScanAll().first
     }
 
     val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -1249,33 +645,13 @@ fun SnowskyEchoDapApp(
     }
 
     val manualFilesLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        if (uris.isNotEmpty()) {
-            isScanning = true
-            scope.launch(Dispatchers.IO) {
-                val added = onParseManualUris(uris)
-                val merged = (added + playlist).distinctBy { "${it.title.trim().lowercase()}_${it.sizeBytes}" }
-                PlaylistStorage.savePlaylist(context, merged)
-                withContext(Dispatchers.Main) {
-                    playlist = merged
-                    isScanning = false
-                }
-            }
-        }
+        if (uris.isNotEmpty()) scanLibrary { onParseManualUris(uris) }
     }
 
-    val folderPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { treeUri ->
-        if (treeUri != null) {
-            PlaylistStorage.addSavedFolderUri(context, treeUri)
-            isScanning = true
-            scope.launch(Dispatchers.IO) {
-                val res = onParseFolderUri(treeUri)
-                val merged = (res.first + playlist).distinctBy { "${it.title.trim().lowercase()}_${it.sizeBytes}" }
-                PlaylistStorage.savePlaylist(context, merged)
-                withContext(Dispatchers.Main) {
-                    playlist = merged
-                    isScanning = false
-                }
-            }
+    val folderPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) scanLibrary {
+            PlaylistStorage.addSavedFolderUri(context, uri)
+            onParseFolderUri(uri).first
         }
     }
 
@@ -1283,21 +659,9 @@ fun SnowskyEchoDapApp(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            notifPermissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
-        }
         val hasPerm = ContextCompat.checkSelfPermission(context, requiredPermission) == PackageManager.PERMISSION_GRANTED
         if (hasPerm && playlist.isEmpty()) {
             runDeduplicatedScan()
-        }
-        playlist.getOrNull(currentIndex)?.let { track ->
-            withContext(Dispatchers.IO) {
-                val specs = getTrackSpecs(track)
-                withContext(Dispatchers.Main) {
-                    currentBitrate = specs.first
-                    currentSampleRate = specs.second
-                }
-            }
         }
         if (otaAutoCheck) {
             delay(1500)
@@ -1305,27 +669,6 @@ fun SnowskyEchoDapApp(
         }
     }
 
-    LaunchedEffect(isPlaying) {
-        var tickCounter = 0
-        while (true) {
-            isPlaying = getIsPlaying()
-            if (isPlaying) {
-                posMs = getPosition()
-                durMs = getDuration().coerceAtLeast(1)
-                tickCounter++
-                if (tickCounter % 15 == 0) {
-                    playlist.getOrNull(currentIndex)?.let { t ->
-                        PlaylistStorage.saveTrackPosition(context, t.title, posMs, currentIndex)
-                    }
-                    audioOutput = getAudioOutputState()
-                    updateSystemMediaNotification(true)
-                }
-            }
-            delay(60)
-        }
-    }
-
-    val currentTrack = playlist.getOrNull(currentIndex)
     val isCurrentFavorite = currentTrack != null && favoriteTitles.contains(currentTrack.title)
 
     Box(
@@ -1346,7 +689,7 @@ fun SnowskyEchoDapApp(
                     track = currentTrack,
                     trackIndex = currentIndex,
                     totalTracks = playlist.size,
-                    formatName = currentTrack?.formatName ?: "WAV",
+                    formatName = currentTrack?.formatName ?: "—",
                     sampleRateText = currentSampleRate,
                     bitrateKbps = currentBitrate,
                     masterVolumePercent = (masterVol * 100).roundToInt(),
@@ -1357,53 +700,30 @@ fun SnowskyEchoDapApp(
                             favoriteTitles = PlaylistStorage.toggleFavorite(context, it.title)
                         }
                     },
-                    isPlaying = isPlaying,
+                    isPlaying = state.isPlaying && screenStarted,
                     playMode = playMode,
                     posMs = posMs,
                     durMs = durMs,
-                    onSeek = { target ->
-                        posMs = target
-                        onSeekTo(target)
-                        currentTrack?.let {
-                            PlaylistStorage.saveTrackPosition(context, it.title, posMs, currentIndex)
-                        }
-                        updateSystemMediaNotification(isPlaying)
-                    },
+                    onSeek = playback::seek,
                     onToggleShuffle = {
-                        playMode = if (playMode == PlayMode.SHUFFLE) PlayMode.SEQUENTIAL else PlayMode.SHUFFLE
-                        PlaylistStorage.savePlayMode(context, playMode)
+                        playback.changeMode(if (playMode == PlayMode.SHUFFLE) PlayMode.SEQUENTIAL else PlayMode.SHUFFLE)
                     },
                     onToggleRepeat = {
-                        playMode = when (playMode) {
+                        playback.changeMode(when (playMode) {
                             PlayMode.SEQUENTIAL -> PlayMode.REPEAT_ONE
                             PlayMode.REPEAT_ONE -> PlayMode.SHUFFLE
                             PlayMode.SHUFFLE -> PlayMode.SEQUENTIAL
-                        }
-                        PlaylistStorage.savePlayMode(context, playMode)
+                        })
                     },
                     onPlayPause = {
-                        if (playlist.isEmpty()) {
-                            currentScreen = AppScreen.LIBRARY
-                        } else if (!isPlaying && !getIsPlaying()) {
-                            playAtIndex(currentIndex, posMs.toLong())
-                        } else {
-                            isPlaying = onTogglePlay()
-                            updateSystemMediaNotification(isPlaying)
-                        }
+                        if (playlist.isEmpty()) currentScreen = AppScreen.LIBRARY else playback.toggle()
                     },
-                    onPrev = {
-                        if (playlist.isNotEmpty()) playAtIndex(currentIndex - 1, null)
-                    },
-                    onNext = {
-                        if (playlist.isNotEmpty()) {
-                            val next = if (playMode == PlayMode.SHUFFLE) playlist.indices.random() else currentIndex + 1
-                            playAtIndex(next, null)
-                        }
-                    },
+                    onPrev = { playback.advance(-1) },
+                    onNext = { playback.advance(1) },
                     onToggleOrientation = onToggleOrientation,
                     onOpenLibrary = { currentScreen = AppScreen.LIBRARY },
                     onOpenAudioLab = {
-                        audioOutput = getAudioOutputState()
+                        audioOutput = getOutputState()
                         currentScreen = AppScreen.AUDIO_LAB
                     }
                 )
@@ -1423,14 +743,14 @@ fun SnowskyEchoDapApp(
                         favoriteTitles = PlaylistStorage.toggleFavorite(context, title)
                     },
                     onClearSaved = {
-                        playlist = emptyList()
-                        PlaylistStorage.savePlaylist(context, emptyList())
-                        posMs = 0
+                        scanJob?.cancel()
+                        PlaylistStorage.savePlaylist(context, "[]")
+                        playback.replacePlaylist(emptyList())
                     },
                     onSelectTrack = { track ->
-                        val realIndex = playlist.indexOfFirst { it.id == track.id && it.title == track.title }
+                        val realIndex = playlist.indexOfFirst { it.uri == track.uri }
                         if (realIndex >= 0) {
-                            playAtIndex(realIndex, null)
+                            playback.select(realIndex)
                             currentScreen = AppScreen.NOW_PLAYING
                         }
                     }
@@ -1454,6 +774,12 @@ fun SnowskyEchoDapApp(
                     currentBitrate = currentBitrate,
                     currentSampleRate = currentSampleRate,
                     audioOutput = audioOutput,
+                    pipeline = pipeline,
+                    otaBeta = otaBeta,
+                    onOtaBetaToggle = { enabled ->
+                        otaBeta = enabled
+                        OtaUpdateManager.setBetaEnabled(context, enabled)
+                    },
                     otaAutoCheck = otaAutoCheck,
                     otaIsChecking = otaIsChecking,
                     onOtaAutoCheckToggle = { enabled ->
@@ -1464,63 +790,60 @@ fun SnowskyEchoDapApp(
                     onBack = { currentScreen = AppScreen.NOW_PLAYING },
                     onPureDsdToggle = {
                         pureDsdMode = it
-                        onSetPureDsdMode(it)
+                        playback.setDirect(it)
                     },
                     onMasterVolChange = {
                         masterVol = it
-                        onSetMasterVolume(it)
+                        playback.setVolume(it)
                     },
                     onBassChange = {
                         megaBass = it
-                        onSetBass(it)
+                        playback.setBass(it)
                     },
                     onClearAudioToggle = {
                         clearAudioPlus = it
-                        onSetClearAudio(it)
+                        playback.setClarity(it)
                     },
                     onDseeToggle = {
                         dseeUltimate = it
-                        onSetDsee(it)
+                        playback.setTreble(it)
                     },
                     onVinylToggle = {
                         vinylProcessor = it
-                        onSetVinyl(it)
+                        playback.setVinyl(it)
                     },
                     onPhaseInvertToggle = {
                         phaseInvert = it
-                        onSetPhaseInvert(it)
+                        playback.setInvert(it)
                     },
                     onBalanceChange = { rawBal ->
                         val snapped = if (abs(rawBal) < 0.03f) 0f else rawBal.coerceIn(-0.5f, 0.5f)
                         channelBalance = snapped
-                        onSetChannelBalance(snapped)
+                        playback.setBalance(snapped)
                     },
                     onBand10Change = { idx, gain ->
                         eq10Bands[idx] = gain
-                        onSetEqBand10(idx, gain)
+                        playback.setEq(idx, gain)
                     },
                     onResetEq = {
                         for (i in 0 until 10) {
                             eq10Bands[i] = 0f
-                            onSetEqBand10(i, 0f)
+                            playback.setEq(i, 0f)
                         }
                     },
                     onCrossfadeToggle = {
                         crossfadeEnabled = it
-                        onSetCrossfade(it)
+                        playback.setFade(it)
                     },
                     onTapeSpeedChange = {
                         tapeSpeed = it
-                        onSetTapeSpeed(it)
+                        playback.setSpeed(it)
                     },
                     onKeepScreenOnToggle = {
                         keepScreenOnDeskMode = it
                         onSetKeepScreenOn(it)
                     },
-                    onSetSleepMinutes = { mins ->
-                        sleepTimerRemainingSec = mins * 60
-                        onSetSleepMultiplier(1.0f)
-                    }
+                    onSetSleepMinutes = playback::setSleepMinutes
                 )
             }
         }
@@ -1554,10 +877,6 @@ fun SnowskyEchoDapApp(
                             otaIsDownloading = false
                             res.onSuccess { file ->
                                 otaDownloadedFile = file
-                                val installRes = OtaUpdateManager.triggerApkInstallation(context, file)
-                                installRes.onFailure { err ->
-                                    otaErrorMsg = err.localizedMessage
-                                }
                             }.onFailure { err ->
                                 otaErrorMsg = err.localizedMessage ?: "Lỗi tải gói cập nhật APK."
                             }
@@ -1565,9 +884,13 @@ fun SnowskyEchoDapApp(
                     }
                 },
                 onInstallDownloaded = { file ->
-                    val installRes = OtaUpdateManager.triggerApkInstallation(context, file)
-                    installRes.onFailure { err ->
-                        otaErrorMsg = err.localizedMessage
+                    if (otaInstallJob?.isActive != true) {
+                        otaErrorMsg = null
+                        otaInstallJob = scope.launch {
+                            OtaUpdateManager.triggerApkInstallation(context, file, release).onFailure { err ->
+                                otaErrorMsg = err.localizedMessage
+                            }
+                        }
                     }
                 }
             )
@@ -1741,7 +1064,7 @@ fun OtaUpdateDialog(
                         shape = RoundedCornerShape(10.dp)
                     ) {
                         Text(
-                            text = if (isDownloading) "Đang tải..." else "Cập nhật ngay",
+                            text = if (isDownloading) "Đang tải..." else "Tải APK",
                             fontWeight = FontWeight.Bold,
                             fontSize = 13.sp
                         )
@@ -1820,7 +1143,7 @@ fun ExactReferenceCassetteScreen(
     }
 
     val trackOrderStr = if (totalTracks > 0) "%03d/%03d".format(trackIndex + 1, totalTracks) else "001/035"
-    val specLineStr = "$formatName | ${sampleRateText.replace(" ", "")} | ${bitrateKbps}kbps"
+    val specLineStr = "$formatName | $sampleRateText | " + if (bitrateKbps > 0) "${bitrateKbps}kbps" else "—"
     val trackTitleStr = track?.title ?: "Chưa chọn bài hát"
     val trackArtistStr = track?.artist?.takeIf { !it.contains("<unknown>", true) } ?: "Unknown Artist"
 
@@ -3409,6 +2732,9 @@ fun SignatureAudioLabScreen(
     currentBitrate: Int,
     currentSampleRate: String,
     audioOutput: AudioOutputState,
+    pipeline: List<Pair<String, String>>,
+    otaBeta: Boolean,
+    onOtaBetaToggle: (Boolean) -> Unit,
     otaAutoCheck: Boolean,
     otaIsChecking: Boolean,
     onOtaAutoCheckToggle: (Boolean) -> Unit,
@@ -3513,7 +2839,7 @@ fun SignatureAudioLabScreen(
                 ) {
                     Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
                         Text(
-                            text = "Pure DSD Mode",
+                            text = "Direct Sound",
                             color = TextPure,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Medium
@@ -3547,7 +2873,7 @@ fun SignatureAudioLabScreen(
                 ) {
                     Text("Signal Path Status", color = ColdSilver, fontSize = 12.sp)
                     Text(
-                        text = if (pureDsdMode) "Pure Direct (1:1 L/R Matched)" else "DSP Processed (1:1 L/R Matched)",
+                        text = if (pureDsdMode) "DSP Bypass" else "DSP Enabled",
                         color = if (pureDsdMode) ChampagneGold else TextPure,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium
@@ -3634,8 +2960,8 @@ fun SignatureAudioLabScreen(
 
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("Mega Bass", color = TextPure, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                            Text("+${(megaBass * 10).roundToInt()} dB", color = ChampagneGold, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                            Text("Bass Boost", color = TextPure, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                            Text("+${(megaBass * 6).roundToInt()} dB", color = ChampagneGold, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
                         }
                         Slider(
                             value = megaBass.coerceIn(0f, 1f),
@@ -3650,7 +2976,7 @@ fun SignatureAudioLabScreen(
                     }
 
                     AudioLabSwitchRow(
-                        title = "Clear Audio",
+                        title = "Clarity & Stereo Width",
                         subtitle = "Tối ưu độ tách bạch và không gian Stereo",
                         checked = clearAudio,
                         enabled = !pureDsdMode,
@@ -3658,7 +2984,7 @@ fun SignatureAudioLabScreen(
                     )
 
                     AudioLabSwitchRow(
-                        title = "DSEE",
+                        title = "Treble Detail",
                         subtitle = "Khôi phục dải âm tần số cao",
                         checked = dsee,
                         enabled = !pureDsdMode,
@@ -3814,6 +3140,14 @@ fun SignatureAudioLabScreen(
                     onCheckedChange = onOtaAutoCheckToggle
                 )
 
+                AudioLabSwitchRow(
+                    title = "Nhận bản beta",
+                    subtitle = "Cho phép kiểm tra bản phát hành thử nghiệm",
+                    checked = otaBeta,
+                    enabled = true,
+                    onCheckedChange = onOtaBetaToggle
+                )
+
                 Spacer(modifier = Modifier.height(12.dp))
                 HorizontalDivider(color = BezelBorder)
                 Spacer(modifier = Modifier.height(12.dp))
@@ -3877,8 +3211,8 @@ fun SignatureAudioLabScreen(
                 Spacer(modifier = Modifier.height(12.dp))
 
                 AudioLabSwitchRow(
-                    title = "Smooth Crossfade",
-                    subtitle = "Chuyển bài mượt không ngắt quãng",
+                    title = "PCM Fade-in",
+                    subtitle = "Tăng âm lượng dần khi bắt đầu bài PCM",
                     checked = crossfade,
                     enabled = true,
                     onCheckedChange = onCrossfadeToggle
@@ -3899,9 +3233,15 @@ fun SignatureAudioLabScreen(
                 Spacer(modifier = Modifier.height(12.dp))
 
                 AudioLabInfoRow("Output Device", audioOutput.deviceName)
+                audioOutput.connectedDevice?.let { AudioLabInfoRow("Connected device", it) }
+                if (audioOutput.supportedRates.isNotEmpty()) {
+                    AudioLabInfoRow("Reported device rates", audioOutput.supportedRates.joinToString { formatRate(it) })
+                }
                 AudioLabInfoRow("Audio Codec", audioOutput.codecEstimate)
                 AudioLabInfoRow("Playing File", currentTrack?.title ?: "None")
-                AudioLabInfoRow("Stream Format", "${currentTrack?.formatName ?: "PCM"} • $currentSampleRate • $currentBitrate kbps")
+                val bitrateLabel = if (currentBitrate > 0) "$currentBitrate kbps" else "Unknown bitrate"
+                AudioLabInfoRow("Source", "${currentTrack?.formatName ?: "Unknown"} • $currentSampleRate • $bitrateLabel")
+                pipeline.forEach { (label, value) -> AudioLabInfoRow(label, value) }
                 AudioLabInfoRow("App Version", "Walkman ${BuildConfig.VERSION_NAME}")
             }
 

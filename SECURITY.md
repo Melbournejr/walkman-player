@@ -13,7 +13,9 @@ Từ **Settings → Secrets and variables → Actions**, tạo các repository s
 | `WALKMAN_KEY_ALIAS` | Alias đúng của chứng thư hiện tại, kể cả khoảng trắng |
 | `WALKMAN_KEY_PASSWORD` | Mật khẩu của khóa |
 
-Build tại chỗ dùng bốn biến `WALKMAN_KEYSTORE_PATH`, `WALKMAN_STORE_PASSWORD`, `WALKMAN_KEY_ALIAS` và `WALKMAN_KEY_PASSWORD`. Đặt đường dẫn tuyệt đối, giữ bí mật ngoài Git và chạy `gradle assembleRelease`. Dùng `apksigner verify --min-sdk-version 26 --print-certs` để so fingerprint trước khi cài. Workflow thủ công có tùy chọn ký artifact riêng với thao tác publish.
+Build tại chỗ dùng bốn biến `WALKMAN_KEYSTORE_PATH`, `WALKMAN_STORE_PASSWORD`, `WALKMAN_KEY_ALIAS` và `WALKMAN_KEY_PASSWORD`. Đặt đường dẫn tuyệt đối, giữ bí mật ngoài Git và chạy `gradle assembleRelease`. Dùng `apksigner verify --min-sdk-version 26 --print-certs` để so fingerprint trước khi cài.
+
+Trong **Actions → Build Walkman APK → Run workflow**, chọn nhánh cần build và đặt `sign=true`, `publish=false` để lấy APK đã ký trong **Artifacts → Walkman-APK**. Cả hai tùy chọn ở `false` sẽ tạo APK chưa ký. Tùy chọn `publish=true` yêu cầu chọn tag có sẵn khớp phiên bản trong Gradle, ví dụ `v11.9.0`.
 
 ## Chuyển tiếp sang khóa mới
 

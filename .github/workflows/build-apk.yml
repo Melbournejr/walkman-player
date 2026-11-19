@@ -9,11 +9,11 @@ on:
   workflow_dispatch:
     inputs:
       sign:
-        description: Sign the build artifact using the installed-version key
+        description: Sign the APK artifact using the existing key
         type: boolean
         default: false
       publish:
-        description: Publish the selected version tag
+        description: Publish a GitHub Release for the selected version tag
         type: boolean
         default: false
 
@@ -27,20 +27,49 @@ jobs:
       publish: ${{ steps.prepare.outputs.publish }}
       version: ${{ steps.prepare.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-java@v4
+      - name: Validate release request
+        id: prepare
+        env:
+          MANUAL_PUBLISH: ${{ inputs.publish }}
+          MANUAL_SIGN: ${{ inputs.sign }}
+        run: |
+          set -euo pipefail
+          version=$(sed -nE 's/^val walkmanVersion = "([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' app/build.gradle.kts)
+          if [[ -z "$version" || "$version" == *$'\n'* ]]; then
+            echo "::error title=Invalid APK version::Expected one numeric walkmanVersion in app/build.gradle.kts."
+            exit 1
+          fi
+          publish=false
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF_TYPE" == tag ]] || [[ "$MANUAL_PUBLISH" == true ]]; then
+            if [[ "$GITHUB_REF" != "refs/tags/v$version" ]]; then
+              echo "::error title=Version tag required::Publish requires the v$version tag. Selected ref is $GITHUB_REF. For a signed APK artifact, run with sign=true and publish=false."
+              exit 1
+            fi
+            publish=true
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          sign=false
+          if [[ "$publish" == true || "$MANUAL_SIGN" == true ]]; then
+            sign=true
+          fi
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "sign=$sign" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: temurin
 
       - name: Install Android SDK components
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
         with:
+          cmdline-tools-version: '12266719'
           packages: 'platforms;android-34 build-tools;34.0.0 ndk;26.1.10909125 cmake;3.22.1'
           log-accepted-android-sdk-licenses: false
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         id: ffmpeg
         with:
           path: |
@@ -52,31 +81,9 @@ jobs:
         if: steps.ffmpeg.outputs.cache-hit != 'true'
         run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/26.1.10909125" scripts/build-ffmpeg-android.sh
 
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: '8.4'
-
-      - name: Validate release request
-        id: prepare
-        env:
-          MANUAL_PUBLISH: ${{ inputs.publish }}
-          MANUAL_SIGN: ${{ inputs.sign }}
-        run: |
-          set -euo pipefail
-          version=$(sed -nE 's/^val walkmanVersion = "([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' app/build.gradle.kts)
-          test -n "$version"
-          publish=false
-          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF_TYPE" == tag ]] || [[ "$MANUAL_PUBLISH" == true ]]; then
-            test "$GITHUB_REF" = "refs/tags/v$version"
-            publish=true
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          sign=false
-          if [[ "$publish" == true || "$MANUAL_SIGN" == true ]]; then
-            sign=true
-          fi
-          echo "publish=$publish" >> "$GITHUB_OUTPUT"
-          echo "sign=$sign" >> "$GITHUB_OUTPUT"
 
       - name: Run tests and lint
         run: gradle testReleaseUnitTest lintRelease --no-daemon
@@ -94,10 +101,10 @@ jobs:
           WALKMAN_KEY_PASSWORD: ${{ secrets.WALKMAN_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          : "${WALKMAN_KEYSTORE_BASE64:?Missing keystore secret}"
-          : "${WALKMAN_STORE_PASSWORD:?Missing store password}"
-          : "${WALKMAN_KEY_ALIAS:?Missing key alias}"
-          : "${WALKMAN_KEY_PASSWORD:?Missing key password}"
+          : "${WALKMAN_KEYSTORE_BASE64:?Configure the WALKMAN_KEYSTORE_BASE64 Actions secret}"
+          : "${WALKMAN_STORE_PASSWORD:?Configure the WALKMAN_STORE_PASSWORD Actions secret}"
+          : "${WALKMAN_KEY_ALIAS:?Configure the WALKMAN_KEY_ALIAS Actions secret}"
+          : "${WALKMAN_KEY_PASSWORD:?Configure the WALKMAN_KEY_PASSWORD Actions secret}"
           umask 077
           export WALKMAN_KEYSTORE_PATH="$RUNNER_TEMP/walkman-release.jks"
           trap 'rm -f "$WALKMAN_KEYSTORE_PATH"' EXIT
@@ -122,7 +129,7 @@ jobs:
           cd dist
           sha256sum ./*.apk > SHA256SUMS.txt
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: Walkman-APK
           path: dist/
@@ -135,7 +142,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: Walkman-APK
       - name: Publish verified APK

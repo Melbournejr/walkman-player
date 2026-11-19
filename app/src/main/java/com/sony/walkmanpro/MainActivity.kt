@@ -161,8 +161,8 @@ private fun formatRate(hz: Int) = if (hz >= 1_000_000) "${hz / 1_000_000.0} MHz"
 private fun pcmEncodingLabel(encoding: Int) = when (encoding) {
     C.ENCODING_PCM_8BIT -> "PCM 8-bit"
     C.ENCODING_PCM_16BIT, C.ENCODING_PCM_16BIT_BIG_ENDIAN -> "PCM 16-bit"
-    C.ENCODING_PCM_24BIT -> "PCM 24-bit"
-    C.ENCODING_PCM_32BIT -> "PCM 32-bit"
+    C.ENCODING_PCM_24BIT, C.ENCODING_PCM_24BIT_BIG_ENDIAN -> "PCM 24-bit"
+    C.ENCODING_PCM_32BIT, C.ENCODING_PCM_32BIT_BIG_ENDIAN -> "PCM 32-bit"
     C.ENCODING_PCM_FLOAT -> "PCM float"
     else -> "Unknown"
 }
@@ -303,8 +303,8 @@ class MainActivity : ComponentActivity() {
             val bits = when (encoding) {
                 C.ENCODING_PCM_8BIT -> "8-bit"
                 C.ENCODING_PCM_16BIT, C.ENCODING_PCM_16BIT_BIG_ENDIAN -> "16-bit"
-                C.ENCODING_PCM_24BIT -> "24-bit"
-                C.ENCODING_PCM_32BIT -> "32-bit"
+                C.ENCODING_PCM_24BIT, C.ENCODING_PCM_24BIT_BIG_ENDIAN -> "24-bit"
+                C.ENCODING_PCM_32BIT, C.ENCODING_PCM_32BIT_BIG_ENDIAN -> "32-bit"
                 C.ENCODING_PCM_FLOAT -> "32-bit float"
                 else -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     when (encoding) {

@@ -10,7 +10,7 @@ Linux x86_64, JDK 17, Gradle 8.4, Android SDK 34, NDK r26b và CMake 3.22.1. APK
 | --- | --- |
 | `assembleRelease` | Tạo APK ARM64, package `com.sony.walkmanpro`, versionCode 1190, minSdk 26 và targetSdk 34. APK production tắt debuggable. |
 | `lintRelease` | 0 lỗi. Vẫn có cảnh báo dependency, tài nguyên và Compose lint registry của toolchain hiện tại. |
-| JVM `testReleaseUnitTest` | 14/14. PCM Direct giữ nguyên byte ở 16/24/32-bit và float trên sáu sample rate. DSP float xử lý đủ kênh, kể cả khi sink chỉ nhận một phần buffer. |
+| JVM `testReleaseUnitTest` | 15/15. PCM Direct giữ nguyên byte ở 16/24/32-bit (LE/BE) và float trên sáu sample rate. DSP xử lý PCM big-endian 24/32-bit và giữ đủ kênh float, kể cả khi sink chỉ nhận một phần buffer. |
 | DSP | Sine 1 kHz kiểm tra độ suy hao RMS theo biquad ở bảy sample rate. Impulse, silence, full-scale, sweep, white noise và pink noise đã lọc cho kết quả hữu hạn trong ±1; kênh im lặng giữ giá trị 0. Đã thử thay đổi pha và balance. |
 | DSD header | DSF nhiều tốc độ và file lỗi, DFF thông thường, thời lượng DST theo FRTE. |
 | JNI trên Linux | 14 tình huống với cùng mã C++ và FFmpeg 7.1.5. DSF DSD64/128/256, DFF DSD và DST thực giải mã thành PCM hữu hạn. Seek 500 ms và 60 ms lần lượt khớp ở file tổng hợp và mẫu DST. Đã thử seek về 0 giữa luồng, hủy, EOF và header lỗi. |

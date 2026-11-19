@@ -21,10 +21,14 @@ import java.nio.ByteOrder
 class DspAudioSinkTest {
     @Test
     fun directPassesOriginalBufferForEverySupportedPcmWidth() {
-        val encodings = listOf(C.ENCODING_PCM_16BIT, C.ENCODING_PCM_24BIT, C.ENCODING_PCM_32BIT, C.ENCODING_PCM_FLOAT)
+        val encodings = listOf(
+            C.ENCODING_PCM_16BIT, C.ENCODING_PCM_16BIT_BIG_ENDIAN,
+            C.ENCODING_PCM_24BIT, C.ENCODING_PCM_24BIT_BIG_ENDIAN,
+            C.ENCODING_PCM_32BIT, C.ENCODING_PCM_32BIT_BIG_ENDIAN, C.ENCODING_PCM_FLOAT
+        )
         for (rate in listOf(44_100, 48_000, 88_200, 96_000, 176_400, 192_000)) {
             for (encoding in encodings) {
-                val original = buffer().put(ByteArray(48) { (17 * it).toByte() }).flip() as ByteBuffer
+                val original = buffer().put(ByteArray(72) { (17 * it).toByte() }).flip() as ByteBuffer
                 val input = getBytes(original)
                 val sink = DspAudioSink(delegate { sent ->
                     assertSame(original, sent)
@@ -64,11 +68,27 @@ class DspAudioSinkTest {
         assertFalse(original.hasRemaining())
     }
 
+    @Test
+    fun activeDspProcessesBigEndianHighResolutionPcm() {
+        val settings = DspSettings(bass = 0f, clarity = false, treble = false, vinyl = false, invert = true)
+        val encodings = mapOf(C.ENCODING_PCM_24BIT_BIG_ENDIAN to 3, C.ENCODING_PCM_32BIT_BIG_ENDIAN to 4)
+        for ((encoding, width) in encodings) {
+            val original = buffer().put(ByteArray(width).apply { this[0] = 0x10 }).flip() as ByteBuffer
+            val sink = DspAudioSink(delegate { sent ->
+                assertArrayEquals(ByteArray(width).apply { this[0] = 0xf0.toByte() }, getBytes(sent))
+                sent.position(sent.limit())
+                true
+            }, { settings }, {})
+            sink.configure(rawFormat(96_000, 1, encoding), 0, null)
+            assertTrue(sink.handleBuffer(original, 0L, 1))
+        }
+    }
+
     private fun rawFormat(rate: Int, channels: Int, encoding: Int) = Format.Builder()
         .setSampleMimeType(MimeTypes.AUDIO_RAW).setSampleRate(rate).setChannelCount(channels)
         .setPcmEncoding(encoding).build()
 
-    private fun buffer() = ByteBuffer.allocateDirect(48).order(ByteOrder.LITTLE_ENDIAN)
+    private fun buffer() = ByteBuffer.allocateDirect(72).order(ByteOrder.LITTLE_ENDIAN)
 
     private fun getBytes(buffer: ByteBuffer): ByteArray =
         ByteArray(buffer.remaining()).also { buffer.duplicate().get(it) }

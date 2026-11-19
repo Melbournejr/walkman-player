@@ -105,8 +105,8 @@ internal class DspAudioSink(
     private fun sampleBytes() = when (encoding) {
         C.ENCODING_PCM_8BIT -> 1
         C.ENCODING_PCM_16BIT, C.ENCODING_PCM_16BIT_BIG_ENDIAN -> 2
-        C.ENCODING_PCM_24BIT -> 3
-        C.ENCODING_PCM_32BIT, C.ENCODING_PCM_FLOAT -> 4
+        C.ENCODING_PCM_24BIT, C.ENCODING_PCM_24BIT_BIG_ENDIAN -> 3
+        C.ENCODING_PCM_32BIT, C.ENCODING_PCM_32BIT_BIG_ENDIAN, C.ENCODING_PCM_FLOAT -> 4
         else -> 0
     }
 
@@ -120,7 +120,14 @@ internal class DspAudioSink(
             val hi = buffer.get().toInt()
             (lo or (mid shl 8) or (hi shl 16)) / 8388608.0
         }
+        C.ENCODING_PCM_24BIT_BIG_ENDIAN -> {
+            val hi = buffer.get().toInt()
+            val mid = buffer.get().toInt() and 255
+            val lo = buffer.get().toInt() and 255
+            (lo or (mid shl 8) or (hi shl 16)) / 8388608.0
+        }
         C.ENCODING_PCM_32BIT -> buffer.int / 2147483648.0
+        C.ENCODING_PCM_32BIT_BIG_ENDIAN -> Integer.reverseBytes(buffer.int) / 2147483648.0
         else -> buffer.float.toDouble()
     }
 
@@ -135,7 +142,14 @@ internal class DspAudioSink(
                 buffer.put((value shr 8).toByte())
                 buffer.put((value shr 16).toByte())
             }
+            C.ENCODING_PCM_24BIT_BIG_ENDIAN -> {
+                val value = scaled(sample, 8388608).toInt()
+                buffer.put((value shr 16).toByte())
+                buffer.put((value shr 8).toByte())
+                buffer.put(value.toByte())
+            }
             C.ENCODING_PCM_32BIT -> buffer.putInt(scaled(sample, 2147483648L).toInt())
+            C.ENCODING_PCM_32BIT_BIG_ENDIAN -> buffer.putInt(Integer.reverseBytes(scaled(sample, 2147483648L).toInt()))
             C.ENCODING_PCM_FLOAT -> buffer.putFloat(sample.toFloat())
         }
     }

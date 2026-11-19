@@ -1,132 +1,145 @@
-﻿name: Build & Release Walkman APK
+name: Build Walkman APK
 
 on:
+  pull_request:
+    branches: [main]
   push:
-    branches: [ "main", "master" ]
+    branches: [main]
+    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      sign:
+        description: Sign the build artifact using the installed-version key
+        type: boolean
+        default: false
+      publish:
+        description: Publish the selected version tag
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.prepare.outputs.publish }}
+      version: ${{ steps.prepare.outputs.version }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           java-version: '17'
-          distribution: 'temurin'
+          distribution: temurin
 
-      - name: Setup Android NDK & CMake
-        id: setup_ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r26b
-          cmake-version: 3.22.1
+      - name: Install Android SDK components
+        run: sdkmanager 'platforms;android-34' 'build-tools;34.0.0' 'ndk;26.1.10909125' 'cmake;3.22.1'
 
-      - name: Cache Compiled FFmpeg 6.0 Android arm64-v8a
-        id: cache_ffmpeg
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
+        id: ffmpeg
         with:
           path: |
             app/src/main/jniLibs/arm64-v8a
             app/src/main/cpp/include
-          key: ffmpeg-6.0-android-arm64-dsd-v1
+          key: android-ffmpeg-arm64-r26b-${{ hashFiles('scripts/build-ffmpeg-android.sh') }}
 
-      - name: Build FFmpeg 6.0 Native Libraries (arm64-v8a) from Official GitHub Source
-        if: steps.cache_ffmpeg.outputs.cache-hit != 'true'
-        run: |
-          set -e
-          echo "Cloning official FFmpeg n6.0 source from GitHub..."
-          git clone --depth 1 --branch n6.0 https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg-src
+      - name: Build FFmpeg
+        if: steps.ffmpeg.outputs.cache-hit != 'true'
+        run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/26.1.10909125" scripts/build-ffmpeg-android.sh
 
-          TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
-          API=26
-          PREFIX="/tmp/ffmpeg-build"
-
-          cd /tmp/ffmpeg-src
-          ./configure \
-            --prefix="$PREFIX" \
-            --enable-cross-compile \
-            --target-os=android \
-            --arch=aarch64 \
-            --cpu=armv8-a \
-            --cc="$TOOLCHAIN/bin/aarch64-linux-android${API}-clang" \
-            --cxx="$TOOLCHAIN/bin/aarch64-linux-android${API}-clang++" \
-            --ar="$TOOLCHAIN/bin/llvm-ar" \
-            --nm="$TOOLCHAIN/bin/llvm-nm" \
-            --ranlib="$TOOLCHAIN/bin/llvm-ranlib" \
-            --strip="$TOOLCHAIN/bin/llvm-strip" \
-            --enable-shared \
-            --disable-static \
-            --disable-programs \
-            --disable-doc \
-            --disable-avdevice \
-            --disable-swscale \
-            --disable-postproc \
-            --disable-avfilter \
-            --disable-network \
-            --disable-everything \
-            --enable-avutil \
-            --enable-swresample \
-            --enable-avcodec \
-            --enable-avformat \
-            --enable-protocol=file,pipe \
-            --enable-demuxer=dsf,iff,wav,flac,mp3,aac,ogg,mov \
-            --enable-decoder=dsd_lsbf,dsd_msbf,dsd_lsbf_planar,dsd_msbf_planar,dst,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,flac,mp3,aac \
-            --extra-cflags="-O3 -fPIC -march=armv8-a+simd"
-
-          make -j$(nproc)
-          make install
-
-          mkdir -p "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a"
-          mkdir -p "$GITHUB_WORKSPACE/app/src/main/cpp/include"
-
-          cp -r "$PREFIX/include/"* "$GITHUB_WORKSPACE/app/src/main/cpp/include/"
-          cp -L "$PREFIX/lib/libavutil.so" "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libavutil.so"
-          cp -L "$PREFIX/lib/libswresample.so" "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libswresample.so"
-          cp -L "$PREFIX/lib/libavcodec.so" "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libavcodec.so"
-          cp -L "$PREFIX/lib/libavformat.so" "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libavformat.so"
-
-          echo "Successfully compiled FFmpeg 6.0 arm64-v8a shared libraries:"
-          ls -lh "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/"
-
-      - name: Setup Gradle 8.4
-        uses: gradle/actions/setup-gradle@v3
+      - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.4'
 
-      - name: Assemble Debug APK with True FFmpeg C/C++ JNI Engine
-        run: gradle assembleDebug --no-daemon
+      - name: Validate release request
+        id: prepare
+        env:
+          MANUAL_PUBLISH: ${{ inputs.publish }}
+          MANUAL_SIGN: ${{ inputs.sign }}
+        run: |
+          set -euo pipefail
+          version=$(sed -nE 's/^val walkmanVersion = "([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' app/build.gradle.kts)
+          test -n "$version"
+          publish=false
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF_TYPE" == tag ]] || [[ "$MANUAL_PUBLISH" == true ]]; then
+            test "$GITHUB_REF" = "refs/tags/v$version"
+            publish=true
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          sign=false
+          if [[ "$publish" == true || "$MANUAL_SIGN" == true ]]; then
+            sign=true
+          fi
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "sign=$sign" >> "$GITHUB_OUTPUT"
 
-      - name: Upload Walkman Pro APK
-        uses: actions/upload-artifact@v4
+      - name: Run tests and lint
+        run: gradle testReleaseUnitTest lintRelease --no-daemon
+
+      - name: Assemble unsigned release APK
+        if: steps.prepare.outputs.sign != 'true'
+        run: gradle assembleRelease --no-daemon
+
+      - name: Assemble and verify signed release APK
+        if: steps.prepare.outputs.sign == 'true'
+        env:
+          WALKMAN_KEYSTORE_BASE64: ${{ secrets.WALKMAN_KEYSTORE_BASE64 }}
+          WALKMAN_STORE_PASSWORD: ${{ secrets.WALKMAN_STORE_PASSWORD }}
+          WALKMAN_KEY_ALIAS: ${{ secrets.WALKMAN_KEY_ALIAS }}
+          WALKMAN_KEY_PASSWORD: ${{ secrets.WALKMAN_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${WALKMAN_KEYSTORE_BASE64:?Missing keystore secret}"
+          : "${WALKMAN_STORE_PASSWORD:?Missing store password}"
+          : "${WALKMAN_KEY_ALIAS:?Missing key alias}"
+          : "${WALKMAN_KEY_PASSWORD:?Missing key password}"
+          umask 077
+          export WALKMAN_KEYSTORE_PATH="$RUNNER_TEMP/walkman-release.jks"
+          trap 'rm -f "$WALKMAN_KEYSTORE_PATH"' EXIT
+          printf '%s' "$WALKMAN_KEYSTORE_BASE64" | base64 --decode > "$WALKMAN_KEYSTORE_PATH"
+          gradle assembleRelease --no-daemon
+          signature=$("$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs --min-sdk-version 26 app/build/outputs/apk/release/app-release.apk)
+          expected=56a574706e4a8452260b27077da58dadcf6781866ff90fc733947e75d12e5530
+          [[ "$(sed -n 's/^Signer #[0-9]* certificate SHA-256 digest: //p' <<< "$signature")" == "$expected" ]]
+
+      - name: Prepare APK and SHA-256
+        env:
+          VERSION: ${{ steps.prepare.outputs.version }}
+          SIGN: ${{ steps.prepare.outputs.sign }}
+        run: |
+          set -euo pipefail
+          mkdir dist
+          if [[ "$SIGN" == true ]]; then
+            cp app/build/outputs/apk/release/app-release.apk "dist/Walkman-$VERSION-arm64.apk"
+          else
+            cp app/build/outputs/apk/release/app-release-unsigned.apk "dist/Walkman-$VERSION-arm64-unsigned.apk"
+          fi
+          cd dist
+          sha256sum ./*.apk > SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
         with:
           name: Walkman-APK
-          path: app/build/outputs/apk/debug/*.apk
+          path: dist/
+          if-no-files-found: error
 
-      - name: Extract Version from build.gradle.kts
-        id: extract_ver
-        run: |
-          VER=$(grep 'val walkmanVersion =' app/build.gradle.kts | cut -d '"' -f 2)
-          echo "version=$VER" >> $GITHUB_OUTPUT
-
-      - name: Publish GitHub Release for OTA Update
-        uses: softprops/action-gh-release@v2
+  publish:
+    needs: build
+    if: needs.build.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
         with:
-          tag_name: v${{ steps.extract_ver.outputs.version }}
-          name: Walkman ${{ steps.extract_ver.outputs.version }}
-          body: |
-            ### Walkman ${{ steps.extract_ver.outputs.version }} True FFmpeg 6.0 C/C++ NDK Build
-            - Biên dịch trực tiếp từ mã nguồn chính thức **FFmpeg 6.0 (`github.com/FFmpeg/FFmpeg`)** bằng Android NDK r26b Clang cho kiến trúc `arm64-v8a`.
-            - Liên kết C/C++ JNI trực tiếp với `libavformat.so`, `libavcodec.so`, `libswresample.so`, `libavutil.so` (Hỗ trợ giải mã phần cứng DSD64/128/256 & nén DST sang 32-bit Float).
-            - Hệ thống Mastering Biquad 64-bit: Bass gọn sâu, Mid ngọt rõ nét và tách lớp nhạc cụ chuẩn xác.
-          files: app/build/outputs/apk/debug/*.apk
-          draft: false
-          prerelease: false
+          name: Walkman-APK
+      - name: Publish verified APK
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          sha256sum --check SHA256SUMS.txt
+          gh release create "v$VERSION" "Walkman-$VERSION-arm64.apk" SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes

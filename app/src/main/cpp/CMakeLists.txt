@@ -2,7 +2,7 @@
 project("walkman_ffmpeg_jni")
 
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -ffast-math -fPIC")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")
 
 set(FFMPEG_JNI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI})
 set(FFMPEG_INC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -37,3 +37,5 @@ target_link_libraries(
     avutil
     ${log-lib}
 )
+
+target_link_options(walkman_ffmpeg_jni PRIVATE "-Wl,-z,max-page-size=16384")

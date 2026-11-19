@@ -1,13 +1,16 @@
-﻿package com.sony.walkmanpro
+package com.sony.walkmanpro
 
 import android.util.Log
 
-interface NativePcmCallback {
-    fun onNativePcmChunk(pcmBuffer: FloatArray, floatSampleCount: Int, currentPositionMs: Long): Int
-    fun getRealtimeDspParams(outParams: FloatArray): Int
+internal interface NativePcmCallback {
+    fun isCancelled(): Boolean
+    fun onNativeFormat(decoderRate: Int, sourceChannels: Int, durationMs: Long): Int
+    fun getPlaybackCommand(): Int
+    fun onNativeEnd(): Int
+    fun onNativePcmChunk(pcmBuffer: FloatArray, floatSampleCount: Int, startPositionMs: Long): Int
 }
 
-object FFmpegNativeDsdDecoder {
+internal object FFmpegNativeDsdDecoder {
     private var isLoaded = false
 
     init {
@@ -33,8 +36,6 @@ object FFmpegNativeDsdDecoder {
     @JvmStatic
     external fun nativeDecodeDsdFile(
         fd: Int,
-        startMs: Int,
-        targetPcmSampleRate: Int,
         callback: NativePcmCallback
     ): Int
 }

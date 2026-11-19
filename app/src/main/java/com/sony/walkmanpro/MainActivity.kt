@@ -157,6 +157,7 @@ private data class TrackSpecs(
 
 private fun formatRate(hz: Int) = if (hz >= 1_000_000) "${hz / 1_000_000.0} MHz" else "${hz / 1000.0} kHz"
 
+@UnstableApi
 private fun pcmEncodingLabel(encoding: Int) = when (encoding) {
     C.ENCODING_PCM_8BIT -> "PCM 8-bit"
     C.ENCODING_PCM_16BIT, C.ENCODING_PCM_16BIT_BIG_ENDIAN -> "PCM 16-bit"
@@ -277,14 +278,16 @@ class MainActivity : ComponentActivity() {
 
     private companion object {
         val externalOutputTypes = setOf(AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_USB_DEVICE,
-            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLE_HEADSET, AudioDeviceInfo.TYPE_BLE_SPEAKER,
-            AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES)
+            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES
+        ) + if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            setOf(AudioDeviceInfo.TYPE_BLE_HEADSET, AudioDeviceInfo.TYPE_BLE_SPEAKER)
+        } else emptySet()
     }
 
     private fun inspectTrackSpecs(context: Context, track: AudioTrack): TrackSpecs {
         if (track.isDsd()) {
             val header = runCatching {
-                context.contentResolver.openInputStream(track.uri)?.use(DsdHeader::read)
+                context.contentResolver.openInputStream(track.uri)?.use { DsdHeader.read(it) }
             }.getOrNull() ?: return TrackSpecs()
             val bitrate = if (header.compressed) null else header.sampleRate * header.channels / 1000
             return TrackSpecs(bitrate, header.sampleRate, if (header.compressed) "1-bit DST" else "1-bit")
@@ -300,11 +303,17 @@ class MainActivity : ComponentActivity() {
             val bits = when (encoding) {
                 C.ENCODING_PCM_8BIT -> "8-bit"
                 C.ENCODING_PCM_16BIT, C.ENCODING_PCM_16BIT_BIG_ENDIAN -> "16-bit"
-                android.media.AudioFormat.ENCODING_PCM_24BIT_PACKED, C.ENCODING_PCM_24BIT -> "24-bit"
-                android.media.AudioFormat.ENCODING_PCM_32BIT, C.ENCODING_PCM_32BIT -> "32-bit"
+                C.ENCODING_PCM_24BIT -> "24-bit"
+                C.ENCODING_PCM_32BIT -> "32-bit"
                 C.ENCODING_PCM_FLOAT -> "32-bit float"
-                else -> format.intOrNull("bits-per-sample")?.let { "$it-bit" }
-            }
+                else -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    when (encoding) {
+                        android.media.AudioFormat.ENCODING_PCM_24BIT_PACKED -> "24-bit"
+                        android.media.AudioFormat.ENCODING_PCM_32BIT -> "32-bit"
+                        else -> null
+                    }
+                } else null
+            } ?: format.intOrNull("bits-per-sample")?.let { "$it-bit" }
             TrackSpecs(format.intOrNull(MediaFormat.KEY_BIT_RATE)?.div(1000),
                 format.intOrNull(MediaFormat.KEY_SAMPLE_RATE), bits)
         } catch (_: Exception) {
@@ -2951,7 +2960,7 @@ fun SignatureAudioLabScreen(
 
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("Mega Bass", color = TextPure, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                            Text("Bass Boost", color = TextPure, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                             Text("+${(megaBass * 6).roundToInt()} dB", color = ChampagneGold, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
                         }
                         Slider(

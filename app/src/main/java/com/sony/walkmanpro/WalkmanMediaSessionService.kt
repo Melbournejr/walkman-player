@@ -13,6 +13,7 @@ import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.media.AudioManager
 import android.os.Binder
+import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.support.v4.media.MediaMetadataCompat
@@ -109,8 +110,10 @@ class WalkmanMediaSessionService : Service() {
                 started = true
             }
             if (!foreground) {
-                ServiceCompat.startForeground(this, NOTIFICATION, notification(controller.state.value),
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+                val serviceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                } else 0
+                ServiceCompat.startForeground(this, NOTIFICATION, notification(controller.state.value), serviceType)
                 foreground = true
             }
             true
@@ -120,7 +123,7 @@ class WalkmanMediaSessionService : Service() {
         }
     }
 
-    @SuppressLint("WakelockTimeout") // Released on pause, focus loss, engine switch, completion and service destruction.
+    @SuppressLint("Wakelock", "WakelockTimeout") // Released on pause, focus loss, engine switch, completion and service destruction.
     private fun publish() {
         if (controller.dsdPlaying && !dsdWakeLock.isHeld) dsdWakeLock.acquire()
         if (!controller.dsdPlaying && dsdWakeLock.isHeld) dsdWakeLock.release()

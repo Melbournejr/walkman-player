@@ -13,7 +13,7 @@ Baseline `main` tại `8d5eb65`. Phạm vi gồm Activity, service, thư viện,
 | P2 | Playlist cắt ở 2.000 mục, phục hồi theo index và tiêu đề, hiệu ứng tăng âm lượng cũ có thể tác động bài mới. | Giữ danh sách đầy đủ, phục hồi URI và hỗ trợ dữ liệu cũ. Fade-in thuộc controller và được hủy khi chuyển trạng thái. |
 | P2 | Audio Lab gán sample rate, bit depth và codec Bluetooth theo tên file/thiết bị; USB luôn được gắn nhãn bit-perfect. | Hiển thị metadata đọc được và thông số do ứng dụng yêu cầu. Thiết bị đã kết nối và route xác nhận được có nhãn riêng. |
 | P2 | FFmpeg n6.0, bộ lọc có tính lại hệ số mỗi buffer và cấu hình build dùng `-ffast-math`. | Chuyển sang n7.1.5 theo commit cố định, thu hẹp demuxer/decoder, cập nhật hệ số khi cấu hình đổi, bỏ fast math. |
-| P3 | Media3 1.2.1, Compose và toolchain còn các bản mới hơn. | Giữ bộ Android dependencies của baseline cho đợt sửa playback. Cần rà CVE và nâng dependency riêng sau khi có ma trận thiết bị. |
+| P3 | Media3 1.2.1, Compose và toolchain còn các bản mới hơn. | Bỏ Media3 Session không được gọi. Giữ phiên bản các dependency đang dùng để giới hạn phạm vi hồi quy. GitHub báo Dependabot alerts đang tắt, nên chưa có danh sách CVE đầy đủ từ kho. |
 
 ## Đường tín hiệu sau nâng cấp
 
